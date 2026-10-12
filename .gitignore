@@ -1,0 +1,59 @@
+# ============================================================================
+# Hiworld canbox / N32L406 rebuild
+#
+# NOTE ON BINARIES: do NOT add blanket *.bin / *.elf / *.iap rules here.
+# Most binaries in this repo are irreplaceable reverse-engineering artifacts,
+# not build output:
+#     reference/bootloader_0x08000000_8k.bin   the flash is RDP-L1 locked; this
+#                                              dump cannot be re-read over SWD
+#     reference/*.app.bin, *.iap               the stock image + pack template
+#     reference/parampage_*.bin                param-page dump
+#     tools/dumper/*.{bin,elf,iap}             the SRAM dumper that extracted it
+# Generated output is confined to build/, which is ignored wholesale below.
+# ============================================================================
+
+# ---- build output ----------------------------------------------------------
+build/
+*.o
+*.d
+*.map
+*.lst
+*.su
+*.hex
+
+# ---- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- editors / IDEs --------------------------------------------------------
+.vscode/
+.idea/
+*.code-workspace
+.cproject
+.project
+.settings/
+*.uvoptx
+*.uvguix.*
+RTE/
+
+# ---- OS --------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- vendor SDK ------------------------------------------------------------
+# The Nations N32L40x_Library is the authority for register layouts and IRQ
+# numbers (app/include/n32l406_hw.h is generated from it). It currently lives
+# outside the repo. If you vendor it in, drop these two lines and commit it.
+vendor/
+*.zip
+
+# ---- local / scratch -------------------------------------------------------
+scratch/
+tmp/
+*.log
+*.bak
+*.orig
+*.rej

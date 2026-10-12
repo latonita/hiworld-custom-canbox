@@ -1,0 +1,44 @@
+# ============================================================================
+# Line-ending and binary policy.
+#
+# WHY THIS FILE EXISTS: core.autocrlf is commonly `true` on Windows, and git's
+# "is this binary?" check is a heuristic (it looks for NUL bytes near the start
+# of the file). This repo contains firmware images that CANNOT be regenerated --
+# reference/bootloader_0x08000000_8k.bin above all, since the flash is RDP-L1
+# locked and that dump cost an SRAM-resident dumper to obtain. A misdetected
+# image would get CRLF-mangled on checkout and silently corrupt.
+# So every binary artifact type is marked binary explicitly rather than trusted
+# to the heuristic.
+# ============================================================================
+
+# Default: normalise text to LF in the repository.
+* text=auto eol=lf
+
+# ---- firmware / reverse-engineering artifacts: NEVER touch ----------------
+*.bin   binary
+*.iap   binary
+*.elf   binary
+*.hex   binary
+*.o     binary
+*.a     binary
+*.axf   binary
+*.pdf   binary
+*.zip   binary
+
+# ---- sources: explicit LF (GNU as / ld / gcc are indifferent, but this keeps
+#      builds and diffs identical across machines) --------------------------
+*.c     text eol=lf
+*.h     text eol=lf
+*.S     text eol=lf
+*.s     text eol=lf
+*.ld    text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf
+*.tsv   text eol=lf
+*.txt   text eol=lf
+*.sh    text eol=lf
+Makefile text eol=lf
+
+# Useful diffs for the decompiled C and the generated preamble.
+*.c     diff=cpp
+*.h     diff=cpp

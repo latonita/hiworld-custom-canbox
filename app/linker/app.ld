@@ -81,6 +81,18 @@ MEMORY
      *                           allocated by this script. Linker-managed .data/.bss
      *                           must be placed so it does not overlap them. */
     SRAM (rwx)  : ORIGIN = 0x20000000, LENGTH = 0x6000    /* 24 KB   (0x20000000..0x20005FFF) */
+
+    /* Everything the LINKER is allowed to allocate. Starts above the stock
+     * app's RAM, whose real extent comes from the stock image's own scatter
+     * table (Region$$Table @0x08009F8C), NOT from globals.h:
+     *     0x20000000..0x20000600  stack (MSP = 0x20000600, grows down)
+     *     0x20001000..0x200011D0  stock RW data (SystemCoreClock = 64 MHz)
+     *     0x200011D0..0x20003028  stock ZI (CAN rings, UART buffers, ...)
+     * globals.h names symbols only to 0x20001C20 and is incomplete -- trusting
+     * it would put new statics ~5 KB inside live stock RAM.
+     * Using a real region (rather than bare addresses) keeps .bss following
+     * .data automatically and restores linker overflow checking. */
+    SRAM_APP (rwx) : ORIGIN = 0x20003040, LENGTH = 0x2FC0  /* 0x20003040..0x20005FFF */
 }
 
 /* MSP is provided by the bootloader (0x20000600). _estack is defined only for
@@ -145,14 +157,21 @@ SECTIONS
      * (0x20001000 .. 0x20001C24, via globals.h) and are therefore NOT emitted
      * here. This region only holds compiler statics the rebuilt C introduces.
      *
-     * VMA = 0x20001C40: immediately ABOVE the fixed global block, 8-byte
-     * aligned, leaving 0x20001C40..0x20006000 (~17 KB) for linker-managed
-     * statics. Chosen over the 0x20000600..0x20000FFF gap because that gap is
-     * only 2.5 KB and sits directly on top of the bootloader's 1.5 KB stack
-     * (MSP = 0x20000600, grows down) -- a stack overflow there would silently
-     * corrupt .data instead of faulting. The ASSERT at the bottom enforces
-     * that .data/.bss stay clear of the fixed block either way. */
-    .data 0x20001C40 : AT ( _sidata )
+     * VMA = 0x20003040. The bound that matters is NOT the last symbol named in
+     * globals.h (0x20001C20) -- that map is incomplete. The authority is the
+     * stock image's own scatter table (Region$$Table @0x08009F8C), which says
+     * the app's RAM really is:
+     *
+     *     0x20000000..0x20000600   zero-init (the stack region)
+     *     0x20001000..0x200011D0   RW data   (one non-zero word: SystemCoreClock)
+     *     0x200011D0..0x20003028   zero-init (CAN rings, UART buffers, ...)
+     *
+     * so live stock RAM ends at 0x20003028, ~5 KB above the last named global.
+     * Anything the linker places below that would be silently overwritten by
+     * the stock code at runtime. 0x20003040 is the next 8-byte-aligned address
+     * clear of it, leaving 0x20003040..0x20006000 (~12 KB) for new statics.
+     * The ASSERT at the bottom enforces this. */
+    .data : AT ( _sidata )
     {
         . = ALIGN(4);
         _sdata = .;
@@ -160,9 +179,15 @@ SECTIONS
         *(.data*)
         . = ALIGN(4);
         _edata = .;
-    } > SRAM
+    } > SRAM_APP
 
-    /* ---- Zero-initialised data (BSS) ------------------------------------- */
+    /* ---- Zero-initialised data (BSS) -------------------------------------
+     * Allocated from SRAM_APP so .bss follows .data automatically and the
+     * linker reports an overflow if the two outgrow the free RAM. Do NOT give
+     * .data a bare VMA and "> SRAM" instead: an explicit address does not
+     * advance the region pointer, so .bss would restart at ORIGIN(SRAM) =
+     * 0x20000000, on top of the stack -- silently fine while .bss is empty,
+     * corrupting the stack the moment a real static appears. */
     .bss (NOLOAD) :
     {
         . = ALIGN(4);
@@ -174,7 +199,7 @@ SECTIONS
         . = ALIGN(4);
         _ebss = .;
         __bss_end__ = _ebss;
-    } > SRAM
+    } > SRAM_APP
 
     /* Optional heap/stack guard region (unused by the stock app). */
     ._user_heap_stack (NOLOAD) :
@@ -185,7 +210,7 @@ SECTIONS
         . = . + _Min_Heap_Size;
         . = . + _Min_Stack_Size;
         . = ALIGN(8);
-    } > SRAM
+    } > SRAM_APP
 
     /DISCARD/ : { *(.ARM.attributes) *(.comment) *(.note*) }
 }
@@ -196,5 +221,8 @@ SECTIONS
 ASSERT(DEFINED(image_entry), "image_entry (reset veneer label) is undefined — provide startup/crt0.S")
 ASSERT(image_entry == 0x08002202,
        "ENTRY VENEER NOT AT 0x08002202 — the bootloader `bl 0x08002202` would miss it")
-ASSERT((_ebss <= 0x20001000) || (_sbss >= 0x20001C40),
-       "linker-managed .bss overlaps the fixed absolute global block at 0x20001000 (see globals.h)")
+ASSERT(_sdata >= 0x20003028,
+       "linker-managed .data starts inside the stock app's RAM block (which ends at \
+0x20003028 per the stock Region$$Table -- NOT at globals.h's last symbol 0x20001C20)")
+ASSERT(_ebss <= 0x20006000,
+       "linker-managed .data/.bss runs past the end of the 24 KB SRAM")

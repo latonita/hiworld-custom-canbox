@@ -107,17 +107,20 @@ typedef struct {
     __IO  uint32_t ESTS;               /* +0x018 */
     __IO  uint32_t BTIM;               /* +0x01C */
     __IO  uint32_t RESERVED0[88];      /* +0x020 */
-    __IO  uint32_t RESERVED1[12];      /* +0x180 */
-    __IO  uint32_t FMC;                /* +0x1B0 */
-    __IO  uint32_t FM1;                /* +0x1B4 */
-    __IO  uint32_t RESERVED2;          /* +0x1B8 */
-    __IO  uint32_t FS1;                /* +0x1BC */
-    __IO  uint32_t RESERVED3;          /* +0x1C0 */
-    __IO  uint32_t FFA1;               /* +0x1C4 */
-    __IO  uint32_t RESERVED4;          /* +0x1C8 */
-    __IO  uint32_t FA1;                /* +0x1CC */
-    __IO  uint32_t RESERVED5[8];       /* +0x1D0 */
-} CAN_Module;   /* size 0x1F0 */
+    __IO  CAN_TxMailBox_Param sTxMailBox[3]; /* +0x180 */
+    __IO  CAN_FIFOMailBox_Param sFIFOMailBox[2]; /* +0x1B0 */
+    __IO  uint32_t RESERVED1[12];      /* +0x1D0 */
+    __IO  uint32_t FMC;                /* +0x200 */
+    __IO  uint32_t FM1;                /* +0x204 */
+    __IO  uint32_t RESERVED2;          /* +0x208 */
+    __IO  uint32_t FS1;                /* +0x20C */
+    __IO  uint32_t RESERVED3;          /* +0x210 */
+    __IO  uint32_t FFA1;               /* +0x214 */
+    __IO  uint32_t RESERVED4;          /* +0x218 */
+    __IO  uint32_t FA1;                /* +0x21C */
+    __IO  uint32_t RESERVED5[8];       /* +0x220 */
+    __IO  CAN_FilterRegister_Param sFilterRegister[14]; /* +0x240 */
+} CAN_Module;   /* size 0x2B0 */
 
 typedef struct {
     __IO  uint32_t CTRL1;              /* +0x000 */

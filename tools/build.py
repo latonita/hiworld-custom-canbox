@@ -57,6 +57,7 @@ REF_BIN = 'reference/2429-H1N4JPF20A-220524.app.bin'
 def run(cmd, verbose):
     if verbose:
         print('  ' + ' '.join(cmd))
+    sys.stdout.flush()
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     if r.stdout.strip():
         print(r.stdout.rstrip())
@@ -120,6 +121,7 @@ def main():
         return 1
 
     print('verifying preamble:')
+    sys.stdout.flush()
     r = subprocess.run([sys.executable, 'tools/verify_preamble.py', binf,
                         '--compare', REF_BIN], cwd=ROOT, text=True)
     if r.returncode != 0:

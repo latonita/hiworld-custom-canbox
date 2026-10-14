@@ -22,7 +22,7 @@ The flash holds two independent programs:
 | **Application** | `0x08002000`–`0x0801F7FF` (118 KB) | **Yes — this is the target.** Delivered as the `.iap` payload. |
 | Param / EEPROM | `0x0801F800`–`0x0801FFFF` (2 KB) | No — runtime data, must not be written by the image. |
 
-The rebuild loop is: reconstruct real C from `app/src/*.c` subsystem by subsystem →
+The rebuild loop is: reconstruct real C from `reference/decompile/app/*.c` subsystem by subsystem →
 compile for Cortex-M4 Thumb → link with `app/linker/app.ld` → diff the produced `.bin`
 against `reference/2429-H1N4JPF20A-220524.app.bin` → pack to `.iap` → flash over UART →
 verify. The bootloader accepts any correctly-packed image (no signature), so the path is
@@ -86,43 +86,45 @@ entry at link time.
 
 ---
 
-## 4. Recommended workflow
+## 4. Build, test, verify
 
-Work toward a **functional-equivalent** image first; pursue byte-identical only where it
-buys confidence (see §7).
+The reconstruction is **done**: `app/hal/` (C11 register drivers), `app/services/` and
+`app/logic/` (C++17) are the firmware, and `reference/decompile/app/*.c` is the Ghidra
+behavioural spec they were written against. `docs/ARCHITECTURE.md` is the layer contract.
 
-1. **Reconstruct subsystem by subsystem.** `app/src/*.c` is named Ghidra output with
-   correct addresses but pseudo-types (`undefined`, `uint`, `byte`) and `DAT_` constants;
-   it does not compile as-is. Turn one subsystem at a time into clean C, using the fixed
-   RAM globals from `app/include/globals.h` and the MMIO bases in
-   `app/include/registers.h`. Sensible order: `rcc` → `gpio` → `tim` (1 ms tick) →
-   `uart` → `can` + `can_rx_decode` → `flash`/param page → `core`/scheduler → `wwdg` →
-   `misc`. The scheduler and ISR map are documented in `docs/hiworld-startup-sequence.md`
-   §3–§6.
-2. **Write `startup/crt0.S`** (the `.image_entry` section) to reproduce the preamble of §2:
-   crt0 fragments, the 59-veneer array at the correct addresses, and the entry veneer at
-   `0x202`. Point each veneer's `bl` at the corresponding reconstructed handler.
-3. **Compile and link:**
-   ```
-   arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -mfloat-abi=soft -Os \
-       -ffreestanding -nostartfiles -Iapp/include \
-       startup/crt0.S app/src/*.c \
-       -T app/linker/app.ld -Wl,--gc-sections -Wl,-Map=app.map -o app.elf
-   arm-none-eabi-objcopy -O binary app.elf app.bin
-   ```
-   The `app.ld` `ASSERT`s fail the link if the entry veneer is not at `0x08002202` or if
-   linker-managed `.bss` collides with the fixed global block.
-4. **Diff against the reference.** The stock decoded image is
-   `reference/2429-H1N4JPF20A-220524.app.bin` (32 KB). Compare:
-   ```
-   cmp -l app.bin reference/2429-H1N4JPF20A-220524.app.bin | head
-   # or a visual diff of the first 0x210 bytes to confirm the preamble/entry:
-   xxd app.bin | sed -n '1,34p'
-   ```
-   Priorities, in order: (a) bytes `0x000..0x209` (crt0 + veneer array + entry veneer)
-   match or are provably equivalent; (b) the version string `H1N4JPF20A-220524` is present;
-   (c) behaviour matches on the bench. Early on, expect the code body to differ (different
-   compiler) while the preamble matches — that is the intended state.
+```powershell
+python toolsuild.py            # compile + link + verify the preamble + integration checks
+python toolsuild.py --pack     # ...and package to buildpp.iap
+python tools	est.py             # host unit tests for the logic layers
+```
+
+`build.py` discovers sources from the three layer directories, startup first, and fails the
+build if:
+
+- the entry veneer is not at `0x08002202`, or a dispatched veneer slot moved
+  (`tools/verify_preamble.py`, against the bootloader dump — not against the wrong
+  `0x08002072 + 8*IRQn` formula);
+- a C++ static constructor was emitted (this image never runs `.init_array`);
+- an interrupt handler name drifted and silently left a `crt0.S` trap in place, or one stock
+  function got reconstructed twice under two names (`tools/check_stubs.py`).
+
+**Diff against the reference.** The stock decoded image is
+`reference/2429-H1N4JPF20A-220524.app.bin`:
+
+```bash
+cmp -l build/app.bin reference/2429-H1N4JPF20A-220524.app.bin | head
+xxd -l 0x210 build/app.bin        # the preamble, which is what must match
+```
+
+Priorities, in order: (a) bytes `0x000..0x209` match or are provably equivalent; (b) the
+version string is present; (c) behaviour matches on the bench. The code body differs — a
+different compiler — and that is the intended state.
+
+**SRAM note.** The rebuild no longer reproduces the stock firmware's absolute RAM map. Its
+state is one linker-placed `.bss` object (`app/include/ram_map.hpp`); the original addresses
+survive as `stock @0x...` comments and in `ghidra/merged_globals.tsv`. The only externally
+known address is the version string, and `iap_upload.py --verify` resolves that from
+`build/app.elf` rather than hardcoding it.
 
 ---
 
@@ -166,13 +168,23 @@ python tools/iap_upload.py app-rebuilt.iap --port COM17 --reset powercycle --ver
   bootloader cannot erase/program flash while the core is in debug mode. Use this after any
   SWD/pyOCD session. `--reset nrst` is faster but only safe when the chip is not in a
   latched debug state.
-- **`--verify`** reads back the 17-byte version string the app copies to SRAM
-  `0x20001B86` at init (SRAM is RDP-exempt, readable over SWD while the app runs). Seeing
+- **`--verify`** reads back the 17-byte version string the app copies into SRAM at init
+  (SRAM is RDP-exempt, readable over SWD while the app runs; flash is not). Seeing
   `H1N4JPF20A-220524` (or your rebuilt string) proves the new image booted.
+  The address is **resolved from `build/app.elf`** (symbol `g_versionString`), not
+  hardcoded — the rebuild no longer reproduces the stock firmware's absolute SRAM map.
+  `0x20001B86` is where the *factory* image keeps it, and the uploader falls back to
+  that with a warning if it cannot resolve the symbol. Build before verifying, or pass
+  `--elf` / `--version-addr`.
 - **Bench caveat:** with no CAN bus attached the app is **silent** — it stays in phase 1
   until 3 CAN frames arrive and sends nothing on UART. So "no `AA 55` traffic" on a bare
   bench is expected, not a failure; verify via the SRAM version string, or inject ≥3 CAN
   frames at 83.333 kbit/s to bring up phase 2. See `docs/hiworld-startup-sequence.md` §9.
+- **You have ~18.4 s to read the version string.** With no bus, phase 1 gives up and the
+  box enters deep sleep at t ≈ 18.4 s (the 8th autobaud retry is at 16.38 s; the give-up
+  branch runs on the *next* 2048 ms tick). After that the SWD read fails with "No ACK"
+  because the core is stopped — that is the box working correctly, not a bad flash.
+  Re-power it, or feed it CAN frames, and read again.
 - **Line-sharing hazard:** the same tty carries normal traffic; a stray transmitter during
   an update corrupts a record → the loader replies `R` and aborts with no retransmission.
   Keep the line quiet during flashing.
@@ -187,8 +199,8 @@ image cannot brick the box — just reflash.
 | Item | Status / risk | How to resolve |
 |---|---|---|
 | **Interrupt dispatch under shared VTOR** | ✅ **RESOLVED.** IRQs vector into the veneer array, but the map is **not** `0x08002072 + 8*IRQn` — that holds only for IRQ0..10 and IRQ23..41. The app's array is in **STM32F103 vector order** while the chip is an N32L406; the bootloader's table is the shim between them. The "anomaly" was a misreading: `CAN_RX0_IRQn = 54` on this part, and the bootloader maps vector 54 → veneer slot 29 = the CAN RX handler. `NVIC_Init(0x36)` is correct. | Done — read off `reference/bootloader_0x08000000_8k.bin` and confirmed against the vendor SDK's `IRQn_Type`. Map encoded in `app/startup/crt0.S`; enforced on every build by `tools/verify_preamble.py`. See `docs/notes/vector-table-slot-map.md`. |
-| **Float ABI** | Chosen `-mfloat-abi=soft`; evidence is a no-FPU-opcode scan of the reference, not a disassembly. Small risk the original was `softfp` with an FPU enable we haven't seen. | Disassemble the reference (`arm-none-eabi-objdump -d`, not available in this environment yet) and check for VFP ops / a CPACR write in crt0. If present, match it; otherwise soft is correct. |
+| **Float ABI** | **RESOLVED.** `-mfloat-abi=soft`. The stock image contains no VFP instruction and no CPACR write, confirmed by disassembly of `reference/2429-H1N4JPF20A-220524.app.bin`, not just by an opcode scan. | Done. |
 | **Exact crt0 preamble** | The `0x08002000..0x08002201` layout (crt0 fragments + 59 veneers) must be reproduced by hand; GCC will not generate an ARM-C-lib `__main`/`Region$$Table` scatterload. | Hand-write `startup/crt0.S` to match the reference bytes (disassemble `0x000..0x209`); point veneers at rebuilt handlers. Lean on the `app.ld` entry ASSERT. |
 | **Byte-identical vs functional-equivalent** | GCC output will differ from the vendor's Keil/armcc code body, so a full byte match is unrealistic. Byte-identity matters only for the preamble/veneers and the fixed global addresses. | Target byte-identity for `0x000..0x209` and the RAM map; target functional equivalence for the rest, validated by the bench behaviour in `docs/hiworld-startup-sequence.md` §5–§9. |
-| **SRAM layout for rebuilt statics** | The stock globals are at fixed absolute addresses (`0x20001000+`, via `globals.h`) and are not linker-allocated. Any `.data`/`.bss` the new C introduces must avoid them and the stack (`0x20000000..0x20000600`). The `app.ld` VMA for `.data` is provisional. | Keep using the `globals.h` absolute pointers for known state; place linker-managed statics in a verified-free range (and/or reproduce the original scatter-loaded map). The `app.ld` overlap ASSERT guards the common mistake. |
+| **SRAM layout for rebuilt statics** | **RESOLVED, and the premise is gone.** The rebuild no longer reproduces the stock firmware's absolute RAM map: all state is one linker-placed `.bss` object (`app/include/ram_map.hpp`, defined in `app/services/app_state.cpp`). Nothing sits at a fixed SRAM address, so there is nothing for new statics to collide with; the only reserved region is the stack below `0x20000600`, which `app.ld` keeps out of the allocatable region. `app/include/globals.h` was deleted -- the address key for reading the decompile is `ghidra/merged_globals.tsv`. | Done. |
 | **Pack template availability** | `iaptool.py pack` needs a box-2429 record 0 (magic + key). `reference/2429-H1N4JPF20A-220524.iap` is in-repo and is the primary template; `tools/dumper/dumper2.iap` is an equivalent fallback (same box-2429 magic/key). |

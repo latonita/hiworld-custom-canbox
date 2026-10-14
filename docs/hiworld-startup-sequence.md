@@ -42,7 +42,7 @@ Times are relative to the first instruction of `main_loop` and assume the 1 ms t
 | 14 | 0 | `main_loop` | `*0x20001190 = 0` (param-rewrite attempt counter), `CPSIE i`. **The clock starts here.** |
 | 15 | 0 … | **Phase 1** | `while (wwdg_kick(), *(u32*)0x20001118 < 3) { … }` — spin until **3 CAN frames** have landed in the RX ring. §5. |
 | 16 | +2.048 s, +4.096 s, … | phase 1 body | Every 2048 ms: set bit6 of the state byte, **toggle the CAN profile**, erase + reprogram flash page `0x0801F800`, re-init CAN at the other baud. At most 8 times. |
-| 17 | ≈16.4 s (no bus) | `FUN_080032f6` @`0x080032f6` | Give up: CAN sleep → shut everything down → **WFI deep sleep**. §8/§9. |
+| 17 | ≈18.4 s (no bus) | `FUN_080032f6` @`0x080032f6` | Give up: CAN sleep → shut everything down → **WFI deep sleep**. §8/§9. |
 | 18 | at the 3rd CAN frame | `main_loop` | Latch active profile `*0x2000118f = param[1]`; re-run `FUN_08007b6c`; `FUN_08007b4c` re-inits CAN at the winning baud; **bus state `0x20001139 = 3`**; `*(u32*)0x20001194 = 800`. |
 | 19 | +0 … 8 ms | **Phase 2** entered | Free-running `do { wwdg_kick(); … } while(1)` driven by three tick flags. §6. |
 | 20 | first 8 ms flag | `can_autobaud_state_machine` @`0x0800755c` | `FUN_08007d44` runs the CAN decoder; state 3 → builds and enqueues **CAN ID 0x416, DLC 8, `FE 16 3F FF FF FF FF FF`**, then state ← 2. |
@@ -525,7 +525,7 @@ Paths to it:
 | Path | Trigger | Reachable with no CAN? |
 |---|---|---|
 | `fatal_error_reset` @`0x08002e64` → `wwdg_init(); wwdg_force_reset();` | ~50 exception/IRQ veneer handlers call it, incl. SysTick (`0x0800206a`), WWDG EWI (`0x08002072`, code `0x72`), and **EXTI9_5** (`FUN_08002f3e`, code `0x85`) | **Yes** — any fault, and the deep-sleep wake path |
-| `FUN_080032f6` @`0x080032f6`, final statement after WFI wake | phase-1 give-up (8 retries), or bus state 0 with ACC lost | **Yes** — phase 1, ≈16.4 s |
+| `FUN_080032f6` @`0x080032f6`, final statement after WFI wake | phase-1 give-up (8 retries), or bus state 0 with ACC lost | **Yes** — phase 1, ≈18.4 s |
 | `can_autobaud_state_machine` state 0, `alive == 0` | ACC / ignition lost | No (phase 2 only) |
 | `can_autobaud_state_machine` state 2, timer expired | bus silent past the state-2 timeout | No (phase 2 only) |
 | `uart_rx_dispatch` @`0x08008a96`, frame cmd byte == `0xE0` | **head unit commands a reset over UART** | No (phase 2 only) |
@@ -581,7 +581,10 @@ Everything below follows from §5, §7 and §8. CONFIRMED unless noted.
    cycles per bench power-up** — worth remembering if you leave a unit powered on a desk, since
    that page holds the persistent configuration.
 
-4. **t ≈ 16.4 s** — the attempt counter reaches 8. Because the `else` branch does not clear the
+4. **t ≈ 16.4 s** — the attempt counter reaches 8 (the 8th and last retry).
+   The give-up branch is NOT taken yet: it is only reached on the next 2048 ms
+   tick, at **t ≈ 18.4 s**, when the counter is already 8. Because the `else`
+   branch does not clear the
    2048 ms flag, `FUN_080032f6` is then invoked on every loop pass. CAN is put to sleep (which
    succeeds on an idle bus), PB12 goes high (transceiver → standby), all four status outputs go
    low, PB3 / PB2 become inputs, USART2 is disabled, the WWDG clock is turned off, **PB8 is

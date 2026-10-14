@@ -24,19 +24,42 @@ app must reproduce that entry convention and be packaged back into `.iap`. See
 
 ```
 README.md                  — this file
-app/
-  src/*.c                  — decompiled, NAMED C by subsystem (can, uart, gpio, tim, rcc, adc, …)
-  src/can_rx_decode.c      — the two CAN profile decoders (83k = this car, 125k = FCA variant)
-  include/                 — n32l406.h (umbrella), registers.h (MMIO bases), globals.h (RAM map)
+app/                       — THE REBUILD. Three layers; see docs/ARCHITECTURE.md.
+  startup/crt0.S           — the fixed preamble: 59 IRQ veneers + the 0x08002202 entry
+  startup/startup.c        — RAM init, then main_loop (replaces the ARM C-lib __main chain)
+  hal/*.{c,h}              — C11 register drivers. MMIO only, no RAM state (data = bss = 0)
+  services/*.{cpp,hpp}     — C++17 stateful services: scheduler, clock, timers, params,
+                             CAN transport, head-unit link, board I/O, power
+  logic/*.{cpp,hpp}        — C++17 vehicle behaviour: the two CAN profile decoders, the
+                             periodic TX table, cluster text, link state, main loop,
+                             and the five interrupt entry points
+  include/ram_map.hpp      — all runtime state as one typed struct, linker-allocated;
+                             each field notes the stock address it came from
+  include/app_config.hpp   — clock tree, tick cadences, protocol constants, box identity
+  include/n32l406_hw.h     — peripheral register layouts, generated from the vendor SDK
   linker/app.ld            — linker script for the app region (see REBUILD.md)
   REBUILD.md               — how to rebuild & re-flash the app (entry convention, IAP, verify)
   MEMORY_MAP.md            — full flash + SRAM map
+
+  src/*.c                  — REFERENCE ONLY: decompiled, NAMED C by subsystem. This is the
+                             behavioural spec the rebuild is written against, not built.
+  src/can_rx_decode.c      — the two CAN profile decoders (83k = this car, 125k = FCA variant)
+  include/n32l406.h        — Ghidra pseudo-types for reference/decompile/app/ only
+                             (the old include/globals.h absolute-address macros are gone;
+                             the address -> name key is ghidra/merged_globals.tsv)
+  services/app_state.cpp   — the one definition of the firmware's runtime state
 bootloader/
   src/*.c                  — decompiled bootloader (reference only; do not rebuild)
   src/n32l406.h
 docs/                      — all analysis documents
   notes/                   — field/bench notes (RDP, SWD, IAP bench setup, profiles, …)
+tests/
+  host/                    — host unit tests: the logic layers built for x86 against a
+                             recording fake HAL. `python tools/test.py`
 tools/
+  build.py                 — compile + link + verify the preamble (the primary build driver)
+  test.py                  — build and run the host unit tests
+  verify_preamble.py       — fails the build if the entry veneer or a veneer slot moved
   iaptool.py               — pack/unpack/verify .iap containers
   iap_upload.py            — drive the bootloader over UART (reset→U→magic→records→E)
   dumper/                  — the SRAM-copy bootloader dumper (how the 8 KB loader was extracted)
@@ -53,12 +76,30 @@ reference/
 
 ## Source status (important)
 
-`app/src/*.c` and `bootloader/src/*.c` are **Ghidra decompiler output with names applied**,
-not yet clean compilable C. They are rebuild *scaffolding*: real function/global/register
-names, correct addresses, and plate comments, but with Ghidra pseudo-types
-(`undefined`, `uint`, `byte`) declared in `n32l406.h`, and `DAT_` left only where it points
-to flash constant tables or dead code. Use them to reconstruct real C subsystem by subsystem,
-diffing the rebuilt binary against `reference/2429-H1N4JPF20A-220524.app.bin`.
+There are two generations of source here, and only one of them is built.
+
+**`app/hal/`, `app/services/`, `app/logic/`, `app/startup/` — the rebuild.** Real,
+compilable C11 + C++17. This is what `python tools/build.py` turns into `build/app.bin`.
+Layering and the public API of every module are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md);
+the C++ subset and its recorded deviations are in [`docs/misra-cpp.md`](docs/misra-cpp.md).
+
+**`reference/decompile/app/*.c` and `reference/decompile/bootloader/*.c` — the spec.** Ghidra decompiler output with names
+applied: real function/global/register names, correct addresses, and plate comments, but
+with Ghidra pseudo-types (`undefined`, `uint`, `byte`) declared in `n32l406.h`, and `DAT_`
+left only where it points to flash constant tables or dead code. **These do not compile and
+are not meant to.** They are the behavioural reference the rebuild is written against and
+the host tests are written from, and they stay in the tree for exactly that reason.
+
+> **A note on `app/port/` references.** Comments throughout the rebuilt layers cite files like
+> `the retired app/port/hw_can.c`. That was the *earlier single-layer C port* — one flat directory, weak
+> no-op stubs between subsystems, and absolute-address macros for state. The layering refactor
+> replaced it, and its explanatory comments were carried forward into the files that cite it,
+> so the references record where a piece of reasoning came from. The directory itself is in git
+> history (it was last present at commit `ff070e1`) if you ever want to diff against it.
+
+Every reconstructed function carries the original flash address of what it reproduces in a
+`/* 0x0800xxxx */` comment, so any part of the rebuild can be diffed back against Ghidra or
+against `reference/2429-H1N4JPF20A-220524.app.bin`.
 
 This box is **box 2429 / part H1N4JPF20A** (Jeep WK family, 83.333 kbit body bus). The 16-byte
 `.iap` target magic for it is `01 09 07 08 00 02 01 07 91 32 47 a4` + `4e 33 14 f2` ("N3").

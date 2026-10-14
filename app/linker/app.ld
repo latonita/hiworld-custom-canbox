@@ -76,30 +76,30 @@ MEMORY
     /* Full 24 KB SRAM. NOTE the two reserved sub-ranges handled in SECTIONS:
      *   0x20000000..0x20000600  system stack (MSP top = 0x20000600, grows down,
      *                           set by the bootloader — this image must not use it)
-     *   0x20001000..~0x20001C24 the app's fixed absolute globals (see globals.h /
-     *                           MEMORY_MAP.md) are addressed by hard pointers, NOT
-     *                           allocated by this script. Linker-managed .data/.bss
-     *                           must be placed so it does not overlap them. */
+     * Everything from 0x20000600 up is linker-allocated; the application keeps no
+     * state at a fixed address (see app/include/ram_map.hpp). */
     SRAM (rwx)  : ORIGIN = 0x20000000, LENGTH = 0x6000    /* 24 KB   (0x20000000..0x20005FFF) */
 
-    /* Everything the LINKER is allowed to allocate. Starts above the stock
-     * app's RAM, whose real extent comes from the stock image's own scatter
-     * table (Region$$Table @0x08009F8C), NOT from globals.h:
-     *     0x20000000..0x20000600  stack (MSP = 0x20000600, grows down)
-     *     0x20001000..0x200011D0  stock RW data (SystemCoreClock = 64 MHz)
-     *     0x200011D0..0x20003028  stock ZI (CAN rings, UART buffers, ...)
-     * globals.h names symbols only to 0x20001C20 and is incomplete -- trusting
-     * it would put new statics ~5 KB inside live stock RAM.
-     * Using a real region (rather than bare addresses) keeps .bss following
-     * .data automatically and restores linker overflow checking. */
-    SRAM_APP (rwx) : ORIGIN = 0x20003040, LENGTH = 0x2FC0  /* 0x20003040..0x20005FFF */
+    /* Everything the LINKER is allowed to allocate: all of SRAM above the
+     * stack the bootloader set up.
+     *
+     * This used to start at 0x20003040, above a hand-reserved copy of the stock
+     * firmware's absolute RAM map (0x20001000..0x20003028). Nothing required
+     * that map -- it was fidelity to the original, not a hardware constraint --
+     * and the application's state is now an ordinary .bss object. Dropping it
+     * returned ~10 KB and removed the only overlap hazard in the script.
+     *
+     * The lower bound is real: the bootloader leaves MSP = 0x20000600 and the
+     * stack grows DOWN from there, so 0x20000000..0x20000600 belongs to it. */
+    SRAM_APP (rwx) : ORIGIN = 0x20000600, LENGTH = 0x5A00  /* 0x20000600..0x20005FFF */
 }
 
 /* MSP is provided by the bootloader (0x20000600). _estack is defined only for
  * completeness / any crt0 that wants to re-init SP; the stock app does not. */
 _estack      = 0x20000600;
-PROVIDE(_Min_Heap_Size  = 0);
-PROVIDE(_Min_Stack_Size = 0x400);
+/* The usable stack is 0x20000000..0x20000600 (1.5 KB), below the MSP the
+ * bootloader hands us. Nothing in this script allocates it -- it is simply not
+ * part of the region the linker may use. */
 
 SECTIONS
 {
@@ -139,6 +139,43 @@ SECTIONS
         . = ALIGN(4);
     } > FLASH
 
+    /* ---- C++ static initialisers: MUST BE EMPTY -------------------------
+     * This image has no C runtime startup. app/startup/crt0.S reaches
+     * _start_c, which zeroes RAM and calls main_loop; nothing ever walks
+     * .init_array. A namespace-scope object with a runtime constructor would
+     * therefore be left UNCONSTRUCTED and used anyway -- a fault that shows up
+     * as unexplained behaviour in a car, not as a build error.
+     *
+     * So the sections are collected (not discarded, or the symbols would be
+     * undefined) and then asserted empty at the bottom of this file. Keeping a
+     * C++ object alive across reset is done the way the rest of this firmware
+     * does it: a field in ram::AppRam, zeroed by _start_c. */
+    .preinit_array :
+    {
+        . = ALIGN(4);
+        __preinit_array_start = .;
+        KEEP(*(.preinit_array*))
+        __preinit_array_end = .;
+    } > FLASH
+
+    .init_array :
+    {
+        . = ALIGN(4);
+        __init_array_start = .;
+        KEEP(*(SORT(.init_array.*)))
+        KEEP(*(.init_array*))
+        __init_array_end = .;
+    } > FLASH
+
+    .fini_array :
+    {
+        . = ALIGN(4);
+        __fini_array_start = .;
+        KEEP(*(SORT(.fini_array.*)))
+        KEEP(*(.fini_array*))
+        __fini_array_end = .;
+    } > FLASH
+
     /* ARM exception-unwind tables (usually empty with -fno-exceptions). */
     .ARM.extab : { *(.ARM.extab* .gnu.linkonce.armextab.*) } > FLASH
     .ARM.exidx :
@@ -152,25 +189,7 @@ SECTIONS
     . = ALIGN(4);
     _sidata = LOADADDR(.data);
 
-    /* ---- Initialised data (VMA in SRAM, LMA in FLASH) --------------------
-     * NOTE: the stock firmware's named globals live at FIXED absolute addresses
-     * (0x20001000 .. 0x20001C24, via globals.h) and are therefore NOT emitted
-     * here. This region only holds compiler statics the rebuilt C introduces.
-     *
-     * VMA = 0x20003040. The bound that matters is NOT the last symbol named in
-     * globals.h (0x20001C20) -- that map is incomplete. The authority is the
-     * stock image's own scatter table (Region$$Table @0x08009F8C), which says
-     * the app's RAM really is:
-     *
-     *     0x20000000..0x20000600   zero-init (the stack region)
-     *     0x20001000..0x200011D0   RW data   (one non-zero word: SystemCoreClock)
-     *     0x200011D0..0x20003028   zero-init (CAN rings, UART buffers, ...)
-     *
-     * so live stock RAM ends at 0x20003028, ~5 KB above the last named global.
-     * Anything the linker places below that would be silently overwritten by
-     * the stock code at runtime. 0x20003040 is the next 8-byte-aligned address
-     * clear of it, leaving 0x20003040..0x20006000 (~12 KB) for new statics.
-     * The ASSERT at the bottom enforces this. */
+    /* ---- Initialised data (VMA in SRAM, LMA in FLASH) -------------------- */
     .data : AT ( _sidata )
     {
         . = ALIGN(4);
@@ -201,16 +220,19 @@ SECTIONS
         __bss_end__ = _ebss;
     } > SRAM_APP
 
-    /* Optional heap/stack guard region (unused by the stock app). */
-    ._user_heap_stack (NOLOAD) :
-    {
-        . = ALIGN(8);
-        PROVIDE ( end = . );
-        PROVIDE ( _end = . );
-        . = . + _Min_Heap_Size;
-        . = . + _Min_Stack_Size;
-        . = ALIGN(8);
-    } > SRAM_APP
+    /* NO HEAP, NO STACK RESERVATION HERE.
+     *
+     * A generic linker script reserves ._user_heap_stack at this point. This one
+     * used to as well, which quietly cost 1028 bytes and overstated the
+     * firmware's RAM use by 40%.
+     *
+     * Both halves are wrong for this image:
+     *   - there is no heap. Nothing calls malloc; the build links -nostdlib, so
+     *     there is no sbrk to hand a heap to and no `end` symbol is referenced.
+     *   - the stack is NOT here. The bootloader leaves MSP = 0x20000600 and the
+     *     stack grows DOWN from there, through 0x20000000. Reserving room for it
+     *     above .bss reserved space for a stack that lives somewhere else.
+     * ------------------------------------------------------------------------*/
 
     /DISCARD/ : { *(.ARM.attributes) *(.comment) *(.note*) }
 }
@@ -221,8 +243,19 @@ SECTIONS
 ASSERT(DEFINED(image_entry), "image_entry (reset veneer label) is undefined — provide startup/crt0.S")
 ASSERT(image_entry == 0x08002202,
        "ENTRY VENEER NOT AT 0x08002202 — the bootloader `bl 0x08002202` would miss it")
-ASSERT(_sdata >= 0x20003028,
-       "linker-managed .data starts inside the stock app's RAM block (which ends at \
-0x20003028 per the stock Region$$Table -- NOT at globals.h's last symbol 0x20001C20)")
+ASSERT(_sdata >= 0x20000600,
+       "linker-allocated data starts inside the system stack (the bootloader leaves \
+MSP = 0x20000600 and the stack grows down from there)")
 ASSERT(_ebss <= 0x20006000,
        "linker-managed .data/.bss runs past the end of the 24 KB SRAM")
+
+/* No C++ static constructors. See the .init_array block above: this image never
+ * runs them, so one being emitted means an object would be used uninitialised.
+ * The usual cause is a namespace-scope object whose constructor is not
+ * constexpr; make it `constexpr`, or move the state into ram::AppRam. */
+ASSERT(__preinit_array_end == __preinit_array_start,
+       "a .preinit_array entry was emitted -- this image never runs static initialisers")
+ASSERT(__init_array_end == __init_array_start,
+       "a C++ static constructor was emitted, but this image never runs .init_array. Make the object constexpr, or move its state into ram::AppRam (app/include/ram_map.hpp).")
+ASSERT(__fini_array_end == __fini_array_start,
+       "a C++ static destructor was emitted -- this image never exits, so it would never run")

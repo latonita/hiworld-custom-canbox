@@ -1,7 +1,24 @@
+# Address -> name for every RAM global identified in the MERGED bootloader+app
+# Ghidra import (see docs/notes/ghidra-merged-app-bootloader.md). Two columns,
+# tab separated. Reference data: nothing parses this at build time.
+#
+# NOTE this map covers BOTH programs. 0x20001000.. holds app state while the app
+# runs and bootloader state while the bootloader runs -- they are not
+# simultaneous, and a `bl_` name below is the BOOTLOADER's, not the app's.
+#
+# The REBUILD no longer uses any of these addresses: its state is linker-placed
+# .bss (app/include/ram_map.hpp). This file stays as the key for reading the
+# decompile in app/src/ and for re-applying names to a fresh Ghidra import.
 0x20001000	g_tick_10ms_div
 0x20001001	g_tick_100ms_div
 0x20001002	g_tick_1s_div
 0x20001003	g_fatal_error_code
+0x20001004	bl_rxRecord
+0x200010c4	bl_iap_state
+0x200010c5	bl_deobfKey
+0x200010d8	bl_iap_offset
+0x200010dc	g_sysclk_hz
+0x200010e0	g_d2_cluster_state
 0x200010fc	g_soft_clock
 0x20001104	g_blink_halfsec
 0x20001108	g_sched_tick_counter
@@ -19,6 +36,8 @@
 0x2000111c	g_can_rx_ring_tail
 0x20001120	g_can_tx_ring_head
 0x20001124	g_can_tx_ring_tail
+0x20001130	g_can_link_flag
+0x20001134	g_can_retry_ctr
 0x20001138	g_can_err_flags
 0x20001139	g_can_bus_status
 0x2000113a	g_profile0_activity_ctr
@@ -64,8 +83,13 @@
 0x200018e4	g_can_tx_busy_block
 0x200018f8	g_softtimer_slots
 0x200019f8	g_uart_frame_buf
+0x20001b01	g_uart_rx_frame
 0x20001b3d	g_uart_ack_queue
 0x20001b49	g_status_block
+0x20001b60	g_vstate_mid
+0x20001b75	g_amp_level
+0x20001b86	g_version_str
 0x20001be7	g_cmd_block
+0x20001bf5	g_periodic_tx_cfg
 0x20001c1c	g_libc_exit_var
 0x20001c20	g_libc_impure_ptr

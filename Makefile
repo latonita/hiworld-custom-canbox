@@ -1,57 +1,50 @@
-# Build scaffold for the Hiworld canbox APP (Nations N32L406, Cortex-M4F).
-# STARTING POINT — not yet buildable: app/src/*.c is named Ghidra decompiler output that must be
-# rewritten into clean C first (see AGENTS.md / app/REBUILD.md). Fill in SRCS as you port each
-# subsystem, and resolve the float ABI + startup/crt0 (entry veneer MUST land at 0x08002202).
+# Makefile -- a thin wrapper around tools/build.py.
+#
+# The real build driver is Python, because the dev box here has no make and the project
+# already depends on Python for iaptool.py / iap_upload.py. This file exists so `make`
+# works for anyone who has it, and it DELEGATES rather than duplicating: an independent
+# source list here would drift the moment a file is added to app/services/ or app/logic/,
+# and the failure mode of that drift is a module silently missing from the image.
+#
+#   make            build + verify the preamble + integration checks
+#   make pack       ... and package to build/app.iap
+#   make test       host unit tests
+#   make flash      pack and upload over UART  (PORT=COMxx)
+#   make clean
+#
+# Override the toolchain prefix with CROSS=..., which build.py honours via the environment:
+#   make CROSS=/path/to/arm-none-eabi-
 
-CROSS   ?= D:/IDE/arm-none-eabi-gcc/bin/arm-none-eabi-
-CC      := $(CROSS)gcc
-OBJCOPY := $(CROSS)objcopy
-SIZE    := $(CROSS)size
+PYTHON ?= python
+PORT   ?= COM17
 
-# Cortex-M4F. NOTE: soft vs hard float is an OPEN QUESTION — match the original image.
-# Start with soft-float; switch to "-mfpu=fpv4-sp-d16 -mfloat-abi=hard" if the original uses it.
-CPU     := -mcpu=cortex-m4 -mthumb -mfloat-abi=soft
-CFLAGS  := $(CPU) -Os -ffreestanding -fno-common -ffunction-sections -fdata-sections \
-           -Wall -Iapp/include
-LDFLAGS := $(CPU) -nostdlib -Tapp/linker/app.ld -Wl,--gc-sections -Wl,-Map=build/app.map
+# Exported so tools/build.py picks it up; it reads $CROSS and otherwise uses its default.
+ifdef CROSS
+export CROSS
+endif
 
-BUILD   := build
-# Add sources here as you reconstruct them (order suggested in AGENTS.md):
-SRCS    := \
-  app/src/util.c \
-  # app/src/rcc.c app/src/gpio.c app/src/tim.c app/src/can.c app/src/uart.c \
-  # app/src/can_rx_decode.c app/src/sys.c ...
+.PHONY: all pack test flash clean verify
 
-OBJS := $(patsubst %.c,$(BUILD)/%.o,$(SRCS))
+all:
+	$(PYTHON) tools/build.py
 
-# Box 2429 (H1N4JPF20A). iaptool reuses the original record-0 header (magic) from this .iap:
-REF_IAP := reference/2429-H1N4JPF20A-220524.iap
-IAPTOOL := tools/iaptool.py
+pack:
+	$(PYTHON) tools/build.py --pack
 
-.PHONY: all bin pack flash verify clean
-all: $(BUILD)/app.elf bin
+test:
+	$(PYTHON) tools/test.py
 
-$(BUILD)/%.o: %.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+verify:
+	$(PYTHON) tools/verify_preamble.py build/app.bin \
+	    --compare reference/2429-H1N4JPF20A-220524.app.bin
+	$(PYTHON) tools/check_stubs.py --elf build/app.elf
 
-$(BUILD)/app.elf: $(OBJS) app/linker/app.ld
-	$(CC) $(LDFLAGS) $(OBJS) -o $@
-	$(SIZE) $@
-
-bin: $(BUILD)/app.elf
-	$(OBJCOPY) -O binary $(BUILD)/app.elf $(BUILD)/app.bin
-	@echo "Compare against reference: reference/2429-H1N4JPF20A-220524.app.bin"
-
-# Package the raw app image into a .iap (reuses the box's magic/key from an existing .iap header).
-pack: bin
-	python $(IAPTOOL) pack $(BUILD)/app.bin $(REF_IAP) -o $(BUILD)/app.iap
-	python $(IAPTOOL) verify $(BUILD)/app.iap
-
-# Flash over UART via the bootloader (set PORT=COMx). See app/REBUILD.md.
-PORT ?= COM17
+# Flashing is destructive to the running image. Read app/REBUILD.md section 6 first:
+# --reset powercycle is the safe default, and the line must be quiet during an update.
 flash: pack
-	python tools/iap_upload.py $(BUILD)/app.iap --port $(PORT) --reset nrst --verify
+	$(PYTHON) tools/iap_upload.py build/app.iap --port $(PORT) \
+	    --reset powercycle --verify
 
 clean:
-	rm -rf $(BUILD)
+	$(PYTHON) tools/build.py --clean
+	$(PYTHON) tools/test.py --clean

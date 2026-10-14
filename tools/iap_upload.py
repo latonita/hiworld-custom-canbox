@@ -19,22 +19,62 @@ Reset entry:
   --reset nrst: pulse nRST via the Pico (fast, no hands) — ONLY safe if the chip
       is not in a latched debug state; otherwise the flash write silently fails.
 
-Verify (--verify): after a good upload, read the 17-byte version string the app
-  copies to SRAM 0x20001B86 at init (SRAM is RDP-exempt, readable over SWD even
-  while the app runs). Proves the new image booted. Uses connect_mode=attach so
-  it does not reset/halt the running app.
+Verify (--verify): after a good upload, read back the 17-byte version string the
+  app copies into SRAM at init (SRAM is RDP-exempt, readable over SWD even while
+  the app runs). Proves the new image booted. Uses connect_mode=attach so it does
+  not reset/halt the running app.
+  The address is resolved from build/app.elf (symbol g_versionString) rather than
+  hardcoded, because the rebuild no longer pins its state to the stock firmware's
+  absolute SRAM map. Override with --elf or --version-addr; with neither
+  resolvable it falls back to the stock 0x20001B86, which is right only for a
+  factory image.
 
 Usage:
   python iap_upload.py <file.iap> [--port COM17] [--reset powercycle|nrst] [--verify]
 """
-import sys, time, argparse
+import os, subprocess, sys, time, argparse
 
 REC = 136
 MAGIC = bytes.fromhex("19780217")
 U, B, S, R, E = 0x55, 0x42, 0x53, 0x52, 0x45
 NAME = {U: 'U', B: 'B', S: 'S', R: 'R', E: 'E'}
-VERSION_RAM = 0x20001B86
 VERSION_LEN = 17
+
+# Where the running app keeps its version string. This used to be hardcoded to
+# 0x20001B86, because the rebuild reproduced the stock firmware's absolute SRAM
+# map. It does not any more -- the state is ordinary .bss and the linker places
+# it -- so the address is resolved from the build instead. See the note on
+# g_versionString in app/include/ram_map.hpp.
+VERSION_SYMBOL = "g_versionString"
+DEFAULT_ELF = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "build", "app.elf")
+# The stock image's address, used only to verify a factory box.
+STOCK_VERSION_RAM = 0x20001B86
+
+
+def resolve_version_addr(elf, explicit=None):
+    """Address of the version string, from `nm` on the ELF we just flashed.
+
+    Returns None if it cannot be determined, which is not fatal: the caller
+    falls back to the stock address, which is right when verifying a box that is
+    still running factory firmware.
+    """
+    if explicit is not None:
+        return explicit
+    if not elf or not os.path.exists(elf):
+        return None
+    cross = os.environ.get("CROSS", "D:/IDE/arm-none-eabi-gcc/bin/arm-none-eabi-")
+    try:
+        out = subprocess.run([cross + "nm", elf], capture_output=True, text=True)
+    except OSError:
+        return None
+    if out.returncode != 0:
+        return None
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2] == VERSION_SYMBOL:
+            return int(parts[0], 16)
+    return None
 
 
 def pico_nrst_pulse(ms=60):
@@ -118,7 +158,7 @@ def upload(port, iap_path, reset_mode):
     ser.close(); return False
 
 
-def verify_version():
+def verify_version(addr):
     """Read the version string from SRAM over SWD (app running, attach mode)."""
     from pyocd.core.helpers import ConnectHelper
     import logging; logging.disable(logging.WARNING)
@@ -127,13 +167,13 @@ def verify_version():
         with ConnectHelper.session_with_chosen_probe(
                 target_override="cortex_m",
                 options={"connect_mode": "attach", "frequency": 1000000}) as s:
-            data = bytes(s.target.read_memory_block8(VERSION_RAM, VERSION_LEN))
+            data = bytes(s.target.read_memory_block8(addr, VERSION_LEN))
     except Exception as e:
         print(f"verify: SWD read failed ({e}). "
               f"If 'No ACK', the app may be sleeping — give it CAN or power-cycle and retry.")
         return None
     asc = ''.join(chr(c) if 32 <= c < 127 else '.' for c in data)
-    print(f"verify: SRAM 0x{VERSION_RAM:08X} = {data.hex(' ')}  |{asc}|")
+    print(f"verify: SRAM 0x{addr:08X} = {data.hex(' ')}  |{asc}|")
     return data
 
 
@@ -144,12 +184,25 @@ def main():
     ap.add_argument("--reset", choices=["powercycle", "nrst"], default="powercycle")
     ap.add_argument("--verify", action="store_true",
                     help="after upload, read the version string from SRAM over SWD")
+    ap.add_argument("--elf", default=DEFAULT_ELF,
+                    help="ELF to resolve the version-string address from "
+                         "(default build/app.elf)")
+    ap.add_argument("--version-addr", type=lambda v: int(v, 0), default=None,
+                    help="override the SRAM address of the version string")
     a = ap.parse_args()
 
     ok = upload(a.port, a.iap, a.reset)
     print("\n==== UPLOAD " + ("OK ====" if ok else "FAILED ===="))
     if ok and a.verify:
-        verify_version()
+        addr = resolve_version_addr(a.elf, a.version_addr)
+        if addr is None:
+            addr = STOCK_VERSION_RAM
+            print(f"verify: could not resolve {VERSION_SYMBOL} from {a.elf}; "
+                  f"falling back to the stock address 0x{addr:08X}. "
+                  f"That is correct for a factory image, but for a rebuilt one "
+                  f"it will read the wrong bytes -- build first, or pass "
+                  f"--version-addr.")
+        verify_version(addr)
     sys.exit(0 if ok else 1)
 
 

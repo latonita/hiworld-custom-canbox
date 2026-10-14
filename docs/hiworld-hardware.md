@@ -164,7 +164,7 @@ payloads (`hiworld-iap-format.md`, base `0x08002000`). The only thing not yet in
 | Header | Pads | Role | Signals |
 |---|---|---|---|
 | **ISP1** | 5 | **SWD** | GND / SWDIO / SWCLK / 3V3 / nRST |
-| **ISP2** | 4 | UART bootloader — still inferred | TX / RX / GND / VDD |
+| **ISP2** | 4 | **SWD** | GND / SWDIO / SWCLK / 3V3 |
 
 ISP1 is SWD: we established a live SWD session through it. Observed pad order as wired:
 **GND, SWDIO, SWCLK, 3V3, nRST** (SWDIO = PA13, SWCLK = PA14, nRST = the dedicated reset).

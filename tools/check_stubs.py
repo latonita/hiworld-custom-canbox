@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """
-check_stubs.py -- find scaffolding that silently survived the link.
+check_stubs.py -- integration checks the compiler cannot make.
 
-The subsystems in app/port/ were reconstructed independently, so each one declares the
-cross-subsystem functions it calls as `__attribute__((weak))` no-op stubs. That lets every
-file compile and link on its own -- and it means a FULLY GREEN BUILD CAN STILL BE INERT:
-if nobody ever provides the strong definition, the call links happily to a stub that does
-nothing, and the firmware boots and quietly does half its job.
+Two failure modes that produce a FULLY GREEN BUILD and a broken box:
 
-A weak symbol that was overridden by a real definition shows up as 'T' (text) in the linked
-ELF. One that was never overridden is still 'W'. So every 'W' in the final image is an
-unimplemented hook.
+1. AN INTERRUPT HANDLER THAT IS STILL THE crt0 DEFAULT.
+   app/startup/crt0.S defines a weak handler for all 59 veneer slots. Five of them must be
+   overridden by a real definition; the other 54 are stock defaults that are SUPPOSED to
+   stay weak. A handler whose C++ name got mangled, or whose spelling drifted, links
+   perfectly and silently leaves the weak trap in place -- the box then resets with a trap
+   code instead of working. An overridden weak symbol shows as 'T' in the linked ELF; one
+   that was never overridden is still 'W'.
 
-This also cross-references the ORIGINAL FLASH ADDRESS comments in app/port/*, because the
-independent agents named the same stock function differently (e.g. 0x08007a30 is
-`tim2_sched_rate_flags` to one subsystem and something else to another). Two different
-symbols carrying the same stock address means the link will NOT connect them, even though
-both sides compile.
+   (The earlier generation in app/port/ also used weak no-op stubs as cross-subsystem
+   scaffolding, which is what this tool was originally written to catch. That scaffolding
+   is gone -- docs/ARCHITECTURE.md section 1 rule 5 bans it -- so this check is now a
+   regression guard rather than a progress report.)
+
+2. TWO SYMBOLS CLAIMING THE SAME STOCK FLASH ADDRESS.
+   Every reconstructed function carries the address of the stock routine it reproduces in a
+   /* 0x0800xxxx */ comment. Two different symbols carrying the same address means the same
+   stock function was reconstructed twice under two names; the link will not connect them,
+   even though both sides compile.
 
     python tools/check_stubs.py
     python tools/check_stubs.py --elf build/app.elf
@@ -31,7 +36,10 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CROSS = os.environ.get('CROSS', 'D:/IDE/arm-none-eabi-gcc/bin/arm-none-eabi-')
-PORT = os.path.join(ROOT, 'app', 'port')
+# The reconstructed firmware, bottom layer first. app/port/ is gone; reference/decompile/app/ is the Ghidra
+# spec and is deliberately not scanned (it carries the stock addresses by definition).
+LAYER_DIRS = [os.path.join(ROOT, 'app', d) for d in ('hal', 'services', 'logic', 'startup')]
+SRC_EXT = ('.c', '.h', '.cpp', '.hpp')
 
 ADDR_RE = re.compile(r'0x080[0-9a-fA-F]{5}')
 
@@ -74,6 +82,40 @@ def is_crt0_default(name):
         and name not in MUST_BE_STRONG
 
 
+def is_cxx_inline(name):
+    """A C++ `inline` function is emitted as a WEAK (COMDAT) symbol by the language rules,
+    so the linker can merge the copy every including translation unit emits. `nm` reports
+    it as 'W', identically to a hand-written weak stub.
+
+    They are told apart by name mangling: a weak symbol with a mangled name can only be an
+    inline or a template instantiation, because nothing in the rebuilt layers declares a
+    C++ function weak. That ban is checked at the source level by no_weak_scaffolding()
+    below rather than guessed at from the ELF."""
+    return name.startswith('_Z')
+
+
+def no_weak_scaffolding():
+    """The source-level half of the check: no explicit weak definitions in the rebuild.
+
+    This is the rule the ELF cannot express, and it is the one that matters. A weak no-op
+    stub lets a half-finished subsystem link, and then the firmware boots and quietly does
+    not do that job. docs/ARCHITECTURE.md section 1 rule 5 bans them outright."""
+    pattern = re.compile(r'__attribute__\s*\(\(\s*weak')
+    hits = []
+    for d in LAYER_DIRS:
+        if not os.path.isdir(d):
+            continue
+        for fn in sorted(os.listdir(d)):
+            if not fn.endswith(SRC_EXT):
+                continue
+            path = os.path.join(d, fn)
+            for n, line in enumerate(open(path, encoding='utf-8', errors='replace'), 1):
+                if pattern.search(line):
+                    rel = os.path.relpath(path, ROOT).replace(os.sep, '/')
+                    hits.append('%s:%d' % (rel, n))
+    return hits
+
+
 def unresolved_weaks(elf):
     out = subprocess.run([CROSS + 'nm', elf], capture_output=True, text=True, cwd=ROOT)
     if out.returncode != 0:
@@ -93,14 +135,15 @@ def unresolved_weaks(elf):
 
 
 def addr_to_symbols():
-    """stock flash address -> {symbol names that claim it}, scanned from app/port/*"""
+    """stock flash address -> {symbol names that claim it}, over the rebuilt layers"""
     m = collections.defaultdict(set)
-    if not os.path.isdir(PORT):
-        return m
-    for fn in sorted(os.listdir(PORT)):
-        if not fn.endswith(('.c', '.h')):
+    files = []
+    for d in LAYER_DIRS:
+        if not os.path.isdir(d):
             continue
-        for line in open(os.path.join(PORT, fn), encoding='utf-8', errors='replace'):
+        files += [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.endswith(SRC_EXT)]
+    for path in files:
+        for line in open(path, encoding='utf-8', errors='replace'):
             addrs = ADDR_RE.findall(line)
             if not addrs:
                 continue
@@ -128,7 +171,8 @@ def main():
     if os.path.exists(elf):
         w = unresolved_weaks(elf)
         dead_isr = [n for n in w if n in MUST_BE_STRONG]
-        scaffold = [n for n in w if not is_crt0_default(n) and n not in MUST_BE_STRONG]
+        scaffold = [n for n in w if not is_crt0_default(n) and n not in MUST_BE_STRONG
+                    and not is_cxx_inline(n)]
         defaults = [n for n in w if is_crt0_default(n)]
 
         print('=== real interrupt handlers still unimplemented ===')
@@ -139,6 +183,17 @@ def main():
             problems += len(dead_isr)
         else:
             print('  none -- all %d real handlers have strong definitions' % len(MUST_BE_STRONG))
+
+        print('\n=== weak scaffolding in the rebuilt layers ===')
+        weak_src = no_weak_scaffolding()
+        if weak_src:
+            for h in weak_src:
+                print('  WEAK  %s' % h)
+            print('\n  %d weak definition(s) in app/hal, app/services or app/logic.' % len(weak_src))
+            print('  A weak no-op links happily and silently does nothing at run time.')
+            problems += len(weak_src)
+        else:
+            print('  none -- no __attribute__((weak)) in the rebuilt layers')
 
         print('\n=== cross-subsystem hooks still linking to a do-nothing stub ===')
         if scaffold:

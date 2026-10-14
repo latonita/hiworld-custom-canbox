@@ -4,9 +4,44 @@ This project rebuilds the **APP** firmware of a Hiworld canbox (Nations N32L406,
 to re-flash through the stock IAP bootloader.
 
 **Read `AGENTS.md` for the full brief** — goal, hard constraints, workflow, and acceptance
-criteria. Then `README.md` (layout) and `app/REBUILD.md` (build + flash detail).
+criteria. Then `docs/ARCHITECTURE.md` (the layer contract and every module's public API),
+`README.md` (layout), and `app/REBUILD.md` (build + flash detail).
 
-Most important rules: never touch the bootloader (`0x08000000`–`0x08001FFF`); the app lives at
-`0x08002000`–`0x0801F7FF` with its reset veneer at exactly `0x08002202` and no vector table of
-its own; ship as `.iap` via `tools/`. `app/src/*.c` is named Ghidra output, not clean C — rewrite
-it, don't compile it raw.
+## Build and test
+
+```
+python tools/build.py          # compile + link + verify the preamble
+python tools/build.py --pack   # ...and package to build/app.iap
+python tools/test.py           # host unit tests for the logic layers
+```
+
+## Most important rules
+
+- **Never touch the bootloader** (`0x08000000`–`0x08001FFF`). It is the only way to flash
+  the box. The app lives at `0x08002000`–`0x0801F7FF`; the param page at `0x0801F800` is the
+  only flash the firmware may write at runtime.
+- **The preamble is address-constrained.** The app has no vector table — it runs on the
+  bootloader's, which dispatches into a fixed array of 59 veneers at
+  `0x0800202a..0x08002201`, with the entry veneer at exactly `0x08002202`.
+  `tools/verify_preamble.py` enforces this on every build. Do not move anything in
+  `app/startup/crt0.S`.
+- **The five interrupt handlers and `fatal_error_reset` are an ABI.** `crt0.S` branches to
+  them by name, so they must stay `extern "C"` and keep their exact spelling. A mangled name
+  links cleanly and silently leaves a trap handler in place.
+- **This image never runs `.init_array`.** No namespace-scope object with a runtime
+  constructor; the linker fails the build if one appears. State goes in `ram::AppRam`
+  (`app/services/app_state.cpp`), which is ordinary `.bss` — nothing is at a fixed
+  SRAM address any more except the stack the bootloader set up.
+- **`reference/decompile/app/*.c` is the spec, not the source.** It is named Ghidra output; it does not
+  compile and is not built. The rebuild in `app/hal/`, `app/services/` and `app/logic/` is
+  written against it, and host tests are written from it.
+- **Ship as `.iap`** via `tools/`.
+
+## Where things live
+
+`app/hal/` C11 register drivers (MMIO only) · `app/services/` C++17 stateful services ·
+`app/logic/` C++17 vehicle behaviour · `app/include/ram_map.hpp` all runtime state as one
+typed, linker-allocated struct · `docs/misra-cpp.md` the C++ subset and its deviations.
+
+Keep the `/* 0x0800xxxx */` stock-address annotations on reconstructed functions, and keep
+the explanatory comments — in this repo they are the reverse-engineering record, not noise.

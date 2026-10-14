@@ -3,7 +3,8 @@
 Flash 128 KB @ `0x08000000` (2 KB pages), SRAM 24 KB @ `0x20000000`. The app occupies the
 middle flash region only; it runs on the bootloader's vector table (`VTOR = 0x08000000`,
 `MSP = 0x20000600`). Sources: `docs/hiworld-hardware.md`, `docs/hiworld-startup-sequence.md`
-§4, `app/include/globals.h`. SRAM addresses are the original firmware addresses.
+§4, and the Ghidra maps in `ghidra/`. SRAM addresses are the ORIGINAL firmware's;
+the rebuild no longer uses them (see `app/include/ram_map.hpp`).
 
 ---
 
@@ -21,7 +22,7 @@ middle flash region only; it runs on the bootloader's vector table (`VTOR = 0x08
 | Address | What |
 |---|---|
 | `0x08002000`–`0x08002009` | `startup_crt0` / `__rt_stackheap_init` fragments |
-| `0x0800202a`–`0x08002201` | 59 × 8-byte IRQ/exception veneers; `veneer(IRQn) = 0x08002072 + 8*IRQn` (IRQ0 = WWDG @ `0x08002072`). Dispatched to by the bootloader's immutable table — addresses are fixed. |
+| `0x0800202a`–`0x08002201` | 59 eight-byte IRQ/exception veneers, dispatched to by the bootloader's immutable table, so the addresses are fixed. **The linear rule `veneer(IRQn) = 0x08002072 + 8*IRQn` is WRONG and superseded** -- it holds only for IRQ0..10 and IRQ23..41. The array is in STM32F103 vector order while the part is an N32L406, and the bootloader table bridges the two. The real map is read off `reference/bootloader_0x08000000_8k.bin`, encoded in `app/startup/crt0.S`, and enforced on every build by `tools/verify_preamble.py`. |
 | **`0x08002202`** | **App entry veneer** (`push {r4,lr}; bl __main; pop`) — the `bl 0x08002202` target. |
 | `0x0800220a` | `call_main` veneer → `main_loop` |
 | `0x08002400` | `__main` (ARM C-lib: scatterload + `__rt_entry`) |
@@ -36,9 +37,9 @@ middle flash region only; it runs on the bootloader's vector table (`VTOR = 0x08
 |---|---|
 | `0x20000000`–`0x20000600` | **System stack** — MSP top `0x20000600`, grows down (~1.5 KB). Set by the bootloader; the app does not re-init SP. |
 | `0x20000600`–`0x20000FFF` | Largely unused by the stock app (candidate space for linker-managed `.data`/`.bss` in a rebuild — verify first). |
-| `0x20001000`–`~0x20001C24` | **Fixed absolute global block** (below). Addressed by hard pointers in the code, NOT allocated by the linker. |
+| `0x20001000`–`~0x20001C24` | **Stock firmware's fixed global block** (below), addressed by hard pointers in the original. The REBUILD no longer reproduces this: its state is linker-allocated `.bss` from `0x20000600` up (see `app/include/ram_map.hpp`). The addresses here remain the reference for reading `reference/decompile/app/` and Ghidra. |
 
-### Globals by subsystem (fixed addresses, from `globals.h`)
+### Globals by subsystem (the ORIGINAL firmware's fixed addresses)
 
 **Timebase / scheduler**
 
@@ -138,7 +139,7 @@ middle flash region only; it runs on the bootloader's vector table (`VTOR = 0x08
 
 ---
 
-## Peripheral MMIO (from `registers.h`)
+## Peripheral MMIO (see `app/include/n32l406_hw.h` for the typed layouts)
 
 N32L406 is STM32F1-like but **not** identical — notably **ADC @ `0x40020800`** (not
 `0x40012400`). Bases used by this firmware: TIM2 `0x40000000`, WWDG `0x40002C00`,

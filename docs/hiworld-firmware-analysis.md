@@ -286,6 +286,16 @@ All **DECOMPILED**. `d[n]` = CAN data byte n.
 | `0x7FC` | `d[0..7]` | vendor handshake, magic `3F F3 F2 01 · · 3A A3` → replies CAN `0x7FD` | — |
 | `0x7FF` | `d[0..7]` | vendor **status injection**, magic `7F F7 · · · · 3A A3` → `flags` bits 0..3 = `d[2]` bits 0..3 | UART `0x72` payload `[0]` |
 
+> **Correction (was: "sets the gear").** On profile 1 the `0x7FF` handler maps `d[4]` into
+> the **SWC key** byte, not the gear byte. The decompile writes `p_status_block[2]`
+> (`reference/decompile/app/can_rx_decode.c:566-586`), and byte 2 of the vehicle state is the
+> steering-wheel key code reported in UART `0x72` payload `[2]`; the gear lives at byte
+> `0x1E` and is written only by the `0x20E` PRNDL decoder. The giveaway is the value set
+> itself — `0, 2, 1, 9, 8, 0x0B, 3` are exactly the Android plugin's key codes
+> (none/vol-/vol+/prev/next/mode/mute), not PRNDL values, which are `1..4`.
+> Reproduced faithfully in `app/logic/can_decode.cpp` and pinned by
+> `fca_vendor_7ff_replies_on_7fe_and_maps_d4_into_the_key_slot` in `tests/host/test_can_decode.cpp`.
+
 **SWC key decode, CAN `0x3A0`** — the values written are exactly the key codes the Android
 plugin's `car_key_3009001.json` maps. **DECOMPILED + CROSS-CHECKED.**
 
@@ -322,7 +332,7 @@ All **DECOMPILED**.
 | **`0x308`** | `d[1]` | `flags.bit1 = (d[1] != 0)`; `value = min(d[1] >> 1, 100)` | UART `0x72` payload `[0]` bit 1 and `[3]` |
 | **`0x3A3`** | `d[0] d[1]` | **SWC buttons** — bit-for-bit the same map as `0x3A0` above | UART **`0x72` payload `[2]`** |
 | **`0x513`** | `d[0..3]` | copied out and **retransmitted as CAN `0x516`** | — |
-| `0x400…0x43F`, `0x7FC`, `0x7FF` | | identical vendor service protocol; `0x7FF` here also sets the gear from `d[4]` (`0→0, 1→2, 2→1, 3→9, 4→8, 5→11, 6→3`) and replies CAN `0x7FE` | — |
+| `0x400…0x43F`, `0x7FC`, `0x7FF` | | identical vendor service protocol; `0x7FF` here also sets the **SWC key** slot from `d[4]` (`0→0, 1→2, 2→1, 3→9, 4→8, 5→0x0B, 6→3`) and replies CAN `0x7FE` | UART `0x72` payload `[2]` |
 
 The **±540°** clamp in profile 1 is an exact, independent match for
 `assets/car_trajectory_3009001.json`'s `"max": 540, "min": -540`. **CROSS-CHECKED.**
@@ -587,7 +597,7 @@ switch not fully reversed.
 | `0x400…0x43F` RX | in | node-address protocol; `id & 0x3F` is a node id. `d[0] == 0xFD` starts a sequence; replies `0x416` DLC 8. Looks like Hiworld's own CAN firmware-update / configuration channel |
 | `0x416` TX | out | reply to the above |
 | `0x7FC` RX / `0x7FD` TX | in/out | handshake, magic `3F F3 F2 01 · · 3A A3` — echoes the frame back on `0x7FD` |
-| `0x7FF` RX / `0x7FE` TX | in/out | **status injection** with magic `7F F7 · · · · 3A A3`: writes the flags byte and (profile 1) the gear directly. This is a bench-test / simulator input, not a vehicle message |
+| `0x7FF` RX / `0x7FE` TX | in/out | **status injection** with magic `7F F7 · · · · 3A A3`: writes the flags byte and (profile 1) the SWC key slot directly. This is a bench-test / simulator input, not a vehicle message |
 | `0x500` / `0x513` RX → `0x516` TX | in/out | echoes 2 (profile 0) or 4 (profile 1) received bytes back on `0x516` |
 
 These are **not vehicle signals** and should not be chased on a real bus.

@@ -48,38 +48,34 @@
 
 #include <stdint.h>
 
-/* Provided by app/linker/app.ld. These cover only statics the rebuilt C adds;
- * they live ABOVE the stock block (VMA 0x20003040) and never overlap it. */
+/* Provided by app/linker/app.ld. These now cover ALL of the application's
+ * statics, ram::g_appRam included. */
 extern uint32_t _sidata, _sdata, _edata, _sbss, _ebss;
 
 extern void main_loop(void);
 extern void fatal_error_reset(uint8_t code);
 
-/* Stock RAM block -- bounds from the stock Region$$Table, NOT from globals.h
- * (which only names symbols up to 0x20001C20 and is incomplete). */
-#define APP_RAM_START    0x20001000U
-#define APP_RAM_END      0x20003028U
-
-/* The firmware's only initialised datum. */
-#define SYSCLK_SHADOW    0x200010DCU
-#define SYSCLK_HZ        64000000U
+/* Nothing is hand-placed any more. The application's runtime state is an
+ * ordinary object (ram::g_appRam, app/services/app_state.cpp) that the linker
+ * puts in .bss, so zeroing .bss below covers all of it.
+ *
+ * Earlier generations zeroed 0x20001000..0x20003028 by hand and wrote
+ * SystemCoreClock to 0x200010DC, because they reproduced the stock firmware's
+ * absolute SRAM map. Neither is needed: the only hardware constraint on SRAM is
+ * the stack the bootloader set up below 0x20000600, and no rebuilt code reads
+ * the SystemCoreClock shadow -- the clock tree is a compile-time constant in
+ * app/include/app_config.hpp (cfg::kSysclkHz). */
 
 __attribute__((used))
 void _start_c(void)
 {
     uint32_t *src, *dst;
 
-    /* 1. Zero the stock app's RAM block (RW + ZI regions together). */
-    for (dst = (uint32_t *)APP_RAM_START; dst < (uint32_t *)APP_RAM_END; )
-        *dst++ = 0;
-
-    /* 2. The one word of initialised data the stock scatter table carries. */
-    *(volatile uint32_t *)SYSCLK_SHADOW = SYSCLK_HZ;
-
-    /* 3. Linker-managed statics introduced by the rebuilt C (above the stock
-     *    block). .data is empty today but will not stay that way. */
+    /* 1. Initialised statics: copy .data from its load address in flash.
+     *    Empty today, but it will not stay that way. */
     for (src = &_sidata, dst = &_sdata; dst < &_edata; )
         *dst++ = *src++;
+    /* 2. Zero .bss. This is what clears the whole of ram::g_appRam. */
     for (dst = &_sbss; dst < &_ebss; )
         *dst++ = 0;
 

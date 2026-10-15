@@ -40,6 +40,27 @@ inline constexpr std::uint8_t kDrainPasses = 0x14U;   /* 20 */
 /* The "bus alive" watchdog reload, written on EVERY accepted frame. The two
  * profiles deliberately disagree: 100 on profile 0, 0x14 on profile 1. */
 inline constexpr std::uint8_t kBusAliveReloadJeep = 100U;
+
+/* ---------------------------------------------------------------------------
+ * PRNDL characters on Jeep CAN 0x003 d[4].
+ *
+ * Not a magic-number table: d[4] literally carries the ASCII code of the
+ * character the instrument cluster is displaying, so these ARE the letters.
+ * Evidence: docs/JEEP-WK-CAN-ID-byte-map.md, id 0x003, marked Confirmed.
+ * ------------------------------------------------------------------------- */
+inline constexpr std::uint8_t kAsciiP = 0x50U;   /* 'P' */
+inline constexpr std::uint8_t kAsciiR = 0x52U;   /* 'R' */
+inline constexpr std::uint8_t kAsciiN = 0x4EU;   /* 'N' */
+inline constexpr std::uint8_t kAsciiD = 0x44U;   /* 'D' */
+inline constexpr std::uint8_t kAscii1 = 0x31U;   /* '1' AutoStick upper limit  */
+inline constexpr std::uint8_t kAscii2 = 0x32U;   /* '2' */
+inline constexpr std::uint8_t kAscii3 = 0x33U;   /* '3' */
+inline constexpr std::uint8_t kAscii4 = 0x34U;   /* '4' */
+
+/* The head unit's 0x32[1] table is 1=P 2=N 3=R 4=D 5=S, and ram_map.hpp names
+ * the first four. S has no ram:: equivalent because no stock decoder ever
+ * produces it. docs/hiworld-radio-injectable.md section B. */
+inline constexpr std::uint8_t kGearSport = 5U;
 inline constexpr std::uint8_t kBusAliveReloadFca  = 0x14U;   /* 20 */
 
 /* Illumination / dimmer: the raw byte is halved and capped. */

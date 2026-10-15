@@ -645,10 +645,15 @@ TEST(head_unit_init_publishes_the_version_string)
 
     svc::hu::init();
 
-    const std::uint8_t expected[17] = { 'H', '1', 'N', '4', 'J', 'P', 'F', '2',
-                                        '0', 'A', '-', '2', '2', '0', '5', '2',
-                                        '4' };
+    /* Checked against cfg::kVersionString, not a literal copy of it: the box ID
+     * is a build-time choice, but it must land in RAM byte-for-byte whatever it
+     * is set to. The length below is the part that is NOT free to change. */
+    std::uint8_t expected[17] = {};
+    for (std::uint8_t i = 0U; i < 17U; ++i) {
+        expected[i] = static_cast<std::uint8_t>(cfg::kVersionString[i]);
+    }
     CHECK_BYTES(ram::g_versionString, expected, 17U);
+    CHECK_EQ(static_cast<std::size_t>(cfg::kVersionLength), 17U);
     /* Exactly 17 bytes, and not a NUL-terminated 18: the uploader reads back
      * precisely sizeof(g_versionString), and the object is sized to match. */
     CHECK_EQ(sizeof(ram::g_versionString), 17U);

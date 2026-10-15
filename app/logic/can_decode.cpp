@@ -78,13 +78,88 @@ void jeepSteering(const volatile std::uint8_t* d) noexcept
     v.setSteeringAngle(angle);
 }
 
-/* 0x003 d[2] low nibble -- reverse gear. Nibble 1 and nibble 9 both mean R. */
+/* ---------------------------------------------------------------------------
+ * PRNDL, from 0x003 d[4].
+ *
+ * NOT A STOCK DECODE -- see DV-2 in docs/misra-cpp.md. The stock profile-0
+ * decoder reads only d[2]'s low nibble, and only to derive the reverse flag;
+ * it never publishes a gear, which is why UART message 0x32 is all zeros on
+ * this profile in a stock box.
+ *
+ * Evidence: docs/JEEP-WK-CAN-ID-byte-map.md, id 0x003 (DLC 7, ~450 ms),
+ * marked Confirmed. d[4] is the redundant PRNDL byte and is the ASCII CODE OF
+ * THE CHARACTER THE CLUSTER DISPLAYS:
+ *     'P' 'R' 'N' 'D'  and  '1' '2' '3' '4' for the AutoStick upper-limit ranges.
+ *
+ * d[4] is used rather than d[2] deliberately. d[2] is a lever bitfield over a
+ * fixed 0x80 (0x80=P, 0x81=R, 0x82=N, 0x84=D) in which EVERY AutoStick manual
+ * range also reads 0x84 -- so d[2] alone cannot tell D from a limited range.
+ * d[4] can.
+ *
+ * Destination encoding is the head unit's, not the car's: UART 0x32 payload
+ * [1] is 1=P 2=N 3=R 4=D 5=S, and 0 means invalid/blank
+ * (docs/hiworld-radio-injectable.md section B).
+ * ------------------------------------------------------------------------- */
+std::uint8_t jeepGearFromAscii(std::uint8_t ascii) noexcept
+{
+    switch (ascii) {
+    case kAsciiP: return ram::kGearPark;
+    case kAsciiR: return ram::kGearReverse;
+    case kAsciiN: return ram::kGearNeutral;
+    case kAsciiD: return ram::kGearDrive;
+    /* AutoStick ranges. The cluster shows a digit; the head unit has no
+     * equivalent, and S (sport) is the closest thing its table offers. */
+    case kAscii1:
+    case kAscii2:
+    case kAscii3:
+    case kAscii4: return kGearSport;
+    default:      return ram::kGearInvalid;
+    }
+}
+
+/* 0x003 -- reverse flag (stock) plus the PRNDL publish (ours).
+ *
+ * The reverse flag keeps reading d[2]'s low nibble exactly as stock does:
+ * nibble 1 and nibble 9 both mean R. It is NOT re-derived from the new gear
+ * value, because that flag gates the steering-angle decode and the reverse
+ * status line, and changing how it is computed would be a behavioural change
+ * to paths that work today. */
 void jeepReverse(const volatile std::uint8_t* d) noexcept
 {
-    const std::uint8_t gear = static_cast<std::uint8_t>(d[2] & 0x0FU);
+    const std::uint8_t lever = static_cast<std::uint8_t>(d[2] & 0x0FU);
 
     ram::app().vehicle.setFlag(ram::VehicleState::kFlagReverse,
-                               (gear == 1U) || (gear == 9U));
+                               (lever == 1U) || (lever == 9U));
+
+    ram::app().vehicle.setGear(jeepGearFromAscii(d[4]));
+}
+
+/* ---------------------------------------------------------------------------
+ * Engine speed, from 0x002 d[0]:d[1].
+ *
+ * NOT A STOCK DECODE -- see DV-2 in docs/misra-cpp.md.
+ *
+ * Evidence: docs/JEEP-WK-CAN-ID-byte-map.md, id 0x002 (DLC 8, 50 ms), marked
+ * Confirmed: d[0]:d[1] is engine RPM at 1 rpm/count, big-endian, and all-FF
+ * means unavailable / engine off.
+ *
+ * This is a VERBATIM two-byte copy, and that is the whole point: UART 0x32
+ * payload [2..3] is also big-endian 1 rpm/count, and the head unit treats
+ * 0xFFFF as "blank the field". The car's unavailable sentinel and the radio's
+ * blank sentinel are the same value, so passing the bytes straight through is
+ * both the simplest and the correct behaviour.
+ *
+ * Deliberately NOT done here, unlike profile 1's 0x211 decoder:
+ *   - no 1-in-21 decimation. 0x002 arrives at 20 Hz; the head-unit link only
+ *     retransmits a slot when its shadow differs and then only on its turn in
+ *     the round-robin, so the UART rate is already bounded by the scheduler.
+ *   - no >= 8000 rpm rejection. That clamp would swallow 0xFFFF and leave the
+ *     last live value frozen on the dash when the engine stops, instead of
+ *     blanking it.
+ * ------------------------------------------------------------------------- */
+void jeepEngine(const volatile std::uint8_t* d) noexcept
+{
+    ram::app().vehicle.setRpm(d[0], d[1]);
 }
 
 /* 0x500 d[0]:d[1] -- vendor echo, retransmitted as 0x516 ZERO-PADDED TO 8.
@@ -325,7 +400,8 @@ void decodeProfileJeep() noexcept
 
         switch (id) {
         case canid::kJeepIgnition:   decodeIgnition(d[0]);    break; /* ACC / run  */
-        case canid::kJeepReverse:    jeepReverse(d);          break; /* reverse    */
+        case canid::kJeepEngine:     jeepEngine(d);           break; /* rpm        */
+        case canid::kJeepReverse:    jeepReverse(d);          break; /* reverse+gear*/
         case canid::kJeepDoors:      decodeDoors(d[2]);       break; /* doors      */
         case canid::kJeepSteering:   jeepSteering(d);         break; /* steering   */
         case canid::kJeepIllum:      decodeIllumLevel(d[1]);  break; /* illum + %  */

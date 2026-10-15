@@ -1169,3 +1169,178 @@ TEST(dispatch_gate_clears_the_marker_when_the_debounce_expires)
     CHECK_EQ(ram::app().txFrameAmp[0], 0x2BU);
     CHECK_EQ(ram::app().busPresentDebounce, 0U);
 }
+
+/* ===========================================================================
+ * Jeep RPM and PRNDL -- NOT stock decoders. See DV-2 in docs/misra-cpp.md.
+ *
+ * Written from docs/JEEP-WK-CAN-ID-byte-map.md (both ids marked Confirmed) and
+ * from the head-unit side in docs/hiworld-radio-injectable.md section B, not
+ * from app/logic/can_decode.cpp.
+ *
+ * Restated here independently:
+ *   0x002 DLC 8, 50 ms  -- d[0]:d[1] engine RPM, 1 rpm/count BE, all FF = n/a
+ *   0x003 DLC 7, 450 ms -- d[4] is the ASCII character the cluster displays
+ *   UART 0x32 payload   -- [1] gear 1=P 2=N 3=R 4=D 5=S (0 = blank),
+ *                          [2..3] RPM BE 1:1, 0xFFFF = blank
+ * ========================================================================= */
+
+namespace {
+
+constexpr std::uint32_t kJeepEngineId = 0x002U;
+
+/* The 0x32 payload the head unit will receive, as a window into the vehicle
+ * block -- deliberately reached through the UART window rather than through
+ * the gear/rpm accessors, so these tests check what actually goes on the wire. */
+const volatile std::uint8_t* win32() noexcept
+{
+    return ram::app().vehicle.window(ram::VehicleState::kWin32Off);
+}
+
+void pushJeepGear(std::uint8_t asciiChar, std::uint8_t leverNibble = 0x80U) noexcept
+{
+    std::uint8_t d[8] = {0U, 0U, leverNibble, 0U, asciiChar, 0U, 0U, 0U};
+    pushFrame(kJeepRev, 7U, d);
+}
+
+void pushJeepRpm(std::uint8_t hi, std::uint8_t lo) noexcept
+{
+    std::uint8_t d[8] = {hi, lo, 0U, 0U, 0U, 0U, 0U, 0U};
+    pushFrame(kJeepEngineId, 8U, d);
+}
+
+}  // namespace
+
+TEST(jeep_rpm_is_a_verbatim_big_endian_copy_into_the_0x32_window)
+{
+    fake::reset();
+
+    /* 2000 rpm == 0x07D0, the worked example in the injectable note. */
+    pushJeepRpm(0x07U, 0xD0U);
+    logic::decodeProfileJeep();
+
+    CHECK_EQ(win32()[2], 0x07U);
+    CHECK_EQ(win32()[3], 0xD0U);
+    CHECK_EQ(ram::app().vehicle.rpm(), 2000U);
+}
+
+TEST(jeep_rpm_passes_the_unavailable_sentinel_through_unchanged)
+{
+    fake::reset();
+
+    /* The car sends all-FF when the engine is off; the head unit reads 0xFFFF
+     * as "blank this field". The two sentinels coincide, so the bytes must go
+     * through untouched -- clamping or range-rejecting here would freeze the
+     * last live reading on the dash instead of clearing it. */
+    pushJeepRpm(0xFFU, 0xFFU);
+    logic::decodeProfileJeep();
+
+    CHECK_EQ(win32()[2], 0xFFU);
+    CHECK_EQ(win32()[3], 0xFFU);
+}
+
+TEST(jeep_rpm_is_not_decimated_or_range_limited)
+{
+    fake::reset();
+
+    /* Profile 1's 0x211 decoder decimates 1-in-21 and drops anything >= 8000.
+     * Profile 0 deliberately does neither -- every frame updates, and a high
+     * reading is reported rather than discarded. */
+    pushJeepRpm(0x1FU, 0x40U);                  /* 8000 */
+    logic::decodeProfileJeep();
+    CHECK_EQ(ram::app().vehicle.rpm(), 8000U);
+
+    pushJeepRpm(0x00U, 0xC8U);                  /* 200, immediately after */
+    logic::decodeProfileJeep();
+    CHECK_EQ(ram::app().vehicle.rpm(), 200U);
+}
+
+TEST(jeep_gear_maps_every_cluster_character)
+{
+    const struct { std::uint8_t ascii; std::uint8_t expect; } cases[] = {
+        { 'P', 1U }, { 'N', 2U }, { 'R', 3U }, { 'D', 4U },
+        { '1', 5U }, { '2', 5U }, { '3', 5U }, { '4', 5U },
+    };
+    for (const auto& c : cases) {
+        fake::reset();
+        pushJeepGear(c.ascii);
+        logic::decodeProfileJeep();
+        CHECK_EQ(win32()[1], c.expect);
+    }
+}
+
+TEST(jeep_gear_reports_blank_for_an_unknown_character)
+{
+    fake::reset();
+
+    pushJeepGear(0x00U);
+    logic::decodeProfileJeep();
+    CHECK_EQ(win32()[1], 0U);       /* 0 = invalid/blank on the head unit */
+}
+
+TEST(jeep_gear_uses_d4_not_d2_so_autostick_ranges_are_distinguishable)
+{
+    fake::reset();
+
+    /* THE REASON d[4] IS USED. d[2] is a lever bitfield in which D and EVERY
+     * AutoStick range both read 0x84, so d[2] alone cannot tell them apart.
+     * Same d[2], different d[4] -> different gear. */
+    pushJeepGear('D', 0x84U);
+    logic::decodeProfileJeep();
+    CHECK_EQ(win32()[1], 4U);       /* D */
+
+    fake::reset();
+    pushJeepGear('3', 0x84U);
+    logic::decodeProfileJeep();
+    CHECK_EQ(win32()[1], 5U);       /* S -- an AutoStick range, not D */
+}
+
+TEST(jeep_gear_does_not_disturb_the_stock_reverse_flag)
+{
+    fake::reset();
+
+    /* The reverse flag still comes from d[2]'s low nibble, exactly as stock --
+     * it gates the steering decode and the reverse status line, so it must not
+     * start following the new gear value. Lever nibble 1 = R. */
+    pushJeepGear('R', 0x81U);
+    logic::decodeProfileJeep();
+    CHECK(ram::app().vehicle.reverseOn());
+    CHECK_EQ(win32()[1], 3U);
+
+    fake::reset();
+    /* Gear says R but the lever nibble does not: the flag follows the nibble. */
+    pushJeepGear('R', 0x80U);
+    logic::decodeProfileJeep();
+    CHECK_FALSE(ram::app().vehicle.reverseOn());
+}
+
+TEST(jeep_rpm_and_gear_land_in_the_0x32_window_and_leave_0x72_alone)
+{
+    fake::reset();
+
+    pushJeepRpm(0x07U, 0xD0U);
+    pushJeepGear('D');
+    logic::decodeProfileJeep();
+
+    /* Both fields are inside the message the head unit actually parses... */
+    CHECK_EQ(win32()[1], 4U);
+    CHECK_EQ(win32()[2], 0x07U);
+    CHECK_EQ(win32()[3], 0xD0U);
+    /* ...and neither has spilled into the 0x72 status message. */
+    const volatile std::uint8_t* w72 =
+        ram::app().vehicle.window(ram::VehicleState::kWin72Off);
+    for (std::size_t i = 0U; i < ram::VehicleState::kWin72Len; ++i) {
+        CHECK_EQ(w72[i], 0U);
+    }
+}
+
+TEST(jeep_profile_only_the_fca_profile_still_uses_its_own_rpm_path)
+{
+    fake::reset();
+
+    /* 0x002 must not be decoded by profile 1 -- it is a Jeep-bus id, and on the
+     * FCA profile that id is not engine speed. */
+    pushJeepRpm(0x07U, 0xD0U);
+    logic::decodeProfileFca();
+
+    CHECK_EQ(ram::app().vehicle.rpm(), 0U);
+}

@@ -49,6 +49,9 @@ namespace canid {
 
 /* ---- profile 0: Jeep WK family, 83.333 kbit/s -- THIS box --------------- */
 inline constexpr std::uint32_t kJeepIgnition    = 0x000U;  /* ACC / run        */
+/* NOT a stock decode. 0x002 carries engine RPM on this car and the stock
+ * profile-0 decoder ignores it entirely; see DV-2 in docs/misra-cpp.md. */
+inline constexpr std::uint32_t kJeepEngine      = 0x002U;  /* rpm, speed       */
 inline constexpr std::uint32_t kJeepReverse     = 0x003U;  /* gear nibble      */
 inline constexpr std::uint32_t kJeepDoors       = 0x013U;
 inline constexpr std::uint32_t kJeepSteering    = 0x015U;

@@ -13,8 +13,8 @@ section of an analysis document, or a host test name.
 |---|---|
 | Functional requirements | **FR-1 … FR-107** |
 | Non-functional requirements | **NFR-1 … NFR-24** |
-| Host unit tests today | 310, 0 failing (`python tools/test.py`) |
-| Image size today | `text 11798`, `data 0`, `bss 2604` (`arm-none-eabi-size build/app.elf`) |
+| Host unit tests today | 319, 0 failing (`python tools/test.py`) |
+| Image size today | `text 11874`, `data 0`, `bss 2604` (`arm-none-eabi-size build/app.elf`) |
 | Hardware runs to date | **none** |
 
 ---
@@ -108,7 +108,9 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | **FR-34** | From CAN `0x3A0` bytes 0..1: the SWC key byte shall take the plugin key codes 0x0B (mode), 0x01/0x02 (vol ±), 0x08/0x09 (next/prev), 0x03 (mute), 0x12 (spare, unmapped in the Android plugin), 0x05 (phone), 0x07 (voice); `d[0] == 0 && d[1] == 0` reports 0x00. | `app/logic/can_decode_shared.hpp:150-188`, `:78-87`; test `swc_buttons_report_the_plugin_key_code_for_every_group` |
 | **FR-35** | The SWC tests shall be independent `if`s, so a frame with several bits set reports the **last** matching group, not the first. | `app/logic/can_decode_shared.hpp:146-149`; test `swc_buttons_last_match_overwrites_earlier_ones`; `docs/misra-cpp.md` N-5 |
 | **FR-36** | From CAN `0x500` bytes 0..1: copy to the echo buffer, zero-pad to 8 bytes and retransmit as standard id `0x516`, DLC 8. | `app/logic/can_decode.cpp:92-105`; test `jeep_echo_500_retransmits_as_516_zero_padded` |
-| **FR-37** | Profile 0 shall decode **no** gear, RPM or vehicle speed. UART message `0x32` therefore stays all zeros on this profile for ever. | `app/logic/can_decode.cpp:310-342` (no gear/rpm cases); `docs/hiworld-firmware-analysis.md` §3.6 note |
+| **FR-37** | ~~Profile 0 shall decode no gear, RPM or vehicle speed.~~ **SUPERSEDED by FR-37a/FR-37b.** The *stock* profile 0 decodes none of them, which is why `0x32` is all-zero in a stock box; the rebuild adds gear and RPM. Vehicle speed is still not decoded, and would not display if it were — the head unit's JPF2 handler ignores `0x32[4..13]`. | `docs/misra-cpp.md` DV-2; `docs/hiworld-radio-injectable.md` §B |
+| **FR-37a** | Profile 0 shall decode engine speed from CAN `0x002` d[0]:d[1] (1 rpm/count, big-endian) and publish it **verbatim** to UART `0x32` payload `[2..3]`, including the all-`FF` unavailable sentinel, which the head unit reads as "blank". It shall apply neither decimation nor a range limit. | `app/logic/can_decode.cpp` `jeepEngine`; `docs/JEEP-WK-CAN-ID-byte-map.md` id `0x002` (Confirmed); tests `jeep_rpm_is_a_verbatim_big_endian_copy_into_the_0x32_window`, `jeep_rpm_passes_the_unavailable_sentinel_through_unchanged`, `jeep_rpm_is_not_decimated_or_range_limited` |
+| **FR-37b** | Profile 0 shall decode PRNDL from CAN `0x003` d[4] — the ASCII code of the character the cluster displays — and publish it to UART `0x32` payload `[1]` as 1=P 2=N 3=R 4=D, with the AutoStick ranges `'1'`..`'4'` reported as 5=S and anything else as 0 (blank). It shall use d[4] rather than d[2], because d[2] reads `0x84` for both D and every AutoStick range. The stock reverse flag shall continue to be derived from d[2]'s low nibble and shall not follow the gear value. | `app/logic/can_decode.cpp` `jeepGearFromAscii`/`jeepReverse`; `docs/JEEP-WK-CAN-ID-byte-map.md` id `0x003` (Confirmed); tests `jeep_gear_maps_every_cluster_character`, `jeep_gear_uses_d4_not_d2_so_autostick_ranges_are_distinguishable`, `jeep_gear_does_not_disturb_the_stock_reverse_flag` |
 
 ### 2.5 Decoded signals — profile 1 (FCA, 125 kbit/s, not this car)
 

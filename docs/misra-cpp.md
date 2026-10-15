@@ -254,4 +254,39 @@ The codes sit at 192..194, clear of crt0's stock trap range (100..164) and of it
 unported-handler range (217..247), so the three ranges stay distinguishable. The full table
 is in `app/services/power.hpp`, and `tests/host/test_power.cpp` pins the non-collision.
 
+### DV-2 — profile 0 now decodes gear and engine speed
+
+The stock 83.333 kbit/s profile has **no gear or RPM decoder at all**, which is why UART
+message `0x32` leaves a stock box permanently all-zero. The rebuild adds both.
+
+| what | from | to |
+|---|---|---|
+| engine RPM | CAN `0x002` d[0]:d[1], 1 rpm/count BE | `0x32` payload `[2..3]` |
+| PRNDL | CAN `0x003` d[4], ASCII of the displayed character | `0x32` payload `[1]` |
+
+**This is additive, not a change to anything that already worked.** Both bytes are inside a
+message the firmware already transmits on every round-robin sweep, and the head unit's JPF2
+handler already parses them — no plugin change was needed, and no other field moved. The
+stock reverse flag still comes from `0x003` d[2]'s low nibble and was deliberately not
+re-derived from the new gear value, because that flag gates the steering decode and the
+reverse status line.
+
+**Evidence.** `docs/JEEP-WK-CAN-ID-byte-map.md` carries both ids as *Confirmed* from live
+capture; the destination encoding is `docs/hiworld-radio-injectable.md` §B. `0x003` d[4] is
+used rather than d[2] because d[2] is a lever bitfield in which D and every AutoStick range
+both read `0x84`, so d[2] cannot tell them apart and d[4] can.
+
+**Two things deliberately NOT copied from profile 1's `0x211` decoder:** no 1-in-21
+decimation (the UART round-robin already bounds the send rate) and no `>= 8000` rejection —
+that clamp would swallow the car's all-`FF` "engine off" sentinel, which is exactly the
+value the head unit reads as "blank the field". Passing it through is what makes the dash
+clear instead of freezing the last live reading.
+
+Covered by nine tests in `tests/host/test_can_decode.cpp`, written from the byte map rather
+than from the implementation.
+
+**Not available by this route, so do not try:** speed, battery voltage and the
+oil/coolant/trans/intake temperatures occupy `0x32` `[4..13]` but are decoded only by the
+sibling JPP004 protocol. The JPF2 handler on this head unit stops after gear and RPM.
+
 ---

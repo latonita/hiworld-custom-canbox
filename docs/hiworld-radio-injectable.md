@@ -34,6 +34,19 @@ dead in both directions.)
 | CMD | LEN | Inject to get | Notes |
 |---|---|---|---|
 | **`0x32`** | **14** | **RPM + gear (PRND/S) on the "Body information" screen** | Your 83.333 k box sends `0x32` **all-zero** (it has no RPM/gear decoder — that only exists on the 125 k profile). The radio's JPF2 handler reads **only** `[1]`=gear (`1`=P `2`=N `3`=R `4`=D `5`=S) and `[2..3]`=RPM (big-endian, 1:1, `0xFFFF`=blank). Fill those and it displays. |
+
+> **IMPLEMENTED.** The rebuilt firmware now fills both fields on profile 0, so no injection
+> and no plugin change is needed for RPM and gear:
+>
+> * RPM from CAN `0x002` d[0]:d[1] (1 rpm/count BE), copied verbatim into `[2..3]` — the
+>   car's all-`FF` "engine off" value is the same sentinel the radio blanks on, so it is
+>   passed straight through.
+> * PRNDL from CAN `0x003` d[4], the ASCII character the cluster displays, mapped into `[1]`
+>   as 1=P 2=N 3=R 4=D with the AutoStick ranges reported as 5=S.
+>
+> Both ids are *Confirmed* in `docs/JEEP-WK-CAN-ID-byte-map.md`. See DV-2 in
+> `docs/misra-cpp.md`, and nine tests in `tests/host/test_can_decode.cpp`.
+> The speed/voltage/temperature caveat below is unchanged and still applies.
 | **`0x41`** | **16** | **Front + rear parking-sensor radar display** | Box never emits it on 83.333 k. Handler present via the `default:` branch. `[0..3]`=front L→R, `[4..7]`=rear L→R; value = proximity ring `1..N` (1 = closest/red), `0` = clear, `0xFF` = absent. `[8..15]` ignored. |
 
 **Important — what `0x32` will *not* give you on this radio:** the speed / battery-voltage /

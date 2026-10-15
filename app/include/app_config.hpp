@@ -159,7 +159,7 @@ inline constexpr std::uint8_t  kUartFrameOverhead = 5U;  /* AA 55 LEN CMD .. CKS
  * tool reads it back over SWD (SRAM is RDP-exempt) to prove the new image
  * booted -- see tools/iap_upload.py --verify and app/REBUILD.md section 6.
  * ========================================================================= */
-inline constexpr char kVersionString[] = "H1N4JPF20A-220524";
+inline constexpr char kVersionString[] = "H1N4JPF20L-151026";
 inline constexpr std::uint8_t kVersionLength = 17U;
 static_assert(sizeof(kVersionString) == kVersionLength + 1U,
               "the version string is exactly 17 bytes on the wire");

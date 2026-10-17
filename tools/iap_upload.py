@@ -23,11 +23,12 @@ Verify (--verify): after a good upload, read back the 17-byte version string the
   app copies into SRAM at init (SRAM is RDP-exempt, readable over SWD even while
   the app runs). Proves the new image booted. Uses connect_mode=attach so it does
   not reset/halt the running app.
-  The address is resolved from build/app.elf (symbol g_versionString) rather than
-  hardcoded, because the rebuild no longer pins its state to the stock firmware's
-  absolute SRAM map. Override with --elf or --version-addr; with neither
-  resolvable it falls back to the stock 0x20001B86, which is right only for a
-  factory image.
+  The address is resolved from build/<protocol>/app.elf (symbol g_versionString),
+  rather than hardcoded, because the rebuild no longer pins its state to the stock
+  firmware's absolute SRAM map. Which ELF is picked by matching the version string
+  in the .iap's own name (build/canupdate-<version>.iap) against the built images.
+  Override with --elf or --version-addr; with neither resolvable it falls back to
+  the stock 0x20001B86, which is right only for a factory image.
 
 Usage:
   python iap_upload.py <file.iap> [--port COM17] [--reset powercycle|nrst] [--verify]
@@ -46,8 +47,60 @@ VERSION_LEN = 17
 # it -- so the address is resolved from the build instead. See the note on
 # g_versionString in app/include/ram_map.hpp.
 VERSION_SYMBOL = "g_versionString"
-DEFAULT_ELF = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           "build", "app.elf")
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def default_elf_for(image):
+    """Guess which build/<protocol>/app.elf goes with the .iap being flashed.
+
+    Getting this wrong is not cosmetic: --verify reads the version string back over
+    SWD and compares it, and the two protocols deliberately carry DIFFERENT version
+    strings, so the wrong ELF reports a mismatch on a perfectly good flash.
+
+    The build driver packs build/canupdate-<version>.iap, so the version string is in
+    the image's own filename. Rather than mapping version -> protocol from a table
+    here -- a second copy of app_config.hpp's literals, free to drift -- the match is
+    made against the images themselves: the right ELF is the one whose .bin actually
+    contains those bytes. That also survives the file being renamed by hand, as long
+    as the version is still somewhere in the name.
+
+    Falls back to the single protocol directory that exists, when there is
+    exactly one, and otherwise returns None so the caller can ask for --elf.
+    """
+    stem = os.path.splitext(os.path.basename(image or ""))[0]
+
+    if stem.startswith("canupdate-"):
+        want = stem[len("canupdate-"):].encode("ascii", "ignore")
+        build = os.path.join(_ROOT, "build")
+        if want and os.path.isdir(build):
+            for name in sorted(os.listdir(build)):
+                elf = os.path.join(build, name, "app.elf")
+                binf = os.path.join(build, name, "app.bin")
+                if not os.path.isfile(elf) or not os.path.isfile(binf):
+                    continue
+                with open(binf, "rb") as f:
+                    if want in f.read():
+                        return elf
+
+    # Pre-rename layout: build/app-<protocol>.iap. Old containers still flash fine.
+    if stem.startswith("app-"):
+        cand = os.path.join(_ROOT, "build", stem[len("app-"):], "app.elf")
+        if os.path.isfile(cand):
+            return cand
+
+    found = []
+    build = os.path.join(_ROOT, "build")
+    if os.path.isdir(build):
+        for name in sorted(os.listdir(build)):
+            cand = os.path.join(build, name, "app.elf")
+            if os.path.isfile(cand):
+                found.append(cand)
+    if len(found) == 1:
+        return found[0]
+
+    # Pre-split layout, still honoured if someone has an old tree.
+    legacy = os.path.join(_ROOT, "build", "app.elf")
+    return legacy if os.path.isfile(legacy) else None
 # The stock image's address, used only to verify a factory box.
 STOCK_VERSION_RAM = 0x20001B86
 
@@ -184,12 +237,15 @@ def main():
     ap.add_argument("--reset", choices=["powercycle", "nrst"], default="powercycle")
     ap.add_argument("--verify", action="store_true",
                     help="after upload, read the version string from SRAM over SWD")
-    ap.add_argument("--elf", default=DEFAULT_ELF,
+    ap.add_argument("--elf", default=None,
                     help="ELF to resolve the version-string address from "
-                         "(default build/app.elf)")
+                         "(default: the build/<protocol>/app.elf matching the "
+                         ".iap being flashed)")
     ap.add_argument("--version-addr", type=lambda v: int(v, 0), default=None,
                     help="override the SRAM address of the version string")
     a = ap.parse_args()
+    if a.elf is None:
+        a.elf = default_elf_for(a.iap)
 
     ok = upload(a.port, a.iap, a.reset)
     print("\n==== UPLOAD " + ("OK ====" if ok else "FAILED ===="))

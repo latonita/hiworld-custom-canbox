@@ -37,8 +37,8 @@ The rebuild **exists and builds**. It is three layers, and the contract between 
 |---|---|---|
 | `app/startup/` | asm + C11 | the fixed preamble, 59 IRQ veneers, the `0x08002202` entry, RAM init |
 | `app/hal/` | C11 | register drivers. MMIO only; every object has `data = bss = 0` |
-| `app/services/` | C++17 | scheduler, clock, timers, parameter store, CAN transport, head-unit link, board I/O, power |
-| `app/logic/` | C++17 | CAN profile decoders, periodic TX, cluster text, link state, main loop, interrupt entry points |
+| `app/services/` | C++17 | scheduler, clock, timers, parameter store, CAN transport, head-unit link (shared core plus one translation unit per wire dialect), board I/O, power |
+| `app/logic/` | C++17 | CAN profile decoders, the Benz-emulation decoders and frame packer, periodic TX, cluster text, link state, main loop, interrupt entry points |
 
 `reference/decompile/app/*.c` is **Ghidra decompiler output with real names applied** (functions, `g_`/`p_`
 globals, `REG_` MMIO bases, plate comments). It does not compile and is not built. It is the
@@ -65,8 +65,9 @@ constructor appears), and the five interrupt handlers plus `fatal_error_reset` m
    A host C++ compiler (clang++ or g++) is needed for the unit tests, nothing else.
 2. `python tools/build.py` — compiles, links, and runs `tools/verify_preamble.py`, which fails
    the build if the entry veneer moved or a dispatched veneer slot changed address.
-   `python tools/build.py --pack` also produces `build/app.iap`.
-3. `python tools/test.py` — the host unit tests. Write new ones from the behaviour in
+   `python tools/build.py --pack` also produces `build/canupdate-<version>.iap`; add
+   `--protocol benz` for the Mercedes-emulation image (`docs/raise-benz-emulation.md`).
+3. `python tools/test.py` — the host unit tests, run for BOTH protocols. Write new ones from the behaviour in
    `reference/decompile/app/*.c`, not from the rebuilt code: a test that restates the implementation proves
    nothing, and these tests are the only equivalence evidence available without a bench.
 4. Flash and verify per `app/REBUILD.md` §6 (read back the version string from SRAM

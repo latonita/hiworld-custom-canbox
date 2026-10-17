@@ -64,7 +64,7 @@ namespace power {
  * through fatalErrorReset() adds a single store to a byte that no code in the
  * image ever reads. It cannot change behaviour on CAN, on the UART or on any
  * pin; it only makes the reset identifiable. That is judged worth the
- * divergence. See docs/misra-cpp.md section 6.
+ * divergence. See docs/REQUIREMENTS.md section 6.1 A.
  * ------------------------------------------------------------------------- */
 inline constexpr std::uint8_t kFatalExti2        = 0x7AU;  /* 122, stock */
 inline constexpr std::uint8_t kFatalExti9_5      = 0x85U;  /* 133, stock */

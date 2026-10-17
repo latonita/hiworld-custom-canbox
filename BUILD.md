@@ -36,14 +36,14 @@ python tools\test.py -k steering      # only cases whose name matches a substrin
 python tools\test.py --units can_decode can_bus bytes   # one module and its dependencies
 ```
 
-Outputs, all in `build/`:
+Outputs, in `build/<protocol>/` (plus the packed container in `build/`):
 
 | File | What |
 |---|---|
-| `app.elf` | linked image with symbols |
-| `app.bin` | raw image, loads at `0x08002000` |
-| `app.map` | linker map (check where things landed) |
-| `app.iap` | flashable container (`--pack` only) |
+| `<protocol>/app.elf` | linked image with symbols |
+| `<protocol>/app.bin` | raw image, loads at `0x08002000` |
+| `<protocol>/app.map` | linker map (check where things landed) |
+| `canupdate-<version>.iap` | flashable container, named after the image's own 17-byte version string (`--pack` only) |
 
 ### Toolchain
 
@@ -53,6 +53,38 @@ Override if it moves:
 ```powershell
 $env:CROSS = "C:/other/path/arm-none-eabi-"; python tools\build.py
 ```
+
+## Which protocol to build
+
+```
+python tools/build.py                      # jeep: Hiworld JPF2, stock-equivalent
+python tools/build.py --protocol benz      # Mercedes-Benz emulation
+python tools/build.py --protocol benz --pack
+```
+
+`--protocol` picks the head-unit dialect. `jeep` (the default) is the faithful
+rebuild and the only variant whose wire behaviour must match the original box.
+`benz` emulates a Raise Mercedes canbox to reach a much richer gauge screen --
+see `docs/raise-benz-emulation.md` for exactly what it publishes, what it cannot, and
+what it costs (steering-wheel buttons, among other things).
+
+The two are packed separately (`build/canupdate-H1N4JPF20L-171026.iap`,
+`build/canupdate-H1N4BNZ10L-171026.iap`) and
+carry different version strings, so `iap_upload.py --verify` tells you which one
+is on the box. Objects live in per-protocol directories, so switching
+`--protocol` cannot link a stale object from the other dialect.
+
+Both are updatable from the radio either way: a Benz image still recognises the
+Hiworld reboot-into-the-bootloader frame. Pick "Hiworld" in the upgrade screen's
+spinner whatever the box currently speaks.
+
+Tests run BOTH configurations by default:
+
+```
+python tools/test.py                    # jeep and benz
+python tools/test.py --protocol benz    # just one
+```
+
 
 ```bash
 CROSS=/c/other/path/arm-none-eabi- python tools/build.py    # bash
@@ -201,8 +233,8 @@ public API of every module, `docs/misra-cpp.md` is the C++ subset and its deviat
 |---|---|---|
 | `app/startup/` | asm + C11 | the fixed preamble, the 59 IRQ veneers, the `0x08002202` entry, RAM init |
 | `app/hal/` | C11 | register drivers: rcc nvic wwdg cpu gpio exti tim can usart flash adc pwr. MMIO only — every object reports `data = 0, bss = 0` |
-| `app/services/` | C++17 | scheduler, soft clock, soft timers, parameter store, CAN transport, head-unit link, board I/O, power, byte helpers |
-| `app/logic/` | C++17 | the two CAN profile decoders, periodic TX, cluster text, link state machine, main loop, the five interrupt entry points |
+| `app/services/` | C++17 | scheduler, soft clock, soft timers, parameter store, CAN transport, head-unit link (shared core plus one translation unit per wire dialect), board I/O, power, byte helpers |
+| `app/logic/` | C++17 | the two CAN profile decoders, the Benz-emulation decoders and frame packer, periodic TX, cluster text, link state machine, main loop, the five interrupt entry points |
 
 Application state is not scattered across absolute-address macros any more: it is one
 `ram::AppRam` struct declared in `app/include/ram_map.hpp` and defined in

@@ -106,6 +106,15 @@ void usart_tx_start(USART_Module *usart)
     usart_it_config(usart, USART_INT_TXDE, 1);
 }
 
+/* --- no stock equivalent --- wait for STS.TXC, bounded. See hal_usart.h for
+ * why this exists and why the bound is not optional. */
+void usart_tx_drain(USART_Module *usart, uint32_t spins)
+{
+    while ((spins != 0U) && ((usart->STS & USART_STS_TXC) == 0U)) {
+        spins--;
+    }
+}
+
 /* --- 0x08003088 --- shut the port down (used by the sleep path).
  * Stock spelling: uart_disable_usart2(void). Order matters only in that it is
  * the stock order: UE cleared first, then TXE disarmed. */

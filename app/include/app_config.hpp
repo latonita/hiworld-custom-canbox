@@ -134,23 +134,152 @@ inline constexpr std::uint32_t kMedTaskMs  = 8U;     /* decode, UART, GPIO   */
 inline constexpr std::uint32_t kSlowTaskMs = 1024U;  /* parameter page save  */
 
 /* ===========================================================================
+ * WHICH HEAD-UNIT PROTOCOL THIS IMAGE SPEAKS -- a BUILD-TIME choice.
+ *
+ * The box can present itself to the Android side as either of two canbox
+ * families. This is not a runtime setting and deliberately so: see the note
+ * on kProtocolIsRuntimeSelectable below.
+ *
+ *   kHiworldJpf2 (default) -- what this box IS. Hiworld JPF2, protocol id
+ *       3009001 on the Android side, "AA 55" framing. A build with this
+ *       selected must stay byte-for-byte equivalent on the wire to the stock
+ *       firmware; everything protocol-specific below is compiled out.
+ *
+ *   kRaiseBenz -- pretend to be a Raise Mercedes-Benz box, protocol ids
+ *       1034025/27/28, "0x2E" framing. The Android side must be switched to
+ *       the matching protocol id in Canset for this to mean anything. Chosen
+ *       because the Benz plugin has by far the richest LIVE GAUGE set of any
+ *       protocol in the corpus -- see ../richest-protocol-comparison.md.
+ *
+ * Select with  python tools/build.py --protocol benz  (default: jeep), which
+ * passes -DCANBOX_PROTOCOL_BENZ. Only the version string below tests that
+ * macro directly (a string literal cannot survive a ternary); everything
+ * else tests cfg::kProtocol / cfg::kIsBenz, so both variants always COMPILE
+ * and a typo in one branch cannot hide behind the preprocessor.
+ *
+ * WHY NOT A RUNTIME SETTING. The parameter page would have to survive an
+ * update, and the only way the head unit can reach a box whose dialect it
+ * does not speak is the IAP escape hatch below -- i.e. a wrong stored value
+ * is recoverable only by reflashing, which is exactly the failure mode a
+ * runtime setting is supposed to avoid. Two images, one of which is the
+ * untouched stock-equivalent, is the safer shape.
+ * ========================================================================= */
+enum class Protocol : std::uint8_t {
+    kHiworldJpf2 = 0U,
+    kRaiseBenz   = 1U,
+};
+
+#if defined(CANBOX_PROTOCOL_BENZ)
+inline constexpr Protocol kProtocol = Protocol::kRaiseBenz;
+#else
+inline constexpr Protocol kProtocol = Protocol::kHiworldJpf2;
+#endif
+
+inline constexpr bool kIsBenz   = (kProtocol == Protocol::kRaiseBenz);
+inline constexpr bool kIsHiworld = !kIsBenz;
+
+/* ===========================================================================
  * Head-unit link -- USART2, PA2 = TX, PA3 = RX
  *
- * Framing (docs/notes/hiworld-frame-format.md):
+ * BOTH dialects are 38400 8N1 on the same two pins, which is what makes this
+ * a build option at all rather than a board change.
+ *
+ * Hiworld (docs/notes/hiworld-frame-format.md):
  *     AA 55 | LEN | CMD | payload[LEN] | CKS       wire length = LEN + 5
  * LEN counts the payload only. CMD is at offset 3, AFTER the length byte --
  * that is what distinguishes Hiworld from the sibling "Raise" protocol.
  * CKS = (sum of every byte including the preamble) & 0xFF, computed by the
  * firmware in the identical form (LEN + CMD + sum(payload) - 1) & 0xFF
  * because 0xAA + 0x55 = 0xFF == -1 (mod 256).
- * There is NO escaping: a payload byte may legitimately be 0xAA or 0x55, and
- * resynchronisation relies on the LEN/checksum check failing.
+ *
+ * Raise / Benz:
+ *     2E | CMD | LEN | payload[LEN] | CKS          wire length = LEN + 4
+ * One sync byte, and CMD comes BEFORE LEN -- the opposite order. The checksum
+ * is a one's complement, not a sum: CKS = ~(CMD + LEN + sum(payload)) & 0xFF.
+ *
+ * Neither dialect escapes anything: a payload byte may legitimately be 0xAA,
+ * 0x55 or 0x2E, and resynchronisation relies on the LEN bound and the
+ * checksum check failing.
  * ========================================================================= */
-inline constexpr std::uint32_t kUartBaud      = 38400U;
-inline constexpr std::uint8_t  kUartPreamble0 = 0xAAU;
-inline constexpr std::uint8_t  kUartPreamble1 = 0x55U;
-inline constexpr std::uint8_t  kUartMaxPayload = 0x37U;  /* LEN >= 0x38 rejected */
-inline constexpr std::uint8_t  kUartFrameOverhead = 5U;  /* AA 55 LEN CMD .. CKS */
+inline constexpr std::uint32_t kUartBaud = 38400U;
+
+/* Hiworld framing. These keep their names because the stock-equivalent code
+ * path uses them unchanged. */
+inline constexpr std::uint8_t kUartPreamble0 = 0xAAU;
+inline constexpr std::uint8_t kUartPreamble1 = 0x55U;
+
+/* Raise/Benz framing. */
+inline constexpr std::uint8_t kRaiseSync = 0x2EU;
+
+/* Per-dialect geometry, folded at compile time. `kUartFrameOverhead` is the
+ * number of non-payload bytes on the wire: AA 55 LEN CMD .. CKS = 5 for
+ * Hiworld, 2E CMD LEN .. CKS = 4 for Raise. */
+inline constexpr std::uint8_t kUartFrameOverhead = kIsBenz ? 4U : 5U;
+
+/* LEN >= 0x38 is rejected outright. Stock bound; kept for both dialects
+ * because it is the RX frame buffer's size, not a protocol rule. */
+inline constexpr std::uint8_t kUartMaxPayload = 0x37U;
+
+/* How many messages the box transmits. Six for Hiworld (0x72 0xA6 0x73 0xF0
+ * 0x12 0x32); five for Benz (0x08 0x07 and three pages of 0x41). The round-
+ * robin, the slot-state array and the shadow block are all sized from this. */
+inline constexpr std::uint8_t kTxSlotCount = kIsBenz ? 5U : 6U;
+
+/* A Raise LEN is read by the head unit into a SIGNED byte and counted down to
+ * zero, so LEN = 0 (and anything >= 0x80) makes its parser consume bytes
+ * until its own 120-byte frame cap trips -- swallowing whatever follows.
+ * Every Benz frame this firmware builds must therefore have 1 <= LEN <= 117. */
+inline constexpr std::uint8_t kRaiseMinPayload = 1U;
+inline constexpr std::uint8_t kRaiseMaxPayload = 117U;
+
+/* ===========================================================================
+ * The IAP escape hatch -- why a Benz build still answers a Hiworld frame.
+ *
+ * The head unit's "Update box" button does NOT hand the image to the running
+ * app. It asks the app to reboot, and the 8 KB bootloader does the transfer:
+ * BoxUpgradeActivity writes AA 55 02 E0 00 00 E1 once a second, the app's RX
+ * dispatcher sees CMD 0xE0 and forces a watchdog reset into the loader
+ * (docs/hiworld-iap-update-sequence.md section 1).
+ *
+ * A box that spoke ONLY the Raise dialect would not recognise that frame and
+ * could never be updated from the radio again -- only on the bench, over the
+ * FTDI/nRST rig. So the Hiworld reset frame is matched UNCONDITIONALLY, in
+ * every build, by a minimal side-branch of the RX parser. It costs a handful
+ * of bytes and it is the difference between a recoverable box and one that
+ * needs the lid off.
+ *
+ * This is a LITERAL match on the whole frame, not a general Hiworld parser:
+ * the seven bytes below and nothing else. 0xAA cannot begin a Raise frame
+ * (which syncs on 0x2E), so the two state machines cannot be confused.
+ * ========================================================================= */
+inline constexpr std::uint8_t kIapResetFrame[] = {
+    0xAAU, 0x55U, 0x02U, 0xE0U, 0x00U, 0x00U, 0xE1U
+};
+inline constexpr std::uint8_t kIapResetFrameLen =
+    static_cast<std::uint8_t>(sizeof(kIapResetFrame));
+static_assert(kIapResetFrameLen == 7U,
+              "the reset frame is AA 55 | LEN=02 | CMD=E0 | 00 00 | CKS=E1");
+/* The checksum byte must agree with the Hiworld rule, or this table is wrong
+ * and the box silently stops being updatable from the radio. */
+static_assert(kIapResetFrame[6] ==
+                  static_cast<std::uint8_t>(kIapResetFrame[2] + kIapResetFrame[3] +
+                                            kIapResetFrame[4] + kIapResetFrame[5] - 1U),
+              "CKS = (LEN + CMD + sum(payload) - 1) & 0xFF");
+
+/* How long the reset path may spin waiting for the transmitter to finish.
+ *
+ * The bootloader greets the radio with 'U' about 120 ms after reset and gives
+ * up at about 788 ms, so the handshake window is ~0.67 s -- and the radio
+ * tests the FIRST byte of an untrimmed 64-byte read against 'U'. A byte of
+ * ours still in the shift register when the watchdog fires lands ahead of
+ * that greeting and costs the whole attempt.
+ *
+ * One byte at 38400 8N1 is ~260 us = ~16.6 k cycles at 64 MHz. The loop is
+ * three or four cycles, so 50 000 iterations is roughly 2.5-3 ms: about ten
+ * byte-times of margin, and still an order of magnitude inside the ~65 ms
+ * window watchdog, which is the bound that actually matters -- overshoot it
+ * and a deliberate reboot becomes an unexplained watchdog reset. */
+inline constexpr std::uint32_t kUartTxDrainSpins = 50000U;
 
 /* ===========================================================================
  * Box identity
@@ -158,8 +287,22 @@ inline constexpr std::uint8_t  kUartFrameOverhead = 5U;  /* AA 55 LEN CMD .. CKS
  * The 17-byte version string the app copies into RAM at init. The flashing
  * tool reads it back over SWD (SRAM is RDP-exempt) to prove the new image
  * booted -- see tools/iap_upload.py --verify and app/REBUILD.md section 6.
+ *
+ * The string also names the PROTOCOL this image was built for, so a flashed
+ * box can be identified without guessing: JPF2 = the stock Hiworld dialect,
+ * BNZ1 = the Raise/Benz emulation. Both are 17 bytes, because the length is
+ * the wire format of message 0xF0 and is asserted below.
+ *
+ * This is the ONE place that tests the build macro directly rather than
+ * cfg::kIsBenz: a string literal cannot be chosen by a ternary without
+ * decaying to a pointer and losing the sizeof() that proves the length.
  * ========================================================================= */
-inline constexpr char kVersionString[] = "H1N4JPF20L-151026";
+ //                                      "H1N4JPF20A-220524"
+#if defined(CANBOX_PROTOCOL_BENZ)
+inline constexpr char kVersionString[] = "H1N4BNZ10L-171026";
+#else
+inline constexpr char kVersionString[] = "H1N4JPF20L-171026";
+#endif
 inline constexpr std::uint8_t kVersionLength = 17U;
 static_assert(sizeof(kVersionString) == kVersionLength + 1U,
               "the version string is exactly 17 bytes on the wire");

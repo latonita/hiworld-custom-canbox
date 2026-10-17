@@ -39,8 +39,16 @@ namespace logic {
  *     SWC buttons            0x3A0                0x3A3
  *     vendor echo -> 0x516   0x500 d[0..1]        0x513 d[0..3]
  *     reverse gear           0x003 d[2] nibble    0x20E d[2] bit 3
- *     PRNDL gear             (not decoded)        0x20E d[2] nibble
- *     engine speed           (not decoded)        0x211 d[0]:d[1]
+ *     PRNDL gear             0x003 d[4] ASCII *   0x20E d[2] nibble
+ *     engine speed           0x002 d[0]:d[1] *    0x211 d[0]:d[1]
+ *
+ * (*) The WK carries both of these and this rebuild decodes both -- but the
+ *     STOCK profile-0 decoder ignores them, so they are deviations rather
+ *     than a port: section 6.1 B and FR-37a / FR-37b in
+ *     docs/REQUIREMENTS.md. Unlike the Benz-only ids below they are decoded
+ *     in EVERY build, because the Hiworld protocol has fields for them --
+ *     UART 0x32 payload [1] (gear) and [2..3] (rpm), which a stock box
+ *     leaves permanently zero.
  *
  * Everything in the `kSwcService*` / `kVendor*` / `kTx*` group below is
  * identical on both profiles.
@@ -50,9 +58,18 @@ namespace canid {
 /* ---- profile 0: Jeep WK family, 83.333 kbit/s -- THIS box --------------- */
 inline constexpr std::uint32_t kJeepIgnition    = 0x000U;  /* ACC / run        */
 /* NOT a stock decode. 0x002 carries engine RPM on this car and the stock
- * profile-0 decoder ignores it entirely; see DV-2 in docs/misra-cpp.md. */
+ * profile-0 decoder ignores it entirely; see docs/REQUIREMENTS.md section
+ * 6.1 B / FR-37a. */
 inline constexpr std::uint32_t kJeepEngine      = 0x002U;  /* rpm, speed       */
-inline constexpr std::uint32_t kJeepReverse     = 0x003U;  /* gear nibble      */
+inline constexpr std::uint32_t kJeepReverse     = 0x003U;  /* reverse + PRNDL  */
+/* NOT stock decodes either, and decoded ONLY in a Benz build: these carry
+ * signals the Hiworld protocol has nowhere to display, so a jeep image would
+ * do the work and throw it away. The decoders themselves live in
+ * raise_benz_decode.hpp, not here; the dispatch below calls them behind
+ * `if constexpr (cfg::kIsBenz)`. Evidence for every byte is in
+ * docs/JEEP-WK-CAN-ID-byte-map.md. */
+inline constexpr std::uint32_t kJeepTrip        = 0x014U;  /* odo + ambient    */
+inline constexpr std::uint32_t kJeepCoolant     = 0x02CU;  /* coolant temp     */
 inline constexpr std::uint32_t kJeepDoors       = 0x013U;
 inline constexpr std::uint32_t kJeepSteering    = 0x015U;
 inline constexpr std::uint32_t kJeepIllum       = 0x210U;  /* + dimmer percent */

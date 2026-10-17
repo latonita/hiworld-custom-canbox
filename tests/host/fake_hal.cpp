@@ -406,6 +406,14 @@ void usart_configure(USART_Module* usart, uint32_t pclk_hz, uint32_t baud)
 {
     fake::record("usart_configure", fake::tag(usart), pclk_hz, baud);
 }
+void usart_tx_drain(USART_Module* usart, uint32_t spins)
+{
+    /* Nothing is in flight in a host build, so the real function's spin has
+     * nothing to wait for. Record the call and the bound: a test can assert
+     * the drain happened before a reset, and that the bound was not left at
+     * something that would outlive the watchdog on target. */
+    fake::record("usart_tx_drain", fake::tag(usart), spins);
+}
 void usart_tx_start(USART_Module* usart)
 {
     fake::record("usart_tx_start", fake::tag(usart));

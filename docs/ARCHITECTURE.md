@@ -264,6 +264,83 @@ buffers are now named fields: the shadows are `ram::AppRam::uartShadows`, and th
 buffers are windows into `ram::VehicleState` (`kWin72Off/Len`, `kWin12Off/Len`,
 `kWin32Off/Len`, `kWinA6Off/Len`) plus `versionStr` and `buf73`.
 
+**The implementation is four files; the header is not.** `head_unit.cpp` keeps everything
+both dialects share — board policy, the inbound table, `detail::rxDispatch()`, the slot
+machinery, `roundRobin`, `buildFrame`, `txSched` and `usart2Init` — and each wire dialect
+owns a translation unit of its own behind `hu_dialect.hpp`. The public API above did not
+change when that split happened. The dialect is chosen at exactly three `if constexpr`
+points in `head_unit.cpp`: the active `kTxTable` pointer, `emitFrame()` and `rxParse()`.
+
+### `hu_dialect.hpp` — the internal dialect contract
+
+Not a public header: only `head_unit.cpp`, `hu_hiworld.cpp` and `hu_raise_benz.cpp` may
+include it, and nothing in it is reachable through `head_unit.hpp`. It declares `BufFn` and
+`struct TxDesc` (cmd, len, live buffer, shadow), the two frame accessors `fb()` / `rxf()`
+that both parsers need, `svc::hu::detail::rxDispatch()` — defined in `head_unit.cpp` and
+shared verbatim, because both parsers reassemble into `ram::AppRam::uartRxFrame` in the same
+layout — and, per dialect, `kSlots`, `extern const TxDesc kTxTable[]`, `emit(cmd, payload,
+len)` and `rxParse()`.
+
+| | `svc::hu::hiworld` → `hu_hiworld.cpp` | `svc::hu::raisebenz` → `hu_raise_benz.cpp` |
+|---|---|---|
+| dialect | the stock `AA 55` | the Raise `2E` |
+| `kSlots` | 6 | 5 |
+| `kTxTable` | `0x72 0xA6 0x73 0xF0 0x12 0x32` | `0x08`, `0x07`, three pages of `0x41` |
+| live buffers | `ram::VehicleState` windows, `buf73`, `g_versionString` | `ram::AppRam::benzFrames` |
+| shadows | `ram::AppRam::uartShadows` | `ram::AppRam::benzShadows` |
+| stock ancestry | `emit` 0x08008D04, `rxParse` 0x08008BB2 | none — there is no stock `2E` code |
+
+Each table's row geometry — a row's length against its shadow, against its live buffer and
+against the outbound frame area — is `static_assert`ed **beside the table it is about**,
+because an `extern` array is not usable in a constant expression from another translation
+unit. Only the coupling the two dialects share, one `ram::AppRam::uartSlotState` byte per
+slot, is asserted in `head_unit.cpp`.
+
+### Two head-unit protocols — `cfg::kProtocol`
+
+`svc::hu` speaks one of two dialects, chosen at BUILD time
+(`tools/build.py --protocol jeep|benz`, default `jeep`) and tested as
+`cfg::kIsBenz` with `if constexpr` — never `#if`, so both dialect translation
+units are compiled and type-checked in every build, each table's geometry is
+proved by either build, and only the dead one is dropped by `--gc-sections`.
+The one exception is the version-string literal, which cannot survive a
+ternary.
+
+| | jeep (default) | benz |
+|---|---|---|
+| framing | `AA 55 LEN CMD payload CKS`, CKS = sum − 1 | `2E CMD LEN payload CKS`, CKS = ~sum |
+| wire overhead | 5 | 4 |
+| TX slots | 6 (`0x72 0xA6 0x73 0xF0 0x12 0x32`) | 5 (`0x08 0x07`, three pages of `0x41`) |
+| head-unit protocol id | 3009001 | 1034025 / 27 / 28 |
+| version string | `H1N4JPF20L-…` | `H1N4BNZ10L-…` |
+| wire behaviour | must stay stock-equivalent | deliberately diverges |
+
+Only the **jeep** build is a faithful rebuild. Everything Benz-specific — the
+`0x2E` emitter and parser in `app/services/hu_raise_benz.cpp`,
+`logic::benzPublish()` in `app/logic/raise_benz_tx.cpp`, and the five WK
+decoders in `app/logic/raise_benz_decode.cpp` that feed it — is absent from a
+jeep image, so nothing about the emulation can change what the stock-equivalent
+build puts on the wire. `app/logic/can_decode.cpp` and
+`app/services/hu_hiworld.cpp` are stock code only.
+
+**The IAP escape hatch.** The radio's "Update box" button does not hand over an
+image; it asks the running app to reboot into the bootloader by sending
+`AA 55 02 E0 00 00 E1`. A box that spoke only `0x2E` could never be updated from
+the radio again, so that exact frame is matched unconditionally, in every build,
+by a side-branch of the Raise RX parser (`iapHatchFeed`, file-local in
+`hu_raise_benz.cpp`) — a jeep build already acts on the same frame through the
+ordinary `0xE0` dispatch. It is fed only between frames, so the same bytes
+inside a legitimate payload cannot reboot the box. Before the reset it drains
+the transmitter — a byte still in the shift register arrives at the radio ahead
+of the bootloader's `U` greeting and costs the attempt. See the Protocol block in `app/include/app_config.hpp`.
+
+**Telemetry is protocol-neutral.** `ram::VehicleState` is the *Hiworld wire
+format* — four overlapping message windows over one run of bytes — so nothing
+Benz-shaped fits in it. The Benz decoders write `ram::Telemetry` in physical
+units instead, and `logic::benzPublish()` packs that into `ram::BenzFrames`.
+`svc::hu`'s existing round-robin then transmits a payload when it differs from
+its shadow, exactly as it does for the Hiworld messages: no new scheduling.
+
 ### `board_io.hpp` — `svc::io`
 This board's hardwired lines.
 
@@ -328,6 +405,40 @@ service block — those belong in a shared internal header, not duplicated.
 
 Write the decoders against `ram::VehicleState`'s named accessors
 (`setDoorBit`, `setSteeringAngle`, `setGear`, `setFlag`, …), **not** raw indices.
+
+`can_decode.cpp` is stock code only. It still owns the RX ring and the dispatch switch, but
+the Benz-only readers live in `raise_benz_decode.hpp` below and every call to them sits
+behind `if constexpr (cfg::kIsBenz)`.
+
+### `raise_benz_decode.hpp`
+```cpp
+void benzSpeed(const volatile std::uint8_t* d) noexcept;    // 0x002 d[2]:d[3]
+void benzRpm(const volatile std::uint8_t* d) noexcept;      // 0x002 d[0]:d[1]
+void benzTrip(const volatile std::uint8_t* d) noexcept;     // 0x014 odometer + ambient
+void benzCoolant(const volatile std::uint8_t* d) noexcept;  // 0x02C d[1]
+void benzVoltage(const volatile std::uint8_t* d) noexcept;  // 0x015 d[1]
+```
+**Not stock decodes**, which is why there are no `0x0800xxxx` annotations: the stock image
+has no reader for any of these. They exist only because the Mercedes emulation has screen
+real estate the Hiworld protocol does not — odometer, ambient temperature, coolant
+temperature and battery voltage all have a Benz field and no Hiworld field at all.
+
+Jeep WK frames in, `ram::Telemetry` in **physical units** out; nothing here touches a wire
+format. Evidence for every identifier, byte and scale is in
+`docs/JEEP-WK-CAN-ID-byte-map.md`, quoted per function in the `.cpp`.
+
+### `raise_benz_tx.hpp`
+```cpp
+void benzPrimeFrames() noexcept;  // write the 0x41 page selectors, once at init
+void benzPublish() noexcept;      // ram::Telemetry -> ram::AppRam::benzFrames
+```
+**Not a port of anything**: its spec is the decompiled Raise Benz plugin, written up in
+`docs/raise-benz-emulation.md`, which also lists what is deliberately *not* sent and why.
+It packs the five Benz payload buffers and does **not** transmit — `svc::hu`'s round-robin
+notices a payload differs from its shadow and sends it, so the cadence is the stock one and
+nothing new schedules anything. `benzPrimeFrames()` must run after the RAM block is zeroed
+and before the first transmit: a zero page byte matches no `0x41` page and the head unit
+discards the frame.
 
 ### `periodic_tx.hpp`
 ```cpp

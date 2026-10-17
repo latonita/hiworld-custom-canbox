@@ -44,8 +44,9 @@ dead in both directions.)
 > * PRNDL from CAN `0x003` d[4], the ASCII character the cluster displays, mapped into `[1]`
 >   as 1=P 2=N 3=R 4=D with the AutoStick ranges reported as 5=S.
 >
-> Both ids are *Confirmed* in `docs/JEEP-WK-CAN-ID-byte-map.md`. See DV-2 in
-> `docs/misra-cpp.md`, and nine tests in `tests/host/test_can_decode.cpp`.
+> Both ids are *Confirmed* in `docs/JEEP-WK-CAN-ID-byte-map.md`. See §6.1 B and
+> FR-37a / FR-37b in `docs/REQUIREMENTS.md`, and nine tests in
+> `tests/host/test_can_decode.cpp`.
 > The speed/voltage/temperature caveat below is unchanged and still applies.
 | **`0x41`** | **16** | **Front + rear parking-sensor radar display** | Box never emits it on 83.333 k. Handler present via the `default:` branch. `[0..3]`=front L→R, `[4..7]`=rear L→R; value = proximity ring `1..N` (1 = closest/red), `0` = clear, `0xFF` = absent. `[8..15]` ignored. |
 

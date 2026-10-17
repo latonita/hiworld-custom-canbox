@@ -74,6 +74,10 @@ extern "C" {
 /* The data register is 9 bits wide on this part (0x08007246 / 0x0800724E). */
 #define USART_DAT_MASK          0x01FFU
 
+/* STS.TXC -- transmission complete: the shift register has finished, not just
+ * the data register (that is TXDE, bit 7). Only the drain below reads it. */
+#define USART_STS_TXC           0x0040U   /* bit 6 */
+
 /* ---- API ----------------------------------------------------------------
  * `it` is one of the USART_INT_* ids above. `enable` is a plain 0/1 flag. */
 
@@ -101,6 +105,25 @@ void    usart_configure(USART_Module *usart, uint32_t pclk_hz, uint32_t baud);
 /* --- 0x08003078 (stock uart_tx_start, USART2-specific) --- arm the TXE
  * interrupt; the ISR takes it from here. */
 void    usart_tx_start(USART_Module *usart);
+
+/* Spin until the transmitter has clocked the last stop bit out of the shift
+ * register (STS.TXC), or until `spins` iterations have elapsed, whichever
+ * comes first.
+ *
+ * NOT a stock routine -- the original firmware never waited for anything on
+ * this port. It exists for the IAP escape hatch: the head unit's reboot
+ * command is answered with an immediate watchdog reset, and a byte still in
+ * flight at that instant arrives at the radio AHEAD of the bootloader's 'U'
+ * greeting. The radio compares the first byte of an untrimmed 64-byte read
+ * against 'U', so that stray byte makes the handshake miss and the 1 Hz
+ * retry can land inside the next window and loop.
+ *
+ * BOUNDED on purpose: this runs on a path that is about to reset the part,
+ * with the window watchdog armed at ~65 ms. One byte at 38400 8N1 takes
+ * ~260 us, so the bound only has to cover a byte and a half; it must never
+ * be able to hold the CPU long enough for the watchdog to fire first and
+ * turn a tidy reboot into an unexplained one. */
+void    usart_tx_drain(USART_Module *usart, uint32_t spins);
 
 /* --- 0x08003088 (stock uart_disable_usart2) --- shut the port down: clear
  * CTRL1.UE, then disarm TXE. Used by the sleep path. */

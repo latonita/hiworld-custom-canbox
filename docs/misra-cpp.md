@@ -2,8 +2,10 @@
 
 The services and logic layers are C++17 written to MISRA C++:2023 where the guidelines
 apply to a freestanding image that reproduces reverse-engineered behaviour. This file
-records the subset that is actually enforced, the deviations, and the handful of places
-where the stock firmware's behaviour wins over a guideline.
+records the subset that is actually enforced and the deviations from it. It is a
+**language, style and toolchain** document: what the firmware *does* — the stock quirks it
+reproduces on purpose and the places it deliberately diverges from the stock image — is
+functional matter and lives in `docs/REQUIREMENTS.md` §6.
 
 **Honesty about compliance.** There is no MISRA checking tool in this project. Compliance
 here means: the rules below are followed by construction, the compiler enforces what it
@@ -143,51 +145,30 @@ regenerated, not hand-edited; changing the style would be lost on the next regen
 would risk transcribing a register layout wrong — which is precisely how a rebuild of this
 part silently bricks a box.
 
+### D-7 — the soft-clock flags byte is modelled as a byte, not a word
+*Rule: reproduce the stock accesses as they are.*
+
+The stock code reads and writes the soft-clock flags at `0x20001100` with a 32-bit
+read-modify-write whose masks (`0xFFFFFFFE` / `0xFFFFFFFD`) preserve the three bytes above
+it. `ram::SoftClock::flags` is a `std::uint8_t` instead.
+
+Only bits 0 and 1 are ever touched and the preserved bytes are preserved either way, so the
+narrower access has an **identical memory effect**; what it buys is the removal of an overlap
+between two differently-typed views of the same address. This is a typing decision with no
+behavioural consequence — nothing on the bus or on a pin can tell the two apart — which is
+why it is recorded here and not in `docs/REQUIREMENTS.md` §6. See `app/include/ram_map.hpp`
+(`SoftClock`) and the "A NOTE ON WIDTHS" paragraph at the top of
+`app/services/soft_clock.cpp`.
+
 ---
 
-## 4. Behavioural notes — where the stock image wins
+## 4. Behaviour is not recorded in this file
 
-These are not style deviations. They are places where the original firmware does something
-a guideline would discourage, and reproducing it is the requirement.
-
-**N-1 — the soft-clock flags byte.** The stock code reads `0x20001100` with a 32-bit
-read-modify-write whose mask preserves the three bytes above it. `ram::SoftClock::flags` is
-modelled as a `std::uint8_t`, which has an identical memory effect (the preserved bytes are
-preserved either way) and removes an overlap between two differently-typed views of the same
-address.
-
-**N-2 — `softtimer` has no bounds check.** `svc::timers::armForKeycode()` indexes the
-64-slot pool with a `std::uint8_t` key code. A code above `0x3F` would write past the pool.
-The decoder never produces one — every table-driven code is `<= 0x3F` — but the hazard is
-stock behaviour. It is reproduced and documented rather than silently patched, because
-changing it would diverge from the reference image. If it is ever fixed, it should be fixed
-as a deliberate, tested change.
-
-**N-3 — the autobaud flag is not cleared on the give-up path.** `svc::sched::autobaudDue()`
-reads without clearing, and `clearAutobaud()` is separate, because the stock phase-1 loop
-clears the flag in the retry branch and deliberately does not in the give-up branch. A
-test-and-clear accessor would be tidier and would change behaviour.
-
-**N-4 — profile 1's 0x7FF reply reuses bit 2.** The stock image tests display mode 4 against
-bit 2 (`0x04`/`0xFB`) again instead of bit 3 — a copy-paste slip in the original, reproduced
-exactly.
-
-Its consequence is worse than "mode 4 looks like mode 3", which is how the earlier comment in
-`the retired app/port/can_decode.c` described it. Because the mode-4 clause *also clears bit 2 in its else
-branch*, it overwrites what the mode-3 clause just set, and the actual wire values are:
-
-| display mode | byte sent on 0x7FE |
-|---|---|
-| 1 | `0x01` |
-| 2 | `0x02` |
-| 3 | `0x00` — indistinguishable from "no mode" |
-| 4 | `0x04` — occupies the bit mode 3 was meant to use |
-
-So mode 3 is unreportable and mode 4 impersonates it. Pinned by
-`fca_vendor_7ff_display_mode_4_reuses_mode_3_bit` in `tests/host/test_can_decode.cpp`.
-
-**N-5 — the decoders' last match wins.** `decode_swc_buttons` lets a later match overwrite
-an earlier one, so a multi-bit frame reports the last matching group. Preserved verbatim.
+Where the stock image does something a guideline would discourage and reproducing it is the
+requirement — and equally where this rebuild knowingly does *not* reproduce it — that is
+functional matter, not style: it lives in `docs/REQUIREMENTS.md` §6.1 (deliberate divergences
+from stock) and §6.2 (reproduced stock defects, not to be fixed), each row citing the code
+and the test that pins it. This file is language, style and toolchain only.
 
 ---
 
@@ -218,75 +199,9 @@ never comes back.
    automatically by `build.py`).
 4. If it touches `ram_map.hpp`: does every `static_assert` still hold, and does the address
    still match `docs/` and Ghidra?
-5. If it adds a deviation: add it here, with the reason.
-
----
-
-## 6. Deliberate divergences from stock
-
-The rule everywhere else in this repo is that the original firmware is the specification and
-its quirks are reproduced (§4). This section records where that rule was knowingly broken,
-and why. It is deliberately short, and it should stay that way.
-
-### DV-1 — three reset paths now record a fault code
-
-At three sites the stock image calls `wwdg_init(); wwdg_force_reset()` directly and records
-**nothing**, so the resulting reset is indistinguishable from a brownout afterwards:
-
-| site | code | why it resets |
-|---|---|---|
-| `app/logic/can_link.cpp` | `kFatalBusDown` (192) | the CAN bus is dead and the controller refused to sleep |
-| `app/logic/can_link.cpp` | `kFatalLinkWedged` (193) | the bus is up but nothing is reloading the activity counter |
-| `app/services/head_unit.cpp` | `kFatalHostCommand` (194) | the head unit sent the `0xE0` reboot command |
-
-They now route through `svc::power::fatalErrorReset(code)`, which stores one byte into
-`ram::app().fatalErrorCode` before resetting.
-
-**Why this cannot change behaviour.** The byte has no reader anywhere in the image — it is
-written and never consulted. The store cannot affect CAN traffic, the head-unit UART, any
-GPIO, or timing in any way that outlives the reset that immediately follows it.
-
-**Why it is worth doing.** That byte is the only post-mortem this box has. Flash is RDP-L1
-locked and there is no printf; SRAM is readable over SWD and survives a watchdog reset. A
-field box that keeps rebooting is diagnosable with the code and guesswork without it.
-
-The codes sit at 192..194, clear of crt0's stock trap range (100..164) and of its
-unported-handler range (217..247), so the three ranges stay distinguishable. The full table
-is in `app/services/power.hpp`, and `tests/host/test_power.cpp` pins the non-collision.
-
-### DV-2 — profile 0 now decodes gear and engine speed
-
-The stock 83.333 kbit/s profile has **no gear or RPM decoder at all**, which is why UART
-message `0x32` leaves a stock box permanently all-zero. The rebuild adds both.
-
-| what | from | to |
-|---|---|---|
-| engine RPM | CAN `0x002` d[0]:d[1], 1 rpm/count BE | `0x32` payload `[2..3]` |
-| PRNDL | CAN `0x003` d[4], ASCII of the displayed character | `0x32` payload `[1]` |
-
-**This is additive, not a change to anything that already worked.** Both bytes are inside a
-message the firmware already transmits on every round-robin sweep, and the head unit's JPF2
-handler already parses them — no plugin change was needed, and no other field moved. The
-stock reverse flag still comes from `0x003` d[2]'s low nibble and was deliberately not
-re-derived from the new gear value, because that flag gates the steering decode and the
-reverse status line.
-
-**Evidence.** `docs/JEEP-WK-CAN-ID-byte-map.md` carries both ids as *Confirmed* from live
-capture; the destination encoding is `docs/hiworld-radio-injectable.md` §B. `0x003` d[4] is
-used rather than d[2] because d[2] is a lever bitfield in which D and every AutoStick range
-both read `0x84`, so d[2] cannot tell them apart and d[4] can.
-
-**Two things deliberately NOT copied from profile 1's `0x211` decoder:** no 1-in-21
-decimation (the UART round-robin already bounds the send rate) and no `>= 8000` rejection —
-that clamp would swallow the car's all-`FF` "engine off" sentinel, which is exactly the
-value the head unit reads as "blank the field". Passing it through is what makes the dash
-clear instead of freezing the last live reading.
-
-Covered by nine tests in `tests/host/test_can_decode.cpp`, written from the byte map rather
-than from the implementation.
-
-**Not available by this route, so do not try:** speed, battery voltage and the
-oil/coolant/trans/intake temperatures occupy `0x32` `[4..13]` but are decoded only by the
-sibling JPP004 protocol. The JPF2 handler on this head unit stops after gear and RPM.
+5. If it bends a rule in §2 — a *language* deviation: add it to §3 here, with the reason.
+   If it changes what the firmware does on the wire or on a pin — a *behavioural* divergence
+   from stock, or a newly reproduced stock defect: that belongs in `docs/REQUIREMENTS.md`
+   §6.1 or §6.2, not here.
 
 ---

@@ -5,6 +5,30 @@ adapter ("canbox") built on a **Nations N32L406CBL7** (ARM Cortex-M4F, 128 KB fl
 @ `0x08000000`, 24 KB SRAM @ `0x20000000`, LQFP48). The goal of this folder is to
 **prepare a rebuild of the APP** while keeping the original IAP bootloader intact.
 
+## Why it exists
+Two problems I've got with original HiWorld H1N4JPF20A canbox on my Jeep Grand Cherokee WH 3.0 CRD 2005:
+1) it was using wrong can messages
+2) it only gave bare minimum to let radio work
+
+So I understood how does this box work and its bootloader.
+I rewrote JPF firmware and also made version which mimics Raise Benz17 and provides more information from CAN bus like RPM, Temps, etc.
+
+Build process creates standard IAP files - those can be loaded with standard HiWorld canbox update procedure: put on a device, then upload from debug menu.
+
+## Some docs to read
+
+- [`docs/canbus-architecture.md`](docs/canbus-architecture.md) — the data flow end to end:
+  the car's buses, what this box is wired to and can actually see, and the UART link up to
+  the head unit. Every claim is tagged VERIFIED / SOURCED / INFERRED.
+- [`docs/hiworld-iap-format.md`](docs/hiworld-iap-format.md) — the `.iap` container itself:
+  fixed-size checksummed records, the header, and the obfuscation key the file carries. This
+  is what `tools/iaptool.py` packs and unpacks byte-for-byte identically.
+- [`docs/hiworld-iap-update-sequence.md`](docs/hiworld-iap-update-sequence.md) — the update
+  as it happens on the wire, both sides of it: the radio tells the running app to reset into
+  the bootloader with `AA 55 02 E0 00 00 E1`, and the record-by-record handshake follows.
+
+**Technical AI slop goes below**
+
 ## Why bootloader and app are separate
 
 The flash has two independent programs:

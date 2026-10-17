@@ -42,6 +42,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "app_config.hpp"
+
 namespace svc {
 namespace hu {
 
@@ -85,7 +87,10 @@ inline constexpr std::size_t kAckQueueTail    = 0x0BU;
 /* ===========================================================================
  * Descriptor-table geometry and scheduler constants.
  * ========================================================================= */
-inline constexpr std::uint8_t kTxSlots       = 6U;   /* flash table 0x08009F2C */
+/* Six on Hiworld (the stock flash table at 0x08009F2C), five on Benz. The
+ * count lives in cfg:: because ram::AppRam::uartSlotState is sized from it
+ * and ram_map.hpp must not depend on this header. */
+inline constexpr std::uint8_t kTxSlots       = cfg::kTxSlotCount;
 inline constexpr std::uint8_t kRxSlots       = 2U;   /* flash table 0x08009F74 */
 inline constexpr std::uint8_t kTicksPerFrame = 6U;   /* 6 x 8 ms  =  48 ms     */
 inline constexpr std::uint8_t kIdleDelay     = 15U;  /* 15 x 48 ms = ~720 ms   */

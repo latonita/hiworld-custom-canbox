@@ -57,3 +57,5 @@ tmp/
 *.bak
 *.orig
 *.rej
+
+androguard.db

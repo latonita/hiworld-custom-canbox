@@ -13,8 +13,8 @@ section of an analysis document, or a host test name.
 |---|---|
 | Functional requirements | **FR-1 … FR-107** |
 | Non-functional requirements | **NFR-1 … NFR-24** |
-| Host unit tests today | 319, 0 failing (`python tools/test.py`) |
-| Image size today | `text 11874`, `data 0`, `bss 2604` (`arm-none-eabi-size build/app.elf`) |
+| Host unit tests today | 319 jeep, 323 benz, 0 failing (`python tools/test.py` runs both) |
+| Image size today | jeep `text 11850`, `data 0`, `bss 2668`; benz `text 12382`, `data 0`, `bss 2664` (`arm-none-eabi-size build/<protocol>/app.elf`) |
 | Hardware runs to date | **none** |
 
 ---
@@ -64,7 +64,7 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | **FR-5** | The PWR peripheral clock shall be enabled during boot, not in the shutdown path, although only the deep-sleep entry uses the PWR block. | `app/logic/main_loop.cpp:75-77` |
 | **FR-6** | TIM2 shall be programmed `PSC = 7`, `AR = 4000`, up-counting, update interrupt enabled, giving exactly 1000 Hz from a 32 MHz kernel clock; the prescaler shall be written twice (once via the time-base struct as 0, once via an explicit reload with an update event). | `app/services/scheduler.cpp:29-69`; `app/include/app_config.hpp:43-45`; stock `0x080027F8` |
 | **FR-7** | The window watchdog shall be armed as the last boot step with `WDGTB = /4`, `W = 0x7F`, `CR = 0xFF`, i.e. a ~65.5 ms timeout and no closed window. | `app/logic/main_loop.cpp:86`; `docs/hiworld-startup-sequence.md` §8 |
-| **FR-8** | The 17-byte version string `H1N4JPF20A-220524` shall be copied into the `g_versionString` symbol at init, not NUL-terminated on the wire. | `app/services/head_unit.cpp:623-631`; `app/include/app_config.hpp:159-162` |
+| **FR-8** | The 17-byte version string `H1N4JPF20A-220524` shall be copied into the `g_versionString` symbol at init, not NUL-terminated on the wire. | `app/services/head_unit.cpp:452-460`; `app/include/app_config.hpp:301-308` |
 
 ### 2.2 Phase 1 — CAN bit-rate / profile autodetection
 
@@ -74,7 +74,7 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | **FR-10** | On each 2048 ms flag while still searching, the firmware shall set bit 6 (`kFlagAutobaud`) of the vehicle-state flags byte, so the head unit sees "still looking". | `app/logic/main_loop.cpp:113`; `app/include/ram_map.hpp:250` |
 | **FR-11** | While `autobaudTries < 8`, each 2048 ms retry shall: toggle the stored profile byte (`!= 1 → 1`, else `0`), save the parameter page, re-initialise CAN at the other bit rate with interrupts masked, increment the try counter and clear the 2048 ms flag — in that order. | `app/logic/main_loop.cpp:123-138`; stock `0x080088D8` body in `docs/hiworld-startup-sequence.md` §5 |
 | **FR-12** | The profile toggle shall be a **flip-flop between exactly two profiles**, not a modular cycle; the retry budget of 8 shall remain a whole number of two-profile sweeps. | `app/logic/main_loop.cpp:125-130`; `app/include/app_config.hpp:97-105` |
-| **FR-13** | Once `autobaudTries >= 8`, the shutdown/deep-sleep path shall run on the NEXT 2048 ms tick — so with no bus the box goes quiet at ≈18.4 s, not ≈16.4 s (the 8th retry is at 16.38 s; the give-up branch needs one further tick to observe the counter at 8) and the 2048 ms flag shall **not** be cleared, so the path re-runs on every subsequent loop pass until the WFI takes effect. | `app/logic/main_loop.cpp:115-121`; `app/services/scheduler.hpp` "autobaudDue"; `docs/misra-cpp.md` N-3 |
+| **FR-13** | Once `autobaudTries >= 8`, the shutdown/deep-sleep path shall run on the NEXT 2048 ms tick — so with no bus the box goes quiet at ≈18.4 s, not ≈16.4 s (the 8th retry is at 16.38 s; the give-up branch needs one further tick to observe the counter at 8) and the 2048 ms flag shall **not** be cleared, so the path re-runs on every subsequent loop pass until the WFI takes effect. The flag accessors shall keep that split: `autobaudDue()` reads the flag with the stock `== 1` test and leaves it alone, and `clearAutobaud()` — called only from the retry branch of FR-11 — stays a separate call. A tidier test-and-clear accessor **would change behaviour**: the shutdown path would then run on at best every other 2048 ms window, with the loop spinning idle in between. | `app/logic/main_loop.cpp:115-121`, `:147`; `app/services/scheduler.hpp:129-141`; `app/services/scheduler.cpp:171-179`; test `sched_autobaudDue_reads_the_flag_without_clearing_it` |
 | **FR-14** | Nothing shall be transmitted in phase 1: neither the CAN TX pump nor the head-unit service is called, so the box is silent on both CAN and UART until the bus answers. | `app/logic/main_loop.cpp:102-139` (no TX calls); `docs/hiworld-startup-sequence.md` §7, §9.2 |
 | **FR-15** | On leaving phase 1 the firmware shall: latch `profileActive` from the parameter byte, re-run parameter validation, re-prime the TX templates, re-apply the bit rate **without masking interrupts**, set the bus state to `kBusHello` and load the 800-pass bus-present debounce. | `app/logic/main_loop.cpp:190-204`; stock `0x08007B4C` |
 | **FR-16** | Profile 1 shall select 125 kbit/s and profile 0 (this box) 83.333 kbit/s, with `BRP = 2000 / kbps` (truncating to 24 for 83), 8 tq per bit, `SJW = 1`, `BS1 = 4`, `BS2 = 3`, sample point 62.5 %. | `app/services/can_bus.cpp:65-70`, `:206-210`; `app/include/app_config.hpp:106-108`; `docs/hiworld-firmware-analysis.md` §3.1 |
@@ -90,25 +90,25 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | **FR-21** | When fewer than two ring slots are free the RX interrupt shall still read the mailbox (releasing FIFO 0), discard the frame and set `kCanErrRxRingFull`. | `app/services/can_bus.cpp:408-418`; test `can_rx_interrupt_with_one_free_slot_sets_the_ring_full_flag` |
 | **FR-22** | The RX interrupt shall **not** write the IDE byte of a ring entry; the stale value from the previous occupant is left in place and never read. | `app/services/can_bus.cpp:430-433` |
 | **FR-23** | `txEnqueue()` shall never be called from an interrupt: `txHead` is a read-modify-write with a 16-byte copy in the middle and the TX ring is single-threaded main-loop state. | `app/include/ram_map.hpp:110-128` |
-| **FR-24** | Each decoder call shall make **at most 20 passes**; on an empty ring the pass is still consumed (the loop `continue`s rather than returning), so the pass count and not the ring depth ends the call. | `app/logic/can_decode.cpp:312-318`, `:349-352`; `app/logic/can_decode_shared.hpp:38`; tests `decoder_consumes_at_most_twenty_frames_per_call`, `decoder_on_an_empty_ring_changes_nothing` |
-| **FR-25** | Every accepted frame shall reload the bus-alive counter, with **different reloads per profile**: 100 on profile 0, 0x14 (20) on profile 1. | `app/logic/can_decode.cpp:321`, `:355`; `app/logic/can_decode_shared.hpp:42-43`; test `bus_alive_reload_differs_between_the_profiles` |
-| **FR-26** | The dispatch gate shall, before decoding: reload the 800-pass debounce and **set** bit 4 of the `0x18C` periodic frame while ACC is off; clear that bit and re-prime the amplifier frame from the amp level once the debounce has expired with ACC on; otherwise count the debounce down by one. | `app/logic/can_decode.cpp:393-412`; tests `dispatch_gate_reloads_the_debounce_while_acc_is_off`, `dispatch_gate_clears_the_marker_when_the_debounce_expires` |
-| **FR-27** | The decoder shall be selected by `profileActive`: value 1 → FCA 125 kbit/s decoder, **anything else** → Jeep 83.333 kbit/s decoder. | `app/logic/can_decode.cpp:414-418`; test `dispatch_gate_selects_the_profile_from_profile_active` |
+| **FR-24** | Each decoder call shall make **at most 20 passes**; on an empty ring the pass is still consumed (the loop `continue`s rather than returning), so the pass count and not the ring depth ends the call. | `app/logic/can_decode.cpp:391-397`, `:452-455`; `app/logic/can_decode_shared.hpp:38`; tests `decoder_consumes_at_most_twenty_frames_per_call`, `decoder_on_an_empty_ring_changes_nothing` |
+| **FR-25** | Every accepted frame shall reload the bus-alive counter, with **different reloads per profile**: 100 on profile 0, 0x14 (20) on profile 1. | `app/logic/can_decode.cpp:400`, `:458`; `app/logic/can_decode_shared.hpp:42-43`; test `bus_alive_reload_differs_between_the_profiles` |
+| **FR-26** | The dispatch gate shall, before decoding: reload the 800-pass debounce and **set** bit 4 of the `0x18C` periodic frame while ACC is off; clear that bit and re-prime the amplifier frame from the amp level once the debounce has expired with ACC on; otherwise count the debounce down by one. | `app/logic/can_decode.cpp:498-515`; tests `dispatch_gate_reloads_the_debounce_while_acc_is_off`, `dispatch_gate_clears_the_marker_when_the_debounce_expires` |
+| **FR-27** | The decoder shall be selected by `profileActive`: value 1 → FCA 125 kbit/s decoder, **anything else** → Jeep 83.333 kbit/s decoder. | `app/logic/can_decode.cpp:517-521`; test `dispatch_gate_selects_the_profile_from_profile_active` |
 
 ### 2.4 Decoded signals — profile 0 (Jeep WK, 83.333 kbit/s, THIS box)
 
 | ID | Requirement | Evidence |
 |---|---|---|
 | **FR-28** | From CAN `0x000` byte 0: `kFlagIgnRaw` (bit 4) ← `d[0] & 0x01`; `kFlagAccOn` (bit 0) ← `(d[0] & 0xE0) > 0x10`. The threshold form shall be kept verbatim even though it is equivalent to "any of bits 5..7". | `app/logic/can_decode_shared.hpp:211-218`; tests `jeep_ignition_decodes_acc_and_the_raw_bit`, `jeep_ignition_ignores_bit4_of_the_source_byte` |
-| **FR-29** | From CAN `0x003` byte 2 low nibble: reverse is set when the nibble is **1 or 9**, cleared otherwise. | `app/logic/can_decode.cpp:82-88`; test `jeep_reverse_nibble_sets_and_clears_the_flag` |
+| **FR-29** | From CAN `0x003` byte 2 low nibble: reverse is set when the nibble is **1 or 9**, cleared otherwise. | `app/logic/can_decode.cpp:133-136`; test `jeep_reverse_nibble_sets_and_clears_the_flag` |
 | **FR-30** | From CAN `0x013` byte 2: doors map source bit 0→LF, 1→RF, **3→LR, 2→RR**, 4→tailgate onto destination bits 7,6,5,4,3 of the door byte. The 2/3 crossover is load-bearing. | `app/logic/can_decode_shared.hpp:123-142`; test `jeep_doors_map_every_source_bit_to_the_right_destination_bit` |
-| **FR-31** | From CAN `0x015` bytes 4..5: steering angle = big-endian raw, centre `0x1000`, 0.5°/LSB, stored big-endian; raw `0` is reported as `0` without centring; raw `== 0x1000` reports 0; raw above centre is a plain two's-complement negation. There is **no clamp** on this profile. | `app/logic/can_decode.cpp:54-79`; test `jeep_steering_centre_both_directions_and_the_zero_special_case` |
-| **FR-32** | The steering angle shall be updated **only while the reverse flag is set**; outside reverse the last value stands. | `app/logic/can_decode.cpp:58-60`; test `jeep_steering_writes_nothing_while_not_in_reverse` |
+| **FR-31** | From CAN `0x015` bytes 4..5: steering angle = big-endian raw, centre `0x1000`, 0.5°/LSB, stored big-endian; raw `0` is reported as `0` without centring; raw `== 0x1000` reports 0; raw above centre is a plain two's-complement negation. There is **no clamp** on this profile. | `app/logic/can_decode.cpp:58-83`; test `jeep_steering_centre_both_directions_and_the_zero_special_case` |
+| **FR-32** | The steering angle shall be updated **only while the reverse flag is set**; outside reverse the last value stands. | `app/logic/can_decode.cpp:62-64`; test `jeep_steering_writes_nothing_while_not_in_reverse` |
 | **FR-33** | From CAN `0x210` byte 1: `kFlagIllumOn` ← `d[1] != 0`; illumination level ← `min(d[1] >> 1, 100)`. | `app/logic/can_decode_shared.hpp:193-204`; tests `illum_flag_follows_nonzero_and_percent_is_half_the_raw`, `illum_percent_clamps_at_100` |
 | **FR-34** | From CAN `0x3A0` bytes 0..1: the SWC key byte shall take the plugin key codes 0x0B (mode), 0x01/0x02 (vol ±), 0x08/0x09 (next/prev), 0x03 (mute), 0x12 (spare, unmapped in the Android plugin), 0x05 (phone), 0x07 (voice); `d[0] == 0 && d[1] == 0` reports 0x00. | `app/logic/can_decode_shared.hpp:150-188`, `:78-87`; test `swc_buttons_report_the_plugin_key_code_for_every_group` |
-| **FR-35** | The SWC tests shall be independent `if`s, so a frame with several bits set reports the **last** matching group, not the first. | `app/logic/can_decode_shared.hpp:146-149`; test `swc_buttons_last_match_overwrites_earlier_ones`; `docs/misra-cpp.md` N-5 |
-| **FR-36** | From CAN `0x500` bytes 0..1: copy to the echo buffer, zero-pad to 8 bytes and retransmit as standard id `0x516`, DLC 8. | `app/logic/can_decode.cpp:92-105`; test `jeep_echo_500_retransmits_as_516_zero_padded` |
-| **FR-37** | ~~Profile 0 shall decode no gear, RPM or vehicle speed.~~ **SUPERSEDED by FR-37a/FR-37b.** The *stock* profile 0 decodes none of them, which is why `0x32` is all-zero in a stock box; the rebuild adds gear and RPM. Vehicle speed is still not decoded, and would not display if it were — the head unit's JPF2 handler ignores `0x32[4..13]`. | `docs/misra-cpp.md` DV-2; `docs/hiworld-radio-injectable.md` §B |
+| **FR-35** | The SWC tests shall be independent `if`s, so a frame with several bits set reports the **last** matching group, not the first. Preserved verbatim from the stock image. | `app/logic/can_decode_shared.hpp:166-171`; test `swc_buttons_last_match_overwrites_earlier_ones` |
+| **FR-36** | From CAN `0x500` bytes 0..1: copy to the echo buffer, zero-pad to 8 bytes and retransmit as standard id `0x516`, DLC 8. | `app/logic/can_decode.cpp:171-184`; test `jeep_echo_500_retransmits_as_516_zero_padded` |
+| **FR-37** | ~~Profile 0 shall decode no gear, RPM or vehicle speed.~~ **SUPERSEDED by FR-37a/FR-37b.** The *stock* profile 0 decodes none of them, which is why `0x32` is all-zero in a stock box; the rebuild adds gear and RPM. Vehicle speed is still not decoded, and would not display if it were — the head unit's JPF2 handler ignores `0x32[4..13]`. | §6.1 B; `docs/hiworld-radio-injectable.md` §B |
 | **FR-37a** | Profile 0 shall decode engine speed from CAN `0x002` d[0]:d[1] (1 rpm/count, big-endian) and publish it **verbatim** to UART `0x32` payload `[2..3]`, including the all-`FF` unavailable sentinel, which the head unit reads as "blank". It shall apply neither decimation nor a range limit. | `app/logic/can_decode.cpp` `jeepEngine`; `docs/JEEP-WK-CAN-ID-byte-map.md` id `0x002` (Confirmed); tests `jeep_rpm_is_a_verbatim_big_endian_copy_into_the_0x32_window`, `jeep_rpm_passes_the_unavailable_sentinel_through_unchanged`, `jeep_rpm_is_not_decimated_or_range_limited` |
 | **FR-37b** | Profile 0 shall decode PRNDL from CAN `0x003` d[4] — the ASCII code of the character the cluster displays — and publish it to UART `0x32` payload `[1]` as 1=P 2=N 3=R 4=D, with the AutoStick ranges `'1'`..`'4'` reported as 5=S and anything else as 0 (blank). It shall use d[4] rather than d[2], because d[2] reads `0x84` for both D and every AutoStick range. The stock reverse flag shall continue to be derived from d[2]'s low nibble and shall not follow the gear value. | `app/logic/can_decode.cpp` `jeepGearFromAscii`/`jeepReverse`; `docs/JEEP-WK-CAN-ID-byte-map.md` id `0x003` (Confirmed); tests `jeep_gear_maps_every_cluster_character`, `jeep_gear_uses_d4_not_d2_so_autostick_ranges_are_distinguishable`, `jeep_gear_does_not_disturb_the_stock_reverse_flag` |
 
@@ -116,13 +116,13 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 
 | ID | Requirement | Evidence |
 |---|---|---|
-| **FR-38** | From CAN `0x20B` byte 0: identical ignition decode to FR-28. | `app/logic/can_decode.cpp:362`; test `fca_ignition_decodes_acc_on_its_own_id` |
-| **FR-39** | From CAN `0x1E1` bytes 2..3: same centre and scale as FR-31, but clamped — the positive side at `0x21B`, and the negative side at **`0x21C`** — and the negative half encoded as **`0x10001 - v`** (not `0x10000`), truncated to 16 bits. Gated on reverse like FR-32. | `app/logic/can_decode.cpp:112-170`; tests `fca_steering_clamps_both_sides_at_0x21b`, `fca_steering_negative_half_uses_the_0x10001_encoding` |
-| **FR-40** | From CAN `0x20E` byte 2 low nibble: 0→P(1), 2→N(2), 4→D(4), 9→leave the gear unchanged, anything else→invalid(0). Then bit 3 of the same byte sets/clears reverse and, when set, **forces the reported gear to R(3)**. | `app/logic/can_decode.cpp:179-200`; test `fca_gear_maps_the_prndl_nibble` |
+| **FR-38** | From CAN `0x20B` byte 0: identical ignition decode to FR-28. | `app/logic/can_decode.cpp:465`; test `fca_ignition_decodes_acc_on_its_own_id` |
+| **FR-39** | From CAN `0x1E1` bytes 2..3: same centre and scale as FR-31, but clamped — the positive side at `0x21B`, and the negative side at **`0x21C`** — and the negative half encoded as **`0x10001 - v`** (not `0x10000`), truncated to 16 bits. Gated on reverse like FR-32. | `app/logic/can_decode.cpp:221-249`; tests `fca_steering_clamps_both_sides_at_0x21b`, `fca_steering_negative_half_uses_the_0x10001_encoding` |
+| **FR-40** | From CAN `0x20E` byte 2 low nibble: 0→P(1), 2→N(2), 4→D(4), 9→leave the gear unchanged, anything else→invalid(0). Then bit 3 of the same byte sets/clears reverse and, when set, **forces the reported gear to R(3)**. | `app/logic/can_decode.cpp:258-279`; test `fca_gear_maps_the_prndl_nibble` |
 | **FR-41** | Nibble 9 shall be unreachable as a "hold" outcome: 9 has bit 3 set, so every nibble from 8 to F reports R. The hold branch exists but can never be observed. | `app/include/ram_map.hpp:373-377`; test `fca_gear_nibble_9_holds_in_the_chain_but_bit3_still_forces_r` |
-| **FR-42** | From CAN `0x211` bytes 0..1: engine speed is **decimated 1-in-21** (a counter runs 0..0x14; only the pass that finds it already at 0x14 decodes and resets it) and values ≥ 8000 rpm are rejected outright. | `app/logic/can_decode.cpp:207-223`; tests `fca_rpm_is_decimated_one_frame_in_twenty_one`, `fca_rpm_rejects_8000_and_above` |
-| **FR-43** | From CAN `0x244` byte 0: doors, same permutation as FR-30. From CAN `0x308` byte 1: illumination, same as FR-33. From CAN `0x3A3`: SWC buttons, same as FR-34/FR-35. | `app/logic/can_decode.cpp:364-367`; tests `fca_doors_…`, `fca_illum_uses_its_own_id`, `fca_swc_buttons_use_their_own_id` |
-| **FR-44** | From CAN `0x513` bytes 0..3: copy four bytes, zero-pad to 8 and retransmit as `0x516` DLC 8. | `app/logic/can_decode.cpp:226-239`; test `fca_echo_513_retransmits_four_bytes_as_516` |
+| **FR-42** | From CAN `0x211` bytes 0..1: engine speed is **decimated 1-in-21** (a counter runs 0..0x14; only the pass that finds it already at 0x14 decodes and resets it) and values ≥ 8000 rpm are rejected outright. | `app/logic/can_decode.cpp:286-302`; tests `fca_rpm_is_decimated_one_frame_in_twenty_one`, `fca_rpm_rejects_8000_and_above` |
+| **FR-43** | From CAN `0x244` byte 0: doors, same permutation as FR-30. From CAN `0x308` byte 1: illumination, same as FR-33. From CAN `0x3A3`: SWC buttons, same as FR-34/FR-35. | `app/logic/can_decode.cpp:468-470`; tests `fca_doors_…`, `fca_illum_uses_its_own_id`, `fca_swc_buttons_use_their_own_id` |
+| **FR-44** | From CAN `0x513` bytes 0..3: copy four bytes, zero-pad to 8 and retransmit as `0x516` DLC 8. | `app/logic/can_decode.cpp:305-318`; test `fca_echo_513_retransmits_four_bytes_as_516` |
 
 ### 2.6 Vendor / service frames (both profiles)
 
@@ -130,10 +130,10 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 |---|---|---|
 | **FR-45** | CAN `0x7FC` carrying magic `3F F3 F2 01 ?? ?? 3A A3` shall be echoed verbatim as `0x7FD`, DLC 8. The comparison order (d0, d1, d6, d7, d2, d3) shall be preserved. | `app/logic/can_decode_shared.hpp:223-232`; test `vendor_7fc_echoes_as_7fd_only_on_the_exact_magic` |
 | **FR-46** | CAN `0x7FF` carrying magic `7F F7 x x y y 3A A3` with `d[2] == d[3]` and `d[4] == d[5]` shall write flags bits 0..3 (ACC, illum, reverse, spare) from `d[2]` bits 0..3. A non-matching frame shall change nothing. | `app/logic/can_decode_shared.hpp:241-259`; test `vendor_7ff_writes_the_four_status_bits_only_on_the_exact_magic` |
-| **FR-47** | On profile 0, `0x7FF` shall produce **no reply**. | `app/logic/can_decode.cpp:335-336`; test `jeep_vendor_7ff_does_not_reply` |
-| **FR-48** | On profile 1, a matching `0x7FF` shall additionally map `d[4]` 0..6 into the **SWC key slot** (0→0, 1→VolDn 0x02, 2→VolUp 0x01, 3→Prev 0x09, 4→Next 0x08, 5→Mode 0x0B, 6→Mute 0x03); values 7..255 leave the slot unchanged. | `app/logic/can_decode.cpp:254-263`; test `fca_vendor_7ff_replies_on_7fe_and_maps_d4_into_the_key_slot` |
-| **FR-49** | On profile 1, a matching `0x7FF` shall also emit a one-byte reply on CAN `0x7FE` reporting the head unit's current display mode, written as four independent set-or-clear steps. | `app/logic/can_decode.cpp:265-302` |
-| **FR-50** | That display-mode reply shall reproduce the stock bug: **mode 4 is tested against bit 2 again** instead of bit 3, and its `else` branch clears bit 2. The wire values are therefore mode 1 → `0x01`, mode 2 → `0x02`, **mode 3 → `0x00` (unreportable, indistinguishable from "no mode")**, mode 4 → `0x04`. This must not be "fixed". | `app/logic/can_decode.cpp:290-300`; `docs/misra-cpp.md` N-4; test `fca_vendor_7ff_display_mode_4_reuses_mode_3_bit` |
+| **FR-47** | On profile 0, `0x7FF` shall produce **no reply**. | `app/logic/can_decode.cpp:438-439`; test `jeep_vendor_7ff_does_not_reply` |
+| **FR-48** | On profile 1, a matching `0x7FF` shall additionally map `d[4]` 0..6 into the **SWC key slot** (0→0, 1→VolDn 0x02, 2→VolUp 0x01, 3→Prev 0x09, 4→Next 0x08, 5→Mode 0x0B, 6→Mute 0x03); values 7..255 leave the slot unchanged. | `app/logic/can_decode.cpp:333-342`; test `fca_vendor_7ff_replies_on_7fe_and_maps_d4_into_the_key_slot` |
+| **FR-49** | On profile 1, a matching `0x7FF` shall also emit a one-byte reply on CAN `0x7FE` reporting the head unit's current display mode, written as four independent set-or-clear steps. | `app/logic/can_decode.cpp:346-382` |
+| **FR-50** | That display-mode reply shall reproduce the stock bug: **mode 4 is tested against bit 2 again** instead of bit 3, and its `else` branch clears bit 2. The wire values are therefore mode 1 → `0x01`, mode 2 → `0x02`, **mode 3 → `0x00` (unreportable, indistinguishable from "no mode")**, mode 4 → `0x04`: mode 4 impersonates mode 3. It is the clearing `else`, not the duplicated test on its own, that does the damage — the comment in the retired `app/port/can_decode.c` called it only "mode 4 looks like mode 3", which understates it. This must not be "fixed". | `app/logic/can_decode.cpp:347-382` (the four set-or-clear steps, and the `NOTE:` at `:370-374`); test `fca_vendor_7ff_display_mode_4_reuses_mode_3_bit` |
 | **FR-51** | Identifiers matching `0x400..0x43F` shall be treated as the Hiworld node/SWC service protocol: the **low 6 bits of the identifier are the key index**, which arms that soft-timer slot to 150 counts (1.5 s). | `app/logic/can_decode_shared.hpp:271-281`; test `swc_service_takes_the_key_index_from_the_low_six_bits_of_the_id` |
 | **FR-52** | Within that block, `d[0] != 0xFD` shall end processing; `d[1] == 0x16` shall set the response mode to 9 and stage a `0xFD` hello reply; `d[1] == keydataRef` shall stage and send a `0xFE` key reply on `0x416` DLC 8. | `app/logic/can_decode_shared.hpp:282-298`; tests `swc_service_ignores_a_frame_that_is_not_a_key_report`, `swc_service_handshake_sets_the_response_mode`, `swc_service_repeat_key_replies_on_0x416` |
 | **FR-53** | The `d[2]` probe shall be qualified by the ACC flag: `0x3F` with ACC on and `0xBF` with ACC off update the reply status byte; `0xFF` with ACC off shall set the bus state to `kBusDown` **and flush the whole CAN TX queue**. | `app/logic/can_decode_shared.hpp:312-323`; tests `swc_service_probe_is_qualified_by_the_acc_flag`, `swc_service_bus_down_probe_clears_the_status_and_flushes_tx` |
@@ -179,25 +179,25 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 
 | ID | Requirement | Evidence |
 |---|---|---|
-| **FR-76** | USART2 shall run 38400 8N1 on PA2 (TX) / PA3 (RX), RX interrupt always enabled and TX interrupt armed per frame, with PA3 configured before PA2 and `BRCF = 0x01A1` derived from `PCLK1 = 16 MHz`. | `app/services/head_unit.cpp:234-270`; tests `head_unit_init_configures_usart2_with_pclk1_and_38400`, `head_unit_init_brings_up_the_port_in_stock_order` |
-| **FR-77** | The frame format shall be `AA 55 | LEN | CMD | payload[LEN] | CKS`, wire length `LEN + 5`, `CKS = (LEN + CMD + Σpayload − 1) & 0xFF` (algebraically the full byte sum including the preamble). There is **no escaping**: payload bytes may be `0xAA`/`0x55`. | `app/services/head_unit.cpp:419-460`; `app/include/app_config.hpp:136-150`; tests `head_unit_checksum_firmware_form_equals_full_sum`, `head_unit_payload_may_contain_preamble_bytes` |
-| **FR-78** | The parser shall be a byte-at-a-time state machine over a 200-byte ring: wait for `0xAA`, require `0x55`, reject `LEN >= 0x38`, wait for `LEN + 2` further bytes before committing, then accumulate and compare the final byte with `(sum − 1) & 0xFF`. Exactly one frame is processed per call. | `app/services/head_unit.cpp:324-417`; tests `head_unit_rejects_oversized_length`, `head_unit_accepts_maximum_length`, `head_unit_partial_frame_is_retried_next_pass` |
-| **FR-79** | The RX ring tail shall be committed only when the machine is back in state 0 or a frame has completed, so a half-received frame is re-parsed from its `0xAA` on the next call and no timeout is needed. The `5A A5` dialect shall never be accepted. | `app/services/head_unit.cpp:335-345`, `:370-376`; test `head_unit_rejects_5A_A5_dialect` |
-| **FR-80** | The RX interrupt shall drop a byte and latch `uartRxOverflow` when advancing head would meet tail; the flag is never cleared again. | `app/services/head_unit.cpp:676-688`; test `head_unit_isr_rx_ring_overflow_drops_byte` |
-| **FR-81** | The outbound table shall be exactly six slots in transmit order `0x72`/14, `0xA6`/8, `0x73`/8, `0xF0`/17, `0x12`/10, `0x32`/14, each with its own shadow copy. | `app/services/head_unit.cpp:126-134`; `docs/hiworld-firmware-analysis.md` §4.1 |
+| **FR-76** | USART2 shall run 38400 8N1 on PA2 (TX) / PA3 (RX), RX interrupt always enabled and TX interrupt armed per frame, with PA3 configured before PA2 and `BRCF = 0x01A1` derived from `PCLK1 = 16 MHz`. | `app/services/head_unit.cpp:184-198`; tests `head_unit_init_configures_usart2_with_pclk1_and_38400`, `head_unit_init_brings_up_the_port_in_stock_order` |
+| **FR-77** | The frame format shall be `AA 55 | LEN | CMD | payload[LEN] | CKS`, wire length `LEN + 5`, `CKS = (LEN + CMD + Σpayload − 1) & 0xFF` (algebraically the full byte sum including the preamble). There is **no escaping**: payload bytes may be `0xAA`/`0x55`. | `app/services/hu_hiworld.cpp:152-176`; `app/include/app_config.hpp:136-150`; tests `head_unit_checksum_firmware_form_equals_full_sum`, `head_unit_payload_may_contain_preamble_bytes` |
+| **FR-78** | The parser shall be a byte-at-a-time state machine over a 200-byte ring: wait for `0xAA`, require `0x55`, reject `LEN >= 0x38`, wait for `LEN + 2` further bytes before committing, then accumulate and compare the final byte with `(sum − 1) & 0xFF`. Exactly one frame is processed per call. | `app/services/hu_hiworld.cpp:206-271`; tests `head_unit_rejects_oversized_length`, `head_unit_accepts_maximum_length`, `head_unit_partial_frame_is_retried_next_pass` |
+| **FR-79** | The RX ring tail shall be committed only when the machine is back in state 0 or a frame has completed, so a half-received frame is re-parsed from its `0xAA` on the next call and no timeout is needed. The `5A A5` dialect shall never be accepted. | `app/services/hu_hiworld.cpp:226-229`, `:259-269`; test `head_unit_rejects_5A_A5_dialect` |
+| **FR-80** | The RX interrupt shall drop a byte and latch `uartRxOverflow` when advancing head would meet tail; the flag is never cleared again. | `app/services/head_unit.cpp:498-510`; test `head_unit_isr_rx_ring_overflow_drops_byte` |
+| **FR-81** | The outbound table shall be exactly six slots in transmit order `0x72`/14, `0xA6`/8, `0x73`/8, `0xF0`/17, `0x12`/10, `0x32`/14, each with its own shadow copy. | `app/services/hu_hiworld.cpp:72-79`; `docs/hiworld-firmware-analysis.md` §4.1 |
 
 > The remaining head-unit behaviour is numbered FR-82 … FR-88 below; the link is the largest
 > single capability in the box and splitting it keeps each row atomic.
 
 | ID | Requirement | Evidence |
 |---|---|---|
-| **FR-82** | The transmit scheduler shall run from the 8 ms slot and emit at most one data frame every **6th pass (48 ms)**; on a sweep where no payload differs from its shadow it shall wait 15 idle sweeps (~720 ms) and then send the next table entry anyway as a keep-alive, using a separate auxiliary index. | `app/services/head_unit.cpp:491-581`; tests `head_unit_scheduler_emits_only_every_sixth_pass`, `head_unit_keepalive_waits_fifteen_idle_sweeps` |
-| **FR-83** | The round-robin shall send the first slot whose live payload differs from its shadow, refresh that shadow and leave the index on that slot; a full sweep with no change parks the index on the sentinel value 6. | `app/services/head_unit.cpp:462-489`; tests `head_unit_round_robin_sends_changed_slot_and_updates_shadow`, `head_unit_round_robin_skips_unchanged_slot` |
-| **FR-84** | Message `0x73` shall be transmitted as **eight zero bytes for ever**: nothing in the image ever writes its buffer. | `app/services/head_unit.cpp:111-113`; `docs/hiworld-firmware-analysis.md` §4.7 |
-| **FR-85** | Inbound `0xD2` (13 bytes) and `0xAD` (2 bytes) shall be copied into their destinations **only when the payload actually changed**, and the matching "new data" flag raised for the consumer to clear. | `app/services/head_unit.cpp:291-299`; test `head_unit_unchanged_payload_does_not_reraise_new_data` |
-| **FR-86** | Inbound `0xFC` with payload `3F F3 F1 01 ?? ?? 3A A3 ??` shall be echoed back with CMD changed to `0xFD` and the checksum incremented by one, as a fixed 14-byte frame, and only while the transmitter is idle. | `app/services/head_unit.cpp:301-315`; test `head_unit_fc_handshake_echoes_fd` |
-| **FR-87** | Inbound `0xE0` shall force a watchdog reset (dropping back into the IAP bootloader). Every other command — `0xFF` ACKs included — shall be silently ignored; the box cannot be polled. | `app/services/head_unit.cpp:317-321`; `docs/hiworld-firmware-analysis.md` §4.5, §4.6 |
-| **FR-88** | The 10-entry ACK queue and `txAck(0xFF, code)` shall be reproduced, including the skip of reserved codes `0xFE`/`0xFF` and the tick roll-back, even though the producer index is never advanced and the path is therefore **dead on the wire** in this build. | `app/services/head_unit.cpp:527-538`, `:640-655`; test `head_unit_tx_ack_frame_shape` |
+| **FR-82** | The transmit scheduler shall run from the 8 ms slot and emit at most one data frame every **6th pass (48 ms)**; on a sweep where no payload differs from its shadow it shall wait 15 idle sweeps (~720 ms) and then send the next table entry anyway as a keep-alive, using a separate auxiliary index. | `app/services/head_unit.cpp:320-410`; tests `head_unit_scheduler_emits_only_every_sixth_pass`, `head_unit_keepalive_waits_fifteen_idle_sweeps` |
+| **FR-83** | The round-robin shall send the first slot whose live payload differs from its shadow, refresh that shadow and leave the index on that slot; a full sweep with no change parks the index on the sentinel value 6. | `app/services/head_unit.cpp:291-318`; tests `head_unit_round_robin_sends_changed_slot_and_updates_shadow`, `head_unit_round_robin_skips_unchanged_slot` |
+| **FR-84** | Message `0x73` shall be transmitted as **eight zero bytes for ever**: nothing in the image ever writes its buffer. | `app/services/hu_hiworld.cpp:48-50`; `docs/hiworld-firmware-analysis.md` §4.7 |
+| **FR-85** | Inbound `0xD2` (13 bytes) and `0xAD` (2 bytes) shall be copied into their destinations **only when the payload actually changed**, and the matching "new data" flag raised for the consumer to clear. | `app/services/head_unit.cpp:225-233`; test `head_unit_unchanged_payload_does_not_reraise_new_data` |
+| **FR-86** | Inbound `0xFC` with payload `3F F3 F1 01 ?? ?? 3A A3 ??` shall be echoed back with CMD changed to `0xFD` and the checksum incremented by one, as a fixed 14-byte frame, and only while the transmitter is idle. | `app/services/head_unit.cpp:235-249`; test `head_unit_fc_handshake_echoes_fd` |
+| **FR-87** | Inbound `0xE0` shall force a watchdog reset (dropping back into the IAP bootloader). Every other command — `0xFF` ACKs included — shall be silently ignored; the box cannot be polled. | `app/services/head_unit.cpp:251-255`; `docs/hiworld-firmware-analysis.md` §4.5, §4.6 |
+| **FR-88** | The 10-entry ACK queue and `txAck(0xFF, code)` shall be reproduced, including the skip of reserved codes `0xFE`/`0xFF` and the tick roll-back, even though the producer index is never advanced and the path is therefore **dead on the wire** in this build. | `app/services/head_unit.cpp:356-367`, `:462-477`; test `head_unit_tx_ack_frame_shape` |
 
 ### 2.11 Parameter store
 
@@ -245,9 +245,9 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | **NFR-2** | The reset veneer label `image_entry` shall be at **exactly `0x08002202`**, shaped `push {r4,lr}; bl …; pop {r4,pc}`. The build shall fail otherwise. | `app/linker/app.ld:243-245`; `tools/verify_preamble.py` check 1 |
 | **NFR-3** | Every veneer slot in `0x0800202A`–`0x08002201` that the bootloader's table dispatches to shall keep its original address and `push/bl/pop` shape, and its `bl` target shall lie inside the app region. The slot map is read off the bootloader dump, **not** from the linear `0x08002072 + 8·IRQn` rule. | `tools/verify_preamble.py` checks 2–4; `app/linker/app.ld:38-60`; `docs/notes/vector-table-slot-map.md` |
 | **NFR-4** | The image shall contain no vector table, shall never write `SCB->VTOR`, shall never set `SP`, and shall not re-program the clock tree. | `app/linker/app.ld:21-27`; `app/startup/startup.c:36-44` |
-| **NFR-5** | The linked image shall fit the 118 KB region; the build fails if it does not. Current size: **11 800 bytes (9.8 %)**. | `tools/build.py:167-170`; `arm-none-eabi-size build/app.elf` |
-| **NFR-6** | Linker-allocated RAM shall start at or above `0x20000600` (the bootloader's stack lives below it, growing down from `MSP = 0x20000600`) and end at or below `0x20006000`. Current `.bss` is **2 604 bytes**, `.data` is **0**; no heap and no stack are reserved in the script. | `app/linker/app.ld:76-102`, `:246-250` |
-| **NFR-7** | The application shall keep **no state at a fixed SRAM address**. The one externally visible datum is `g_versionString`, which the flashing tool resolves from `build/app.elf` with `nm`. | `app/include/ram_map.hpp:10-31`, `:514-526` |
+| **NFR-5** | The linked image shall fit the 118 KB region; the build fails if it does not. Current size: **11 852 bytes (9.8 %)** jeep, **12 384 (10.2 %)** benz. | `tools/build.py:216-220`; `build/jeep/app.bin`, `build/benz/app.bin` |
+| **NFR-6** | Linker-allocated RAM shall start at or above `0x20000600` (the bootloader's stack lives below it, growing down from `MSP = 0x20000600`) and end at or below `0x20006000`. Current `.bss` is **2 668 bytes** on the jeep build and **2 664** on the benz build, `.data` is **0** on both; no heap and no stack are reserved in the script. | `app/linker/app.ld:76-102`, `:246-250` |
+| **NFR-7** | The application shall keep **no state at a fixed SRAM address**. The one externally visible datum is `g_versionString`, which the flashing tool resolves from `build/<protocol>/app.elf` with `nm`. | `app/include/ram_map.hpp:10-31`, `:514-526` |
 
 ### 3.2 Real-time behaviour
 
@@ -257,7 +257,7 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | **NFR-9** | The 1 ms tick shall drive a divider chain of 10 ms (soft timers, cycle counter) and 100 ms (soft clock, CAN timers) hooks using three independent `if`s, so the cascade settles in one interrupt. | `app/services/scheduler.cpp:75-102`; test `sched_isr_divider_chain_yields_exactly_one_second_per_1000_interrupts` |
 | **NFR-10** | The cadence flags shall fire on the exact stock phases: 4 ms at `(c & 3) == 1`, 8 ms at `(c & 7) == 3`, …, 1024 ms at `(c & 0x3FF) == 0x3FF`, 2048 ms at `(c & 0x7FF) == 0x7FF`. The 4/8/16/32 ms jobs shall never coincide; from 64 ms down they all fire on all-ones masks and **do** coincide — stock, not a slip. | `app/services/scheduler.cpp:107-126`; tests `sched_the_four_fast_cadences_never_coincide`, `sched_the_slow_cadences_do_coincide_at_2047ms` |
 | **NFR-11** | The millisecond counter shall be 32-bit: an 8-bit counter would make the 1024 ms and 2048 ms tests unreachable and hang phase 1. | `app/include/ram_map.hpp:82-101`; test `sched_the_1024ms_and_2048ms_flags_are_reachable_at_all` |
-| **NFR-12** | Interrupt priorities shall be the stock ones: USART2 preempt 2, CAN_RX0 preempt 3, TIM2 preempt 4 (lower = higher priority), EXTI9_5 preempt 0 for the wake path. Priority grouping is written `0x300` by the TIM2/CAN/USART2 initialisers and `0x500` by the wake arming; the last writer wins, as in stock. | `app/services/scheduler.hpp` NVIC block; `app/services/can_bus.cpp:59-63`; `app/services/head_unit.cpp:39-42`; `app/services/board_io.cpp:50-58` |
+| **NFR-12** | Interrupt priorities shall be the stock ones: USART2 preempt 2, CAN_RX0 preempt 3, TIM2 preempt 4 (lower = higher priority), EXTI9_5 preempt 0 for the wake path. Priority grouping is written `0x300` by the TIM2/CAN/USART2 initialisers and `0x500` by the wake arming; the last writer wins, as in stock. | `app/services/scheduler.hpp` NVIC block; `app/services/can_bus.cpp:59-63`; `app/services/head_unit.cpp:40-43`; `app/services/board_io.cpp:50-58` |
 | **NFR-13** | Masking interrupts across a parameter save is accepted to cost time: a page erase plus 32 word programs runs tens of milliseconds, during which the millisecond counter and soft clock lose time and buffered CAN/UART traffic beyond the hardware FIFOs is dropped. This shall not be "fixed" by shortening the mask. | `app/services/param_store.hpp:121-133` |
 
 ### 3.3 Flash safety and recoverability
@@ -275,7 +275,7 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 |---|---|---|
 | **NFR-18** | Services and logic shall be C++17, freestanding, built `-fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit -fno-unwind-tables`; the HAL shall be C11. No heap, no exceptions, no RTTI, no virtual functions, no recursion. | `docs/misra-cpp.md` §1, §2 |
 | **NFR-19** | **No namespace-scope object with a runtime constructor.** This image never walks `.init_array`; the linker asserts `.preinit_array`, `.init_array` and `.fini_array` are empty and fails the build otherwise. | `app/linker/app.ld:256-261`; `docs/misra-cpp.md` §1 |
-| **NFR-20** | The firmware shall contain **no `reinterpret_cast`**; fixed-width types everywhere; `constexpr` over `#define` in the C++ layers; `noexcept` on every function that can be. Recorded deviations D-1…D-6 are the only exceptions and are enumerated, not discovered. | `docs/misra-cpp.md` §3 |
+| **NFR-20** | The firmware shall contain **no `reinterpret_cast`**; fixed-width types everywhere; `constexpr` over `#define` in the C++ layers; `noexcept` on every function that can be. Recorded deviations D-1…D-7 are the only exceptions and are enumerated, not discovered. | `docs/misra-cpp.md` §3 |
 | **NFR-21** | Behaviour shall be deterministic: no randomness, no uninitialised reads except the one documented reconstruction (the stock cluster-text function reads an uninitialised register when the digit test fails; the rebuild initialises that local to 0 — the only defined choice), all loop bounds compile-time constant, and loop counters typed to their range so a 0xFF-masked stock counter cannot spin for ever. | `app/logic/periodic_tx.cpp:256-266`; `docs/misra-cpp.md` §2 "Loop counters" |
 | **NFR-22** | Build-time integration checks shall fail the build when an interrupt handler name drifts and silently leaves a weak trap in place, or when one stock function is reconstructed twice under two names. | `tools/check_stubs.py`; `tools/build.py:180-186` |
 | **NFR-23** | The number of CAN profiles shall remain exactly 2. Three `static_assert`s reference `cfg::kProfileCount` — the bit-rate selectors are write-back normalisers, the profile is published to the head unit in one bit, and the autobaud is a flip-flop — so raising it is a protocol change that stops the build rather than corrupting the parameter page at runtime. | `app/include/app_config.hpp:79-105`; `app/services/can_bus.cpp:259-265`; `app/logic/periodic_tx.cpp:615-618` |
@@ -308,7 +308,7 @@ These are taken as given. If any turns out to be false, requirements above fail 
 
 | Method | What it means here |
 |---|---|
-| **HOST** | Covered by a named test in `tests/host/`, run by `python tools/test.py` (298 tests, 0 failing). The tests are written from the Ghidra decompile in `reference/decompile/app/`, not from the rebuilt code. |
+| **HOST** | Covered by a named test in `tests/host/`, run by `python tools/test.py`, which runs both protocols (319 tests on the jeep build, 323 on the benz build, 0 failing). The tests are written from the Ghidra decompile in `reference/decompile/app/`, not from the rebuilt code. |
 | **BUILD** | Enforced at compile or link time — `static_assert`, a linker `ASSERT`, or a `tools/*.py` check that fails the build. |
 | **STATIC** | Verified by reading the rebuilt source against the decompile/doc; no automated check. |
 | **BENCH** | Can only be closed by running on hardware. Not done. |
@@ -323,7 +323,7 @@ These are taken as given. If any turns out to be false, requirements above fail 
 | FR-54 … FR-58 (vehicle state) | HOST + BUILD | Window geometry is `static_assert`ed (`app/include/ram_map.hpp:357-371`) and exercised by 16 tests in `test_ram_map.cpp`; FR-56 (the change counter in `main_loop`) is STATIC only. |
 | FR-59 … FR-70 (periodic TX) | HOST | 47 tests in `test_periodic_tx.cpp` and `test_can_bus.cpp`; full 151-phase sweeps are walked for both profiles. |
 | FR-71 … FR-75 (link machine) | HOST | 19 tests in `test_can_link.cpp`, every state transition included. The two forced-reset exits are observed through the fake HAL, not on silicon. |
-| FR-76 … FR-88 (head-unit link) | HOST + BUILD | 30 tests in `test_head_unit.cpp`; the descriptor table's lengths, shadows and buffer windows are `static_assert`ed (`app/services/head_unit.cpp:161-197`). Actual 38400 8N1 framing on a wire is BENCH. |
+| FR-76 … FR-88 (head-unit link) | HOST + BUILD | 30 tests in `test_head_unit.cpp`; the descriptor table's lengths, shadows and buffer windows are `static_assert`ed (`app/services/hu_hiworld.cpp:97-111`). Actual 38400 8N1 framing on a wire is BENCH. |
 | FR-89 … FR-95 (parameters) | HOST | 22 tests in `test_param_store.cpp`, including the real dumped page (`param_store_load_reads_the_real_dumped_page`). Real flash timing/erase success is BENCH. |
 | FR-96 … FR-99 (status outputs) | HOST | 28 tests in `test_board_io.cpp`, including pin-crossing regressions. Electrical behaviour is BENCH. |
 | FR-100 … FR-107 (faults, sleep) | HOST + STATIC | 9 tests in `test_power.cpp` cover the teardown order, the no-op-on-refusal path and the wake reset; `power_fault_codes_do_not_collide_with_the_crt0_trap_codes` covers the code ranges. The trap table itself (FR-101) is STATIC. Actual deep sleep and the PB8 wake are **BENCH**. |
@@ -352,22 +352,72 @@ These are taken as given. If any turns out to be false, requirements above fail 
 
 ## 6. Open questions and known divergences
 
-### 6.1 Deliberate divergence from stock — fault codes at three reset sites
+### 6.1 Deliberate divergences from stock
 
-Three sites call `fatalErrorReset()` where the stock image open-codes `wwdg_init();
-wwdg_force_reset();` and records **nothing**:
+The rule everywhere else in this document is that the stock firmware is the specification and
+its quirks are the requirement (§6.2). This section records where that rule was knowingly
+broken, and why. It is deliberately short, and it should stay that way.
+
+**A — fault codes at three reset sites.** Three sites call `fatalErrorReset()` where the
+stock image open-codes `wwdg_init(); wwdg_force_reset();` and records **nothing**, so the
+resulting reset is indistinguishable from a brownout afterwards:
 
 | Code | Site | Stock behaviour |
 |---|---|---|
-| `0xC0` (192) `kFatalBusDown` | `kBusDown` with the bus dead, reached only when CAN refused to sleep | forced reset, no record |
-| `0xC1` (193) `kFatalLinkWedged` | `kBusRunning` with the activity counter expired | forced reset, no record |
-| `0xC2` (194) `kFatalHostCommand` | head-unit command `0xE0` | forced reset, no record |
+| `0xC0` (192) `kFatalBusDown` | `kBusDown` with the bus dead, reached only when CAN refused to sleep (`app/logic/can_link.cpp:162-167`) | forced reset, no record |
+| `0xC1` (193) `kFatalLinkWedged` | `kBusRunning` with the activity counter expired (`app/logic/can_link.cpp:193-196`) | forced reset, no record |
+| `0xC2` (194) `kFatalHostCommand` | head-unit command `0xE0` (`app/services/head_unit.cpp:251-254`) | forced reset, no record |
 
-The divergence is one store to a byte **no code in the image ever reads**. It cannot change
-behaviour on CAN, on the UART or on any pin; it only makes the reset identifiable afterwards,
-which matters because SRAM is the only post-mortem this box has. Documented in
-`app/services/power.hpp:52-73` and `docs/misra-cpp.md`.
-Covered by `power_fault_codes_do_not_collide_with_the_crt0_trap_codes`.
+They now route through `svc::power::fatalErrorReset(code)`, which stores one byte into
+`ram::app().fatalErrorCode` before resetting.
+
+*Why this cannot change behaviour.* The byte has **no reader anywhere in the image** — it is
+written and never consulted. The store cannot affect CAN traffic, the head-unit UART, any
+GPIO, or timing in any way that outlives the reset that immediately follows it.
+
+*Why it is worth doing.* That byte is the only post-mortem this box has. Flash is RDP-L1
+locked and there is no printf; SRAM is readable over SWD and survives a watchdog reset. A
+field box that keeps rebooting is diagnosable with the code, and guesswork without it.
+
+The codes sit at 192..194, clear of `crt0.S`'s stock trap range (100..164) and of its
+unported-handler range (217..247), so the three ranges stay distinguishable (NFR-24). The
+full table is in `app/services/power.hpp:45-73`, and
+`power_fault_codes_do_not_collide_with_the_crt0_trap_codes` in `tests/host/test_power.cpp`
+pins the non-collision.
+
+**B — profile 0 now decodes gear and engine speed.** The stock 83.333 kbit/s profile has **no
+gear or RPM decoder at all**, which is why UART message `0x32` leaves a stock box permanently
+all-zero. The rebuild adds both; FR-37a and FR-37b are the requirements, superseding FR-37.
+
+| what | from | to |
+|---|---|---|
+| engine RPM | CAN `0x002` d[0]:d[1], 1 rpm/count BE | `0x32` payload `[2..3]` |
+| PRNDL | CAN `0x003` d[4], ASCII of the displayed character | `0x32` payload `[1]` |
+
+*This is additive, not a change to anything that already worked.* Both bytes are inside a
+message the firmware already transmits on every round-robin sweep, and the head unit's JPF2
+handler already parses them — no plugin change was needed, and no other field moved. The
+stock reverse flag still comes from `0x003` d[2]'s low nibble and was deliberately not
+re-derived from the new gear value, because that flag gates the steering decode (FR-32) and
+the reverse status line.
+
+*Evidence.* `docs/JEEP-WK-CAN-ID-byte-map.md` carries both ids as *Confirmed* from live
+capture; the destination encoding is `docs/hiworld-radio-injectable.md` §B. `0x003` d[4] is
+used rather than d[2] because d[2] is a lever bitfield in which D and every AutoStick range
+both read `0x84`, so d[2] cannot tell them apart and d[4] can.
+
+*Two things deliberately NOT copied from profile 1's `0x211` decoder* (FR-42): no 1-in-21
+decimation — the UART round-robin already bounds the send rate — and no `>= 8000` rejection,
+because that clamp would swallow the car's all-`FF` "engine off" sentinel, which is exactly
+the value the head unit reads as "blank the field". Passing it through is what makes the dash
+clear instead of freezing the last live reading.
+
+Covered by nine tests in `tests/host/test_can_decode.cpp`, written from the byte map rather
+than from the implementation.
+
+*Not available by this route, so do not try:* speed, battery voltage and the
+oil/coolant/trans/intake temperatures occupy `0x32` `[4..13]` but are decoded only by the
+sibling JPP004 protocol. The JPF2 handler on this head unit stops after gear and RPM.
 
 ### 6.2 Reproduced stock defects (not to be fixed)
 
@@ -375,11 +425,15 @@ Covered by `power_fault_codes_do_not_collide_with_the_crt0_trap_codes`.
 |---|---|---|
 | Profile 1's `0x7FF` display-mode reply tests mode 4 against bit 2 again | **Mode 3 is unreportable** (`0x00`) and mode 4 occupies its bit | FR-50 |
 | Profile 1 gear nibble 9 | the "leave the gear alone" branch is unreachable; 8..F all report R | FR-41 |
-| `armForKeycode()` has no bounds check | a key code above 0x3F would write past the 64-slot pool; the decoder never produces one | `docs/misra-cpp.md` N-2 |
+| `armForKeycode()` has no bounds check | a key code above 0x3F would write past the 64-slot pool into the UART frame buffer; the one writer of `swc.keycode` masks the identifier with `0x3F` (FR-51), so the decoder cannot produce one, and `static_assert(kSoftTimerSlots == 64)` stops the build if the slot count ever changes | `app/services/soft_timer.cpp:23-33`; `app/services/soft_timer.hpp:36-47`; `app/logic/can_decode_shared.hpp:300`; test `swc_service_takes_the_key_index_from_the_low_six_bits_of_the_id` |
 | `txDrain()` assigns rather than ORs the error flag | a mailbox stall wipes a pending RX-ring-full or TX-ring-full bit | FR-70 |
 | Message `0x73` | eight zero bytes for ever | FR-84 |
 | The ACK queue | never produced into; `txAck` is dead on the wire | FR-88 |
 | `0x12` payload `[4..9]` | amplifier state aliased into a door message | FR-57 |
+
+Every row is reproduced and documented rather than silently patched, because changing one
+would diverge from the reference image. If one is ever fixed, it must be fixed as a
+deliberate, tested change — a new entry in §6.1, not a quiet correction.
 
 ### 6.3 Behavioural unknowns that only a car can settle
 
@@ -412,12 +466,11 @@ affects the built image; all of them will mislead the next reader.
 
 | Where | Problem |
 |---|---|
-| `app/services/power.hpp:67` | Cites "`docs/misra-cpp.md` section 6" for the fault-code divergence. That file has sections 1, 2, 3, 4, 4a and 5 — **there is no section 6**, and the divergence is described in §4 N-1…N-5 and §3 only indirectly. |
 | `app/services/board_io.cpp:164-167` | Says "the summary in `docs/ARCHITECTURE.md` §3 lists the NVIC step last; the image puts it first". `docs/ARCHITECTURE.md` §3 now lists the NVIC steps **first** (items 1–2). The code comment is stale. |
 | `AGENTS.md` "Recommended workflow" 4 | Tells the reader to read back the version string from SRAM `0x20001B86` via `ram::app().versionStr`. There is no `versionStr` member any more: it is the standalone `extern "C" g_versionString`, and the uploader resolves it with `nm` rather than from a fixed address (`app/include/ram_map.hpp:514-526`). |
 | `app/MEMORY_MAP.md` "Application preamble" | Still states `veneer(IRQn) = 0x08002072 + 8*IRQn` with no superseded marker. `app/linker/app.ld:46-54`, `AGENTS.md` and `docs/hiworld-startup-sequence.md` §2 all record that this holds only for IRQ0..10 and IRQ23..41. |
 | `app/REBUILD.md` §7 | The open-questions table still lists the float ABI as unresolved ("objdump not available in this environment yet") and advises "keep using the `globals.h` absolute pointers for known state". `AGENTS.md` records the float ABI as settled by disassembly, and `app/include/globals.h` has been deleted. |
-| `docs/hiworld-firmware-analysis.md` §3.7 | States that profile 1's `0x7FF` "also sets the **gear** from `d[4]`" with the mapping 0→0, 1→2, 2→1, 3→9, 4→8, 5→11, 6→3. Those are exactly the SWC **key codes**, and the rebuild writes them into the SWC key slot, flagging explicitly that it is "the key slot, not the gear slot — that is what the stock code does" (`app/logic/can_decode.cpp:241-263`, test `fca_vendor_7ff_replies_on_7fe_and_maps_d4_into_the_key_slot`). One of the two readings is wrong; the code and its test are the more recent and more specific claim, but this has never been checked on hardware. |
+| `docs/hiworld-firmware-analysis.md` §3.7 | States that profile 1's `0x7FF` "also sets the **gear** from `d[4]`" with the mapping 0→0, 1→2, 2→1, 3→9, 4→8, 5→11, 6→3. Those are exactly the SWC **key codes**, and the rebuild writes them into the SWC key slot, flagging explicitly that it is "the key slot, not the gear slot — that is what the stock code does" (`app/logic/can_decode.cpp:320-342`, test `fca_vendor_7ff_replies_on_7fe_and_maps_d4_into_the_key_slot`). One of the two readings is wrong; the code and its test are the more recent and more specific claim, but this has never been checked on hardware. |
 
 ### 6.6 Requirements with no verification path short of a bench
 

@@ -1171,7 +1171,8 @@ TEST(dispatch_gate_clears_the_marker_when_the_debounce_expires)
 }
 
 /* ===========================================================================
- * Jeep RPM and PRNDL -- NOT stock decoders. See DV-2 in docs/misra-cpp.md.
+ * Jeep RPM and PRNDL -- NOT stock decoders. See docs/REQUIREMENTS.md section
+ * 6.1 B, and FR-37a / FR-37b.
  *
  * Written from docs/JEEP-WK-CAN-ID-byte-map.md (both ids marked Confirmed) and
  * from the head-unit side in docs/hiworld-radio-injectable.md section B, not

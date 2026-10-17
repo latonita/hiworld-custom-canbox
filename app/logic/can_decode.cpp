@@ -30,6 +30,7 @@
 #include "app_config.hpp"
 #include "can_bus.hpp"
 #include "can_decode_shared.hpp"
+#include "raise_benz_decode.hpp"
 #include "ram_map.hpp"
 
 namespace logic {
@@ -40,8 +41,12 @@ using namespace logic::shared;
 /* ===========================================================================
  * Profile 0 -- 83.333 kbit/s. THIS box (Jeep WK family, H1N4JPF20A / JPF2).
  *
- * No RPM, PRNDL or vehicle-speed decode exists on this profile: the only gear
- * information is the reverse nibble on 0x003.
+ * STOCK decodes no RPM, PRNDL or vehicle speed here: the only gear
+ * information it takes is the reverse nibble on 0x003. The car carries all
+ * three. This rebuild adds the two the Hiworld protocol has fields for --
+ * PRNDL from 0x003 d[4] and engine RPM from 0x002 d[0]:d[1], both deliberate
+ * divergences (docs/REQUIREMENTS.md section 6.1 B) -- and leaves road speed to
+ * the Benz-only decoders in raise_benz_decode.cpp.
  * ========================================================================= */
 
 /* 0x015 d[4]:d[5] -- steering angle, centre 0x1000, 0.5 deg/LSB, big-endian.
@@ -81,10 +86,10 @@ void jeepSteering(const volatile std::uint8_t* d) noexcept
 /* ---------------------------------------------------------------------------
  * PRNDL, from 0x003 d[4].
  *
- * NOT A STOCK DECODE -- see DV-2 in docs/misra-cpp.md. The stock profile-0
- * decoder reads only d[2]'s low nibble, and only to derive the reverse flag;
- * it never publishes a gear, which is why UART message 0x32 is all zeros on
- * this profile in a stock box.
+ * NOT A STOCK DECODE -- see docs/REQUIREMENTS.md section 6.1 B and FR-37b.
+ * The stock profile-0 decoder reads only d[2]'s low nibble, and only to derive
+ * the reverse flag; it never publishes a gear, which is why UART message 0x32
+ * is all zeros on this profile in a stock box.
  *
  * Evidence: docs/JEEP-WK-CAN-ID-byte-map.md, id 0x003 (DLC 7, ~450 ms),
  * marked Confirmed. d[4] is the redundant PRNDL byte and is the ASCII CODE OF
@@ -137,7 +142,7 @@ void jeepReverse(const volatile std::uint8_t* d) noexcept
 /* ---------------------------------------------------------------------------
  * Engine speed, from 0x002 d[0]:d[1].
  *
- * NOT A STOCK DECODE -- see DV-2 in docs/misra-cpp.md.
+ * NOT A STOCK DECODE -- see docs/REQUIREMENTS.md section 6.1 B and FR-37a.
  *
  * Evidence: docs/JEEP-WK-CAN-ID-byte-map.md, id 0x002 (DLC 8, 50 ms), marked
  * Confirmed: d[0]:d[1] is engine RPM at 1 rpm/count, big-endian, and all-FF
@@ -400,10 +405,33 @@ void decodeProfileJeep() noexcept
 
         switch (id) {
         case canid::kJeepIgnition:   decodeIgnition(d[0]);    break; /* ACC / run  */
-        case canid::kJeepEngine:     jeepEngine(d);           break; /* rpm        */
+        case canid::kJeepEngine:
+            jeepEngine(d);                                           /* rpm        */
+            if constexpr (cfg::kIsBenz) {
+                benzRpm(d);
+                benzSpeed(d);
+            }
+            break;
         case canid::kJeepReverse:    jeepReverse(d);          break; /* reverse+gear*/
         case canid::kJeepDoors:      decodeDoors(d[2]);       break; /* doors      */
-        case canid::kJeepSteering:   jeepSteering(d);         break; /* steering   */
+        case canid::kJeepSteering:
+            jeepSteering(d);                                         /* steering   */
+            if constexpr (cfg::kIsBenz) {
+                benzVoltage(d);
+            }
+            break;
+        /* 0x014 and 0x02C are not stock cases at all. In a jeep build they
+         * must keep falling through to decodeSwcService() exactly as they
+         * did before, or this stops being a faithful rebuild -- hence the
+         * else, which is not dead weight. */
+        case canid::kJeepTrip:
+            if constexpr (cfg::kIsBenz) { benzTrip(d); }
+            else                        { decodeSwcService(id, d); }
+            break;
+        case canid::kJeepCoolant:
+            if constexpr (cfg::kIsBenz) { benzCoolant(d); }
+            else                        { decodeSwcService(id, d); }
+            break;
         case canid::kJeepIllum:      decodeIllumLevel(d[1]);  break; /* illum + %  */
         case canid::kJeepSwcButtons: decodeSwcButtons(d);     break; /* SWC keys   */
         case canid::kJeepVendorEcho: jeepEcho500(d);          break; /* -> 0x516   */

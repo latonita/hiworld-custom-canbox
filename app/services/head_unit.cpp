@@ -15,6 +15,7 @@
 
 #include "app_config.hpp"
 #include "bytes.hpp"
+#include "hu_dialect.hpp"
 #include "power.hpp"
 #include "ram_map.hpp"
 
@@ -42,46 +43,36 @@ constexpr std::uint8_t  kUsart2Sub     = 0U;
 constexpr std::uint32_t kPriorityGroup = 0x300U;  /* NVIC_PriorityGroup_4    */
 
 /* ===========================================================================
- * Shorthand for the fixed RAM this module owns. All of it is named in
- * ram_map.hpp; nothing here may use a raw address.
+ * The rest of the fixed RAM this module owns. fb() and rxf() live in
+ * hu_dialect.hpp because both dialect TUs need them; these two are the
+ * scheduler's alone. All of it is named in ram_map.hpp; nothing here may use
+ * a raw address.
  * ========================================================================= */
-inline volatile std::uint8_t* fb() noexcept { return ram::app().uartFrame; }
-inline volatile std::uint8_t* rxf() noexcept { return ram::app().uartRxFrame; }
 inline volatile std::uint8_t* ackq() noexcept { return ram::app().uartAckQueue; }
 inline volatile std::uint8_t* slotState() noexcept { return ram::app().uartSlotState; }
 
 /* ===========================================================================
- * The message tables, from flash 0x08009F2C (TX) and 0x08009F74 (RX), reached
- * through the literal pools at 0x08008E30 / 0x08008E38 / 0x08009004. The stock
- * record shape is { u8 cmd; u8 len; u8 pad[2]; void *buf; void *shadow; }.
+ * THE TWO DIALECTS, AND WHY THEY ARE NOT BEHIND #if.
  *
- * WHY FUNCTION POINTERS AND NOT DATA POINTERS.
- * Historical, and no longer forced. When this was written the buffers lived
- * inside a ram::app() produced by a reinterpret_cast to a fixed SRAM address,
- * which is NOT a constant expression -- so a table of `volatile uint8_t *`
- * would have needed a runtime initialiser in .init_array, which this image
- * never runs and which app/linker/app.ld fails the build over. A table of
- * POINTERS TO FUNCTIONS is a constant expression, so the table is `constexpr`,
- * lands in .rodata, and the accessors below fold to one constant address each
- * at -Os.
+ * svc::hu speaks one of two head-unit dialects (cfg::kProtocol). Each one owns
+ * a translation unit of its own -- hu_hiworld.cpp for the stock "AA 55" and
+ * hu_raise_benz.cpp for the Raise/Mercedes "2E" -- and hu_dialect.hpp is the
+ * contract between them and the scheduler in THIS file: TxDesc, the two frame
+ * accessors both parsers need, detail::rxDispatch(), and per dialect a
+ * kTxTable, an emit() and an rxParse().
  *
- * The state is an ordinary .bss object now, so `&ram::g_appRam.uartShadows.msg72`
- * IS an address constant and a plain data-pointer table would work. The
- * indirection is kept because it costs nothing after inlining and because the
- * accessors are where the old bare addresses became names; collapsing it is a
- * tidy-up for someone with a bench, not a correctness fix.
+ * BOTH TUs are compiled in EVERY build: tools/build.py and tools/test.py walk
+ * app/services/ rather than listing files, and the three selection points
+ * below are `if constexpr (cfg::kIsBenz)`, never #if. So the inactive dialect
+ * is still parsed, type-checked, warned about and static_asserted -- including
+ * the row-geometry asserts that now sit beside each table, which is why both
+ * protocols' geometry is still proved by either build -- and only then
+ * dropped, by --gc-sections, at link.
  *
- * The accessors are also the place where the old bare addresses became NAMES:
- * what hw_uart.c spelled 0x20001B98 is ram::app().uartShadows.msg72.
+ * The alternative -- #if around each dialect -- would mean the inactive one is
+ * never even parsed, so a typo in it survives until someone builds the other
+ * variant.
  * ========================================================================= */
-using BufFn = volatile std::uint8_t* (*)() noexcept;
-
-struct TxDesc {
-    std::uint8_t cmd;
-    std::uint8_t len;
-    BufFn        buf;     /* live payload source                            */
-    BufFn        shadow;  /* last-sent copy, for change detection           */
-};
 
 struct RxDesc {
     std::uint8_t cmd;
@@ -91,47 +82,11 @@ struct RxDesc {
                            * is simply buf[len] -- here it has a name       */
 };
 
-/* ---- live buffers: windows into ram::VehicleState, plus two standalone --- */
-volatile std::uint8_t* buf72() noexcept
-{
-    return ram::app().vehicle.window(ram::VehicleState::kWin72Off);
-}
-volatile std::uint8_t* bufA6() noexcept
-{
-    return ram::app().vehicle.window(ram::VehicleState::kWinA6Off);
-}
-volatile std::uint8_t* buf12() noexcept
-{
-    return ram::app().vehicle.window(ram::VehicleState::kWin12Off);
-}
-volatile std::uint8_t* buf32() noexcept
-{
-    return ram::app().vehicle.window(ram::VehicleState::kWin32Off);
-}
-/* 0x20001B7D. Never written by anything in this image: message 0x73 is eight
- * zero bytes for ever, and is still sent because the head unit expects it. */
-volatile std::uint8_t* buf73() noexcept { return ram::app().buf73; }
-/* 0x20001B86 -- also the liveness probe tools/iap_upload.py --verify reads
- * back over SWD to prove the flashed image booted. */
-volatile std::uint8_t* bufF0() noexcept { return ram::g_versionString; }
-
-/* ---- shadows: ram::AppRam::uartShadows, the old bare literals ------------ */
-volatile std::uint8_t* shadow72() noexcept { return ram::app().uartShadows.msg72; }
-volatile std::uint8_t* shadowA6() noexcept { return ram::app().uartShadows.msgA6; }
-volatile std::uint8_t* shadow73() noexcept { return ram::app().uartShadows.msg73; }
-volatile std::uint8_t* shadowF0() noexcept { return ram::app().uartShadows.msgF0; }
-volatile std::uint8_t* shadow12() noexcept { return ram::app().uartShadows.msg12; }
-volatile std::uint8_t* shadow32() noexcept { return ram::app().uartShadows.msg32; }
-
-/* --- flash 0x08009F2C --- box -> head unit, emitted round-robin in order. */
-constexpr TxDesc kTxTable[kTxSlots] = {
-    { 0x72U, 14U, &buf72, &shadow72 },  /* flags, SWC key, illum, steering   */
-    { 0xA6U,  8U, &bufA6, &shadowA6 },  /* amplifier level + tone alias      */
-    { 0x73U,  8U, &buf73, &shadow73 },  /* always zero                       */
-    { 0xF0U, 17U, &bufF0, &shadowF0 },  /* the version string                */
-    { 0x12U, 10U, &buf12, &shadow12 },  /* doors, volume, tone               */
-    { 0x32U, 14U, &buf32, &shadow32 },  /* gear, rpm                         */
-};
+/* The active table. A pointer rather than a reference because the two arrays
+ * have different extents and so different types; --gc-sections drops
+ * whichever .rodata table is not reached. */
+constexpr const TxDesc* kTxTable =
+    cfg::kIsBenz ? &raisebenz::kTxTable[0] : &hiworld::kTxTable[0];
 
 /* ===========================================================================
  * The couplings this table depends on, made into compile errors.
@@ -152,49 +107,22 @@ constexpr TxDesc kTxTable[kTxSlots] = {
  *     past the end of ram::VehicleState's window.
  *   - the built frame is len + 5 bytes and has to fit under kFbTxLen.
  *
- * Note the two orderings deliberately differ: kTxTable is in TRANSMIT order
- * (72, A6, 73, F0, 12, 32) while ram::UartShadows is in the stock RAM order
- * (72, 12, 32, A6, 73, F0). Pairing a row with its shadow is therefore a
- * lookup, not a glance -- which is exactly the condition under which a length
- * typo survives review. These asserts do the pairing once, here.
+ * Only the first of those is asserted here, because it is the one coupling the
+ * two dialects share. The three row-shaped ones are asserted beside the table
+ * they are about, in hu_hiworld.cpp and hu_raise_benz.cpp: an `extern` array
+ * is not usable in a constant expression, so from here only the ADDRESS of the
+ * active table is a compile-time thing, not its contents.
  * ========================================================================= */
 static_assert(sizeof(ram::AppRam::uartSlotState) == kTxSlots,
               "ram::AppRam::uartSlotState must have one byte per TX slot; it is "
               "immediately followed by uartTxSlotIdx, so a short array means the "
               "scheduler overwrites its own index");
 
-/* Row -> shadow, in table order. */
-static_assert(kTxTable[0].len == sizeof(ram::UartShadows::msg72), "0x72 shadow");
-static_assert(kTxTable[1].len == sizeof(ram::UartShadows::msgA6), "0xA6 shadow");
-static_assert(kTxTable[2].len == sizeof(ram::UartShadows::msg73), "0x73 shadow");
-static_assert(kTxTable[3].len == sizeof(ram::UartShadows::msgF0), "0xF0 shadow");
-static_assert(kTxTable[4].len == sizeof(ram::UartShadows::msg12), "0x12 shadow");
-static_assert(kTxTable[5].len == sizeof(ram::UartShadows::msg32), "0x32 shadow");
-
-/* Row -> live buffer. The four VehicleState rows must match their window
- * lengths; the other two are standalone objects. */
-static_assert(kTxTable[0].len == ram::VehicleState::kWin72Len, "0x72 window");
-static_assert(kTxTable[1].len == ram::VehicleState::kWinA6Len, "0xA6 window");
-static_assert(kTxTable[2].len == sizeof(ram::AppRam::buf73),   "0x73 buffer");
-static_assert(kTxTable[3].len == cfg::kVersionLength,          "0xF0 buffer");
-static_assert(kTxTable[4].len == ram::VehicleState::kWin12Len, "0x12 window");
-static_assert(kTxTable[5].len == ram::VehicleState::kWin32Len, "0x32 window");
-
-/* Every row's wire frame must fit the outbound area below kFbTxLen. Written as
- * a fold so a seventh row is covered without touching this. */
-constexpr bool txFramesFit() noexcept
-{
-    for (std::uint8_t i = 0U; i < kTxSlots; ++i) {
-        if ((static_cast<std::size_t>(kTxTable[i].len) + cfg::kUartFrameOverhead)
-            > kFbTxLen) {
-            return false;
-        }
-    }
-    return true;
-}
-static_assert(txFramesFit(),
-              "a TX payload plus the 5-byte AA 55 LEN CMD CKS overhead runs past "
-              "the outbound frame area and into the tx length/cursor bytes");
+/* ...and the active dialect must agree with that shared count, or the
+ * scheduler walks off the end of the table it was handed. */
+static_assert(kTxSlots == (cfg::kIsBenz ? raisebenz::kSlots : hiworld::kSlots),
+              "cfg::kTxSlotCount and the active dialect's kTxTable disagree on "
+              "how many TX slots there are");
 
 /* ---- inbound destinations ------------------------------------------------
  * In the stock table buf == shadow for these records and the "new data" byte
@@ -269,6 +197,12 @@ void usart2Init(std::uint32_t baud) noexcept
     usart_cmd_enable(USART2, 1);
 }
 
+}  // namespace
+
+/* Deliberately NOT in the anonymous namespace: both dialect translation
+ * units call it, through the declaration in hu_dialect.hpp. */
+namespace detail {
+
 /* ============================================================================
  * 0x08008A96 uart_rx_dispatch -- act on one validated inbound frame.
  *
@@ -321,142 +255,37 @@ void rxDispatch() noexcept
     }
 }
 
-/* ============================================================================
- * 0x08008BB2 uart_rx_parser_AA55 -- byte-at-a-time state machine over the ring.
- *
- *   state 0 : wait for 0xAA
- *   state 1 : expect 0x55, else back to 0
- *   state 2 : LEN; rejected if LEN >= 0x38 (56). Needs LEN+2 further bytes
- *             buffered, or we leave the tail put and retry on the next call.
- *   state>=3: CMD + payload into RXF[3 .. LEN+3], accumulating the running sum;
- *             then RXF[LEN+4] is the checksum and must equal (sum - 1) & 0xFF.
- *             The running sum is SEEDED WITH LEN, so sum - 1 is exactly the
- *             documented (LEN + CMD + sum(payload) - 1) & 0xFF.
- *
- * Tail-commit discipline, reproduced exactly: the tail index at FB[0x108] is
- * only written when the machine is back in state 0. A half-received frame
- * therefore leaves the tail parked on its 0xAA and is re-parsed from scratch
- * on the next call -- which is also why there is no timeout anywhere.
- *
- * One frame per call: as soon as a frame completes (checksum good or bad) the
- * function commits the tail and returns.
- *
- * The reassembled frame lives in ram::AppRam::uartRxFrame (0x20001B01);
- * RXF[0] and RXF[1] are never written, because the preamble is implicit.
- *
- * NOTE there is no escaping anywhere in this protocol: a payload byte of 0xAA
- * or 0x55 is perfectly legal and is consumed by the state >= 3 branch like any
- * other. Resynchronisation after a corrupt frame depends only on the LEN bound
- * and the checksum failing.
- * ==========================================================================*/
+}  // namespace detail
+
+namespace {
+
+/* The one place the dialect is chosen on receive. */
 void rxParse() noexcept
 {
-    volatile std::uint8_t* const f = fb();
-    volatile std::uint8_t* const rf = rxf();
-
-    const std::uint8_t head = f[kFbRxHead];   /* read once, as the stock does */
-    std::uint32_t tail  = f[kFbRxTail];
-    std::uint32_t state = 0U;
-    std::uint32_t sum   = 0U;  /* running checksum                           */
-    std::uint32_t need  = 0U;  /* index of the checksum byte = LEN + 4        */
-
-    for (;;) {
-        if (head == tail) {
-            return;                       /* ring drained; tail left as-is   */
-        }
-
-        const std::uint8_t b = f[kFbRxRing + tail];
-
-        if (state == 0U) {
-            state = (b == cfg::kUartPreamble0) ? 1U : 0U;
-        } else if (state == 1U) {
-            /* 5A A5 never gets here: the only accepted second byte is 0x55,
-             * so the sibling dialect simply falls back to state 0. */
-            state = (b == cfg::kUartPreamble1) ? 2U : 0U;
-        } else if (state == 2U) {
-            if (b < (cfg::kUartMaxPayload + 1U)) {
-                /* bytes still buffered, counting this LEN byte. The stock
-                 * `& 0xFF` is a no-op on a 0..199 result; kept for fidelity. */
-                const std::uint32_t avail = static_cast<std::uint32_t>(
-                    ((static_cast<int>(head) - static_cast<int>(tail)
-                      + static_cast<int>(kRxRingSize))
-                     % static_cast<int>(kRxRingSize)) & 0xFF);
-
-                if (avail < static_cast<std::uint32_t>(b) + 2U) {
-                    return;               /* incomplete: retry next call     */
-                }
-                rf[2] = b;                /* LEN                             */
-                state = 3U;
-                need  = (static_cast<std::uint32_t>(b) + 4U) & 0xFFU;
-                sum   = b;
-            } else {
-                state = 0U;               /* oversized: resynchronise        */
-            }
-        } else {
-            rf[state] = b;
-            if (state < need) {
-                sum   = (sum + static_cast<std::uint32_t>(rf[state])) & 0xFFU;
-                state = (state + 1U) & 0xFFU;
-            } else {
-                sum = (sum - 1U) & 0xFFU;
-                if (static_cast<std::uint32_t>(rf[state]) == sum) {
-                    rxDispatch();
-                }
-                /* frame finished either way: commit the tail and leave */
-                tail = (tail + 1U) % kRxRingSize;
-                f[kFbRxTail] = static_cast<std::uint8_t>(tail);
-                return;
-            }
-        }
-
-        tail = (tail + 1U) % kRxRingSize;
-        if (state == 0U) {
-            f[kFbRxTail] = static_cast<std::uint8_t>(tail);
-        }
+    if constexpr (cfg::kIsBenz) {
+        raisebenz::rxParse();
+    } else {
+        hiworld::rxParse();
     }
 }
 
-/* ============================================================================
- * 0x08008D04 uart_build_frame_AA55 -- assemble TX table entry `slot` into the
- * frame buffer and hand it to the ISR.
- *
- *     FB[0..1] = AA 55
- *     FB[2]    = LEN (payload only)
- *     FB[3]    = CMD
- *     FB[4..]  = payload, copied from the descriptor's live buffer
- *     FB[k]    = CKS, k = LEN + 4, = (sum FB[2..k-1]) - 1
- *     wire length = LEN + 5
- *
- * The stock code accumulates straight into FB[k] after zeroing it; the local
- * accumulator here is identical in effect, since the summed range FB[2..k-1]
- * never includes FB[k] and nothing else observes the buffer mid-loop.
- * ==========================================================================*/
+/* The one place the dialect is chosen on transmit. `if constexpr` rather than
+ * a function pointer so the unused emitter is dropped entirely by
+ * --gc-sections and neither build pays for the other. */
+void emitFrame(std::uint8_t cmd, const volatile std::uint8_t* payload,
+               std::uint8_t len) noexcept
+{
+    if constexpr (cfg::kIsBenz) {
+        raisebenz::emit(cmd, payload, len);
+    } else {
+        hiworld::emit(cmd, payload, len);
+    }
+}
+
 void buildFrame(std::uint8_t slot) noexcept
 {
     const TxDesc& e = kTxTable[slot];
-    volatile std::uint8_t* const f = fb();
-
-    const std::uint8_t len = e.len;
-    const std::uint8_t k   = static_cast<std::uint8_t>(len + 4U);
-
-    svc::bytes::copy(&f[4], e.buf(), len);
-
-    f[0] = cfg::kUartPreamble0;
-    f[1] = cfg::kUartPreamble1;
-    f[2] = len;
-    f[3] = e.cmd;
-
-    std::uint8_t cks = 0U;
-    for (std::uint8_t j = 2U; j < k; ++j) {
-        cks = static_cast<std::uint8_t>(cks + f[j]);
-    }
-    /* -1 because the preamble AA + 55 = 0xFF == -1 (mod 256) is not summed. */
-    f[k] = static_cast<std::uint8_t>(cks - 1U);
-
-    f[kFbTxPos]  = 0U;
-    f[kFbTxLen]  = static_cast<std::uint8_t>(len + cfg::kUartFrameOverhead);
-    f[kFbTxBusy] = 1U;
-    usart_tx_start(USART2);
+    emitFrame(e.cmd, e.buf(), e.len);
 }
 
 /* ============================================================================
@@ -639,19 +468,12 @@ void init() noexcept
  * ==========================================================================*/
 void txAck(std::uint8_t cmd, std::uint8_t arg) noexcept
 {
-    volatile std::uint8_t* const f = fb();
-
-    f[0] = cfg::kUartPreamble0;
-    f[1] = cfg::kUartPreamble1;
-    f[2] = 1U;                       /* LEN: one payload byte */
-    f[3] = cmd;
-    f[4] = arg;
-    f[5] = static_cast<std::uint8_t>(cmd + arg);
-
-    f[kFbTxLen]  = 6U;
-    f[kFbTxPos]  = 0U;
-    f[kFbTxBusy] = 1U;
-    usart_tx_start(USART2);
+    /* One payload byte. Going through emitFrame() rather than open-coding the
+     * six bytes keeps the ACK in whichever dialect the image speaks; for a
+     * jeep build the result is the stock AA 55 01 cmd arg (cmd+arg), because
+     * LEN = 1 and the "-1" and the "+LEN" cancel. */
+    const std::uint8_t payload = arg;
+    emitFrame(cmd, &payload, 1U);
 }
 
 /* ============================================================================

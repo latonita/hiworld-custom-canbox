@@ -11,7 +11,7 @@
  * word, with masks 0xFFFFFFFE / 0xFFFFFFFD. Only bits 0 and 1 are ever
  * touched, and the read-modify-write preserves 0x20001101 (the 12-hour hour)
  * either way, so a byte access has an identical memory effect. ram_map.hpp
- * models it as a byte; see docs/misra-cpp.md note N-1.
+ * models it as a byte; see docs/misra-cpp.md deviation D-7.
  * ==========================================================================*/
 
 #include "soft_clock.hpp"

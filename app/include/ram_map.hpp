@@ -53,6 +53,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "app_config.hpp"
+
 namespace ram {
 
 /* ===========================================================================
@@ -60,7 +62,7 @@ namespace ram {
  *
  * The stock code reads the flags byte with a 32-bit read-modify-write whose
  * mask preserves the bytes above it, so a byte here has an identical memory
- * effect. See docs/misra-cpp.md, note N-1.          stock @0x200010FC
+ * effect. See docs/misra-cpp.md, deviation D-7.     stock @0x200010FC
  * ========================================================================= */
 struct SoftClock {
     volatile std::uint8_t hour24;
@@ -397,6 +399,55 @@ struct UartShadows {
 };
 
 /* ===========================================================================
+ * Decoded vehicle signals, in physical units -- NOT a stock structure.
+ *
+ * ram::VehicleState above is deliberately NOT this: it is the Hiworld wire
+ * format, four overlapping message windows over one run of bytes, and its
+ * offsets ARE the protocol. Nothing Benz-shaped can be stored in it.
+ *
+ * So the decoders that exist only to feed the Benz emulation write here, in
+ * units that belong to the car rather than to either protocol, and
+ * logic::benzPublish() packs these into Benz frames. If a third protocol is
+ * ever added it reads this block too, and the decoders do not change.
+ *
+ * Every field is written ONLY when the car reports a usable value. The WK
+ * sends an all-ones sentinel for "unavailable" on several of these ids, and
+ * the Benz plugin has no concept of a blanked field -- it renders whatever
+ * number arrives and freezes on the last one. Holding the previous reading is
+ * therefore strictly better than forwarding 65535, which would display as
+ * 65535 rpm or 6553.5 degrees. See logic::benzPublish() for the rest of that
+ * reasoning.
+ * ========================================================================= */
+struct Telemetry {
+    volatile std::uint16_t rpm;           /* 1 rpm                 0x002 b0:b1 */
+    volatile std::uint16_t speedKph;      /* km/h            0x002 b2:b3 / 128 */
+    volatile std::uint32_t odometerKm;    /* km, 24-bit    0x014 b0:b2 / 10    */
+    volatile std::uint16_t ambientDeciC;  /* 0.1 degC, >= 0      0x014 b4 * 10 */
+    volatile std::uint16_t coolantC;      /* degC, >= 0          0x02C b1 - 40 */
+    volatile std::uint16_t deciVolts;     /* 0.1 V                    0x015 b1 */
+};
+
+/* ===========================================================================
+ * The Benz outbound payloads and their change-detection shadows.
+ *
+ * Five messages: 0x08 rpm, 0x07 speed, and three pages of the multiplexed
+ * 0x41 (page 1 doors, page 2 odometer + ambient, page 3 engine computer).
+ * Payload byte 0 of each 0x41 page is the page selector and is written once
+ * by logic::benzPublish(); the head unit dispatches on it.
+ *
+ * Sized exactly, because the head unit reads past what its own length gate
+ * enforces: page 2 must be 6 bytes and page 3 must be 11 or the plugin
+ * service throws an ArrayIndexOutOfBounds inside the radio.
+ * ========================================================================= */
+struct BenzFrames {
+    volatile std::uint8_t rpm08[2];
+    volatile std::uint8_t speed07[2];
+    volatile std::uint8_t door41[2];      /* [0]=1, [1]=door bits             */
+    volatile std::uint8_t trip41[6];      /* [0]=2, ambient, odometer         */
+    volatile std::uint8_t engine41[11];   /* [0]=3, coolant, oil, V, hp, torque*/
+};
+
+/* ===========================================================================
  * Head-unit command block                               stock @0x20001BE7
  *
  * The 0xD2 (cluster text) and 0xAD (periodic-TX config) payloads the head unit
@@ -465,11 +516,17 @@ struct AppRam {
 
     /* ---- head-unit link bookkeeping ----------------------- stock @0x11AA */
     volatile std::uint8_t uartRxOverflow;
-    volatile std::uint8_t uartSlotState[6]; /* one per TX slot stock @0x11AB */
+    volatile std::uint8_t uartSlotState[cfg::kTxSlotCount]; /* one per TX slot  */
     volatile std::uint8_t uartTxSlotIdx;
     volatile std::uint8_t uartAuxSlotIdx;
     volatile std::uint8_t uartIdleDelay;
     volatile std::uint8_t uartTxTick;
+    /* How many bytes of cfg::kIapResetFrame have matched so far. Only ever
+     * non-zero in a Benz build, where the Hiworld "reboot into the loader"
+     * frame has to be recognised by a side-matcher instead of by the parser
+     * -- see the IAP escape hatch note in app_config.hpp. Not a stock field;
+     * the stock firmware only ever spoke one dialect. */
+    volatile std::uint8_t uartIapMatch;
     volatile std::uint8_t gpioInitialised;  /*                 stock @0x11B5 */
     volatile std::uint8_t cycleCtr;         /* TX slot rotation stock @0x11B7 */
     volatile std::uint8_t cycleCtrMax;
@@ -495,6 +552,14 @@ struct AppRam {
     VehicleState          vehicle;
     volatile std::uint8_t buf73[8];         /* cmd 0x73, always 0 stock @0x1B7D */
     UartShadows           uartShadows;      /*                 stock @0x1B98 */
+
+    /* ---- the Benz emulation's own state ----------------------------------
+     * Present in every build so the structure has one shape, but only
+     * written when cfg::kIsBenz -- the Hiworld path never reads them and the
+     * decoders that fill Telemetry are compiled out of a jeep image. */
+    Telemetry             telemetry;
+    BenzFrames            benzFrames;
+    BenzFrames            benzShadows;
     HeadUnitCommands      hostCmd;          /*                 stock @0x1BE7 */
 };
 

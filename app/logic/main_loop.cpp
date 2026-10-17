@@ -38,6 +38,7 @@
 #include "app_config.hpp"
 #include "ram_map.hpp"
 
+#include "raise_benz_tx.hpp"
 #include "board_io.hpp"
 #include "can_bus.hpp"
 #include "can_link.hpp"
@@ -84,6 +85,11 @@ void bootSequence() noexcept
     svc::hu::init();                     /* 0x08008A54  USART2 + version string  */
     svc::params::validateDefaults();     /* 0x08007B6C  magic 0xAA, clamp, latch */
     logic::primeTxTemplates();           /* 0x08007B6C  the CAN frame templates */
+    /* The 0x41 page selectors. Must happen before the first transmit: a zero
+     * page byte matches no page and the head unit drops the frame. */
+    if constexpr (cfg::kIsBenz) {
+        logic::benzPrimeFrames();
+    }
     svc::can::setBaudByProfile();        /* 0x08007B2C  first CAN bring-up       */
 
     wwdg_init();                         /* 0x08002DEC  arm the watchdog         */
@@ -168,6 +174,12 @@ void waitForBus() noexcept
 
         if (svc::sched::takeMed()) {             /* 8 ms */
             logic::linkStateMachine();           /* 0x0800755C */
+            /* Repack the decoded telemetry into Benz payloads before the
+             * link looks at them. Compiled out entirely in a jeep build, so
+             * the stock 8 ms task keeps its exact shape. */
+            if constexpr (cfg::kIsBenz) {
+                logic::benzPublish();
+            }
             svc::hu::service();                  /* 0x08008FE2 */
             svc::io::writeStatusLines();         /* 0x080084F6 */
         }

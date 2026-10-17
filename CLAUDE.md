@@ -11,8 +11,9 @@ criteria. Then `docs/ARCHITECTURE.md` (the layer contract and every module's pub
 
 ```
 python tools/build.py          # compile + link + verify the preamble
-python tools/build.py --pack   # ...and package to build/app.iap
-python tools/test.py           # host unit tests for the logic layers
+python tools/build.py --pack   # ...and package to build/canupdate-<version>.iap
+python tools/build.py --protocol benz --pack   # the Mercedes emulation image
+python tools/test.py           # host unit tests, BOTH protocols
 ```
 
 ## Most important rules
@@ -36,12 +37,27 @@ python tools/test.py           # host unit tests for the logic layers
   compile and is not built. The rebuild in `app/hal/`, `app/services/` and `app/logic/` is
   written against it, and host tests are written from it.
 - **Ship as `.iap`** via `tools/`.
+- **Two protocols, one tree.** `--protocol jeep` (default) is the faithful
+  rebuild; `--protocol benz` emulates a Raise Mercedes canbox for a richer gauge
+  screen. Code selects on `cfg::kIsBenz` with `if constexpr`, never `#if`, so
+  both are compiled in every build. Each dialect has its own translation units
+  -- `app/services/hu_hiworld.cpp` vs `hu_raise_benz.cpp` (contract in
+  `hu_dialect.hpp`), `app/logic/can_decode.cpp` vs `raise_benz_decode.cpp` --
+  so `can_decode.cpp` is pure stock again and `head_unit.cpp` holds only what
+  both dialects share. Only the jeep image is stock-equivalent on the wire.
+  See `docs/raise-benz-emulation.md` and the Protocol block in
+  `app/include/app_config.hpp` -- including why the Hiworld
+  reboot frame is matched in EVERY build (it is the radio's only way to reflash
+  the box).
 
 ## Where things live
 
 `app/hal/` C11 register drivers (MMIO only) · `app/services/` C++17 stateful services ·
 `app/logic/` C++17 vehicle behaviour · `app/include/ram_map.hpp` all runtime state as one
 typed, linker-allocated struct · `docs/misra-cpp.md` the C++ subset and its deviations.
+The Benz emulation is `app/services/hu_raise_benz.cpp` (wire dialect) and
+`app/logic/raise_benz_decode.cpp` + `raise_benz_tx.cpp` (telemetry in, Benz frames out);
+`app/services/head_unit.cpp` holds only what both dialects share.
 
 Keep the `/* 0x0800xxxx */` stock-address annotations on reconstructed functions, and keep
 the explanatory comments — in this repo they are the reverse-engineering record, not noise.

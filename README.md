@@ -1,4 +1,4 @@
-# Hiworld canbox — Nations N32L406 rebuild project
+# Hiworld canbox — Nations N32L406 rebuild project - WORK IN PROGRESS
 
 Reverse-engineered source, documentation, and tooling for the Hiworld car-radio CAN
 adapter ("canbox") built on a **Nations N32L406CBL7** (ARM Cortex-M4F, 128 KB flash
@@ -14,6 +14,24 @@ So I understood how does this box work and its bootloader.
 I rewrote JPF firmware and also made version which mimics Raise Benz17 and provides more information from CAN bus like RPM, Temps, etc.
 
 Build process creates standard IAP files - those can be loaded with standard HiWorld canbox update procedure: put on a device, then upload from debug menu.
+
+## Building it
+
+Docker is the only prerequisite -- no cross toolchain, no Python, no compiler:
+
+```bash
+./build-docker.sh         # Linux / macOS / WSL / Git Bash
+```
+```powershell
+.\build-docker.ps1       # Windows
+```
+
+Both `.iap` files land in `build/`, ready for the radio's update screen. To build
+natively instead (arm-none-eabi GCC 15.x with C++ and binutils >= 2.39, plus
+Python 3.8+ and any host C++ compiler for the tests), see [`BUILD.md`](BUILD.md).
+
+Flashing is never containerised -- it needs the USB serial port and an SWD probe,
+so `tools/iap_upload.py` runs on the host.
 
 ## Some docs to read
 
@@ -80,6 +98,10 @@ docs/                      — all analysis documents
 tests/
   host/                    — host unit tests: the logic layers built for x86 against a
                              recording fake HAL. `python tools/test.py`
+build-docker.sh / .ps1     — build in a container on a machine with no toolchain
+docker/
+  Dockerfile               — the builder image: pinned xPack arm-none-eabi GCC + host g++
+  build-all.sh             — its entrypoint: tests, then both protocols, packed
 tools/
   build.py                 — compile + link + verify the preamble (the primary build driver)
   test.py                  — build and run the host unit tests

@@ -70,6 +70,9 @@ entry at link time.
 
 ## 3. Toolchain
 
+- **Or skip all of this:** `./build-docker.sh` / `.\build-docker.ps1` builds in a
+  container that already has the pinned toolchain, and produces the same bytes.
+  See `BUILD.md` §0. Flashing (§6) still happens on the host.
 - `arm-none-eabi-gcc` / `-ld` / `-objcopy`, GNU Arm Embedded.
 - **Installed here:** xPack GNU Arm Embedded GCC 15.2.1 at `D:/IDE/arm-none-eabi-gcc/bin/` (not on PATH; the `Makefile` sets `CROSS` to this absolute path). Cortex-M soft-float multilib present.
 - Core flags: `-mcpu=cortex-m4 -mthumb`.
@@ -93,9 +96,9 @@ The reconstruction is **done**: `app/hal/` (C11 register drivers), `app/services
 behavioural spec they were written against. `docs/ARCHITECTURE.md` is the layer contract.
 
 ```powershell
-python toolsuild.py            # compile + link + verify the preamble + integration checks
-python toolsuild.py --pack     # ...and package to buildpp.iap
-python tools	est.py             # host unit tests for the logic layers
+python tools\build.py            # compile + link + verify the preamble + integration checks
+python tools\build.py --pack     # ...and package to build\app.iap
+python tools\test.py             # host unit tests for the logic layers
 ```
 
 `build.py` discovers sources from the three layer directories, startup first, and fails the

@@ -16,6 +16,11 @@ python tools/build.py --protocol benz --pack   # the Mercedes emulation image
 python tools/test.py           # host unit tests, BOTH protocols
 ```
 
+No toolchain on the machine? `./build-docker.sh` (or `.\build-docker.ps1`) does the
+whole thing in a container -- tests, both protocols, both `.iap` packed into `build/`.
+Docker is the only prerequisite; the image pins the same xPack GCC 15.2.1 a native
+build uses, so the output is byte-identical. Flashing stays on the host.
+
 ## Most important rules
 
 - **Never touch the bootloader** (`0x08000000`–`0x08001FFF`). It is the only way to flash

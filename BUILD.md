@@ -43,7 +43,7 @@ Outputs, in `build/<protocol>/` (plus the packed container in `build/`):
 | `<protocol>/app.elf` | linked image with symbols |
 | `<protocol>/app.bin` | raw image, loads at `0x08002000` |
 | `<protocol>/app.map` | linker map (check where things landed) |
-| `canupdate-<version>.iap` | flashable container, named after the image's own 17-byte version string (`--pack` only) |
+| `canupdate<version>.iap` | flashable container, named after the image's own 17-byte version string (`--pack` only) |
 
 ### Toolchain
 
@@ -68,8 +68,8 @@ rebuild and the only variant whose wire behaviour must match the original box.
 see `docs/raise-benz-emulation.md` for exactly what it publishes, what it cannot, and
 what it costs (steering-wheel buttons, among other things).
 
-The two are packed separately (`build/canupdate-H1N4JPF20L-171026.iap`,
-`build/canupdate-H1N4BNZ10L-171026.iap`) and
+The two are packed separately (`build/canupdateH1N4JPF20L-171026.iap`,
+`build/canupdateH1N4BNZ10L-171026.iap`) and
 carry different version strings, so `iap_upload.py --verify` tells you which one
 is on the box. Objects live in per-protocol directories, so switching
 `--protocol` cannot link a stale object from the other dialect.

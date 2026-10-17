@@ -26,7 +26,7 @@ Verify (--verify): after a good upload, read back the 17-byte version string the
   The address is resolved from build/<protocol>/app.elf (symbol g_versionString),
   rather than hardcoded, because the rebuild no longer pins its state to the stock
   firmware's absolute SRAM map. Which ELF is picked by matching the version string
-  in the .iap's own name (build/canupdate-<version>.iap) against the built images.
+  in the .iap's own name (build/canupdate<version>.iap) against the built images.
   Override with --elf or --version-addr; with neither resolvable it falls back to
   the stock 0x20001B86, which is right only for a factory image.
 
@@ -57,7 +57,7 @@ def default_elf_for(image):
     SWD and compares it, and the two protocols deliberately carry DIFFERENT version
     strings, so the wrong ELF reports a mismatch on a perfectly good flash.
 
-    The build driver packs build/canupdate-<version>.iap, so the version string is in
+    The build driver packs build/canupdate<version>.iap, so the version string is in
     the image's own filename. Rather than mapping version -> protocol from a table
     here -- a second copy of app_config.hpp's literals, free to drift -- the match is
     made against the images themselves: the right ELF is the one whose .bin actually
@@ -69,8 +69,10 @@ def default_elf_for(image):
     """
     stem = os.path.splitext(os.path.basename(image or ""))[0]
 
-    if stem.startswith("canupdate-"):
-        want = stem[len("canupdate-"):].encode("ascii", "ignore")
+    # Hiworld names these canupdate<version>.iap with NO separator; the dashed
+    # spelling is accepted too, for hand-renamed files.
+    if stem.startswith("canupdate"):
+        want = stem[len("canupdate"):].lstrip("-").encode("ascii", "ignore")
         build = os.path.join(_ROOT, "build")
         if want and os.path.isdir(build):
             for name in sorted(os.listdir(build)):
@@ -130,6 +132,40 @@ def resolve_version_addr(elf, explicit=None):
     return None
 
 
+def scan_for_u(seen, i):
+    """Find the bootloader's lone U (0x55) in `seen`, starting at offset `i`.
+
+    Returns (got_u, next_i). `next_i` is where an incremental caller should
+    resume once more bytes arrive, so a frame split across two reads is not
+    rescanned from the start.
+
+    A naive `0x55 in buf` is wrong on a box that is already running: every
+    Hiworld app frame is AA 55 LEN CMD payload[LEN] CS, so the app's own traffic
+    (e.g. the F0 version broadcast) trips the detector. The begin magic then goes
+    to the app, which ignores it, and the transfer stalls at 0/N having written
+    nothing. So step over whole app frames; only a 0x55 outside one is the
+    bootloader.
+    """
+    while i < len(seen):
+        if seen[i] == 0xAA:
+            if i + 1 >= len(seen):
+                break                      # need the next byte to decide
+            if seen[i + 1] == 0x55:
+                if i + 2 >= len(seen):
+                    break                  # need LEN
+                total = 5 + seen[i + 2]    # AA 55 LEN CMD payload[LEN] CS
+                if i + total > len(seen):
+                    break                  # frame still arriving
+                i += total
+                continue
+            i += 1
+            continue
+        if seen[i] == U:
+            return True, i
+        i += 1
+    return False, i
+
+
 def pico_nrst_pulse(ms=60):
     from pyocd.probe.pydapaccess import DAPAccess
     devs = DAPAccess.get_connected_devices()
@@ -162,16 +198,27 @@ def upload(port, iap_path, reset_mode):
         print("\n>>> POWER-CYCLE THE BOX NOW: switch OFF, wait ~2 s, switch ON <<<\n")
         u_timeout = 25.0
 
-    t0 = time.time(); seen = bytearray(); got_u = False
-    while time.time() - t0 < u_timeout:
+    t0 = time.time(); seen = bytearray(); got_u = False; i = 0
+    while time.time() - t0 < u_timeout and not got_u:
         b = ser.read(64)
-        if b:
-            seen += b
-            if U in b:
-                got_u = True
-                break
+        if not b:
+            continue
+        seen += b
+        # Scan for a LONE 0x55 -- the bootloader's U. A naive `if U in b` is wrong
+        # on a box that is already running: every Hiworld app frame starts
+        # AA 55 LEN CMD ... CS, so the app's own traffic (e.g. the F0 version
+        # broadcast) trips the detector, the begin magic goes to the app, which
+        # ignores it, and the transfer stalls at 0/N. So walk the stream and step
+        # over whole app frames; only a 0x55 outside one is the bootloader.
+        got_u, i = scan_for_u(seen, i)
     if not got_u:
-        print(f"FAIL: never saw U (0x55). bytes seen: {bytes(seen).hex(' ') or '(none)'}")
+        print(f"FAIL: never saw a bootloader U (0x55). bytes seen: "
+              f"{bytes(seen).hex(' ') or '(none)'}")
+        if any(seen[k] == 0xAA and seen[k + 1] == 0x55
+               for k in range(len(seen) - 1)):
+            print("       (that traffic is AA 55 app frames -- the box booted to the "
+                  "APP, not the bootloader. The U window is ~0.67 s from power-on, so "
+                  "start this BEFORE powering on, or re-run and cycle power on the prompt.)")
         ser.close(); return False
     print(f"got U  (+{time.time()-t0:.3f}s)  ->  sending begin magic {MAGIC.hex(' ')}")
     ser.write(MAGIC); ser.flush()

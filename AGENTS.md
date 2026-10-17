@@ -65,7 +65,7 @@ constructor appears), and the five interrupt handlers plus `fatal_error_reset` m
    A host C++ compiler (clang++ or g++) is needed for the unit tests, nothing else.
 2. `python tools/build.py` — compiles, links, and runs `tools/verify_preamble.py`, which fails
    the build if the entry veneer moved or a dispatched veneer slot changed address.
-   `python tools/build.py --pack` also produces `build/canupdate-<version>.iap`; add
+   `python tools/build.py --pack` also produces `build/canupdate<version>.iap`; add
    `--protocol benz` for the Mercedes-emulation image (`docs/raise-benz-emulation.md`).
 3. `python tools/test.py` — the host unit tests, run for BOTH protocols. Write new ones from the behaviour in
    `reference/decompile/app/*.c`, not from the rebuilt code: a test that restates the implementation proves

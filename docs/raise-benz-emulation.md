@@ -100,7 +100,7 @@ Two hard limits the head unit's parser imposes, both enforced by
 
 ```
 python tools/build.py --protocol benz --pack
-python tools/iap_upload.py build/canupdate-H1N4BNZ10L-171026.iap --port COM17 --reset powercycle --verify
+python tools/iap_upload.py build/canupdateH1N4BNZ10L-171026.iap --port COM17 --reset powercycle --verify
 ```
 
 Then set the head unit's Canset protocol id to **1034025**, **1034027** or

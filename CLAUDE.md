@@ -11,7 +11,7 @@ criteria. Then `docs/ARCHITECTURE.md` (the layer contract and every module's pub
 
 ```
 python tools/build.py          # compile + link + verify the preamble
-python tools/build.py --pack   # ...and package to build/canupdate-<version>.iap
+python tools/build.py --pack   # ...and package to build/canupdate<version>.iap
 python tools/build.py --protocol benz --pack   # the Mercedes emulation image
 python tools/test.py           # host unit tests, BOTH protocols
 ```

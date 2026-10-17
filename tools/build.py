@@ -7,7 +7,7 @@ Python for iaptool.py / iap_upload.py, so this is the primary build driver. The 
 is kept for anyone who does have make; both produce the same build/app.bin.
 
     python tools/build.py                 compile + link + objcopy + verify preamble
-    python tools/build.py --pack          ... and package to build/canupdate-<version>.iap
+    python tools/build.py --pack          ... and package to build/canupdate<version>.iap
     python tools/build.py --protocol benz  build the Mercedes-Benz emulation image
     python tools/build.py --clean
     python tools/build.py --verbose
@@ -21,7 +21,7 @@ is kept for anyone who does have make; both produce the same build/app.bin.
 
 The two images are NOT interchangeable at runtime, so the packed container is
 named after the 17-byte version string the image actually carries --
-build/canupdate-H1N4JPF20L-171026.iap, build/canupdate-H1N4BNZ10L-171026.iap --
+build/canupdateH1N4JPF20L-171026.iap, build/canupdateH1N4BNZ10L-171026.iap --
 which is the same string `iap_upload.py --verify` reads back over SWD after a
 flash. The protocol is encoded in that string (JPF2 vs BNZ1), so the two can
 never collide, and a file that has been moved or renamed still says what it is.
@@ -305,7 +305,9 @@ def main():
                     """error: {} does not contain the version string {} that its .iap
        would be named after. Rebuild, or check app_config.hpp.""".format(
                         binf, version))
-        iap = 'build/canupdate-%s.iap' % version
+        # No separator between 'canupdate' and the version -- that is the name
+        # Hiworld's updater expects; a dash there is not recognised.
+        iap = 'build/canupdate%s.iap' % version
         run([sys.executable, 'tools/iaptool.py', 'pack', binf, REF_IAP,
              '-o', iap], args.verbose)
         run([sys.executable, 'tools/iaptool.py', 'verify', iap], args.verbose)

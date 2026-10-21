@@ -30,6 +30,7 @@
 #include "app_config.hpp"
 #include "can_bus.hpp"
 #include "can_decode_shared.hpp"
+#include "custom_decode.hpp"
 #include "raise_benz_decode.hpp"
 #include "ram_map.hpp"
 
@@ -404,33 +405,71 @@ void decodeProfileJeep() noexcept
         const volatile std::uint8_t* const d = svc::can::rxData();
 
         switch (id) {
-        case canid::kJeepIgnition:   decodeIgnition(d[0]);    break; /* ACC / run  */
+        case canid::kJeepIgnition:
+            decodeIgnition(d[0]);                                    /* ACC / run  */
+            if constexpr (!cfg::kIsBenz) {
+                customIgnition(d[0]);
+            }
+            break;
         case canid::kJeepEngine:
             jeepEngine(d);                                           /* rpm        */
             if constexpr (cfg::kIsBenz) {
                 benzRpm(d);
                 benzSpeed(d);
+            } else {
+                customEngine(d);
             }
             break;
-        case canid::kJeepReverse:    jeepReverse(d);          break; /* reverse+gear*/
+        case canid::kJeepReverse:
+            jeepReverse(d);                                          /* reverse+gear*/
+            if constexpr (!cfg::kIsBenz) {
+                customGear(d);
+            }
+            break;
         case canid::kJeepDoors:      decodeDoors(d[2]);       break; /* doors      */
         case canid::kJeepSteering:
             jeepSteering(d);                                         /* steering   */
             if constexpr (cfg::kIsBenz) {
                 benzVoltage(d);
+            } else {
+                customVoltsIntake(d);
             }
             break;
-        /* 0x014 and 0x02C are not stock cases at all. In a jeep build they
-         * must keep falling through to decodeSwcService() exactly as they
-         * did before, or this stops being a faithful rebuild -- hence the
-         * else, which is not dead weight. */
+        /* 0x014 and 0x02C are not stock cases at all: in the stock image they
+         * fall into decodeSwcService(), which returns at once because
+         * (id & 0xFC0) != 0x400. BOTH protocols now have a reader for them --
+         * ambient and coolant -- so neither branch calls through to the
+         * service handler any more. That is not a loss of fidelity: the call
+         * it replaces was provably a no-op for any id below 0x400. */
         case canid::kJeepTrip:
-            if constexpr (cfg::kIsBenz) { benzTrip(d); }
-            else                        { decodeSwcService(id, d); }
+            if constexpr (cfg::kIsBenz) {
+                benzTrip(d);
+            } else {
+                /* TWO INDEPENDENT READERS of one frame, with separate gates and
+                 * separate validity bits: b4 ambient can be suspect while
+                 * b0:b1:b2 odometer is live, and the converse. Kept as two
+                 * functions for exactly that reason -- see custom_decode.hpp. */
+                customAmbient(d);
+                customOdometer(d);
+            }
             break;
         case canid::kJeepCoolant:
             if constexpr (cfg::kIsBenz) { benzCoolant(d); }
-            else                        { decodeSwcService(id, d); }
+            else                        { customCoolant(d); }
+            break;
+        /* Three ids with no benz reader and no stock meaning at all. Same
+         * no-op argument as above: all three are below 0x400. */
+        case canid::kJeepFuel:
+            if constexpr (!cfg::kIsBenz) { customFuel(d); }
+            break;
+        case canid::kJeepParkBrake:
+            if constexpr (!cfg::kIsBenz) { customParkBrake(d); }
+            break;
+        case canid::kJeepThrottle:
+            if constexpr (!cfg::kIsBenz) { customThrottle(d); }
+            break;
+        case canid::kJeepCompass:
+            if constexpr (!cfg::kIsBenz) { customCompass(d); }
             break;
         case canid::kJeepIllum:      decodeIllumLevel(d[1]);  break; /* illum + %  */
         case canid::kJeepSwcButtons: decodeSwcButtons(d);     break; /* SWC keys   */

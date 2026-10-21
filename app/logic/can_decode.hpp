@@ -42,6 +42,20 @@ namespace logic {
  *     PRNDL gear             0x003 d[4] ASCII *   0x20E d[2] nibble
  *     engine speed           0x002 d[0]:d[1] *    0x211 d[0]:d[1]
  *
+ * Signals the custom telemetry block adds on top, jeep profile only and with
+ * no FCA counterpart decoded, because the FCA bus is not this car:
+ *
+ *     road speed             0x002 d[2]:d[3]      --
+ *     outside air            0x014 d[4]           --
+ *     battery volts          0x015 d[1]           --
+ *     intake air             0x015 d[2]           --
+ *     coolant                0x02C d[1]           --
+ *     parking brake          0x0D0 d[0] bit 7     --
+ *     fuel level             0x159 d[4]:d[5]      --
+ *     throttle pedal         0x2C0 d[2] (d[6])    --
+ *     odometer               0x014 d[0]:d[1]:d[2] --
+ *     compass + heading      0x1B4 d[0], d[1]     --
+ *
  * (*) The WK carries both of these and this rebuild decodes both -- but the
  *     STOCK profile-0 decoder ignores them, so they are deviations rather
  *     than a port: section 6.1 B and FR-37a / FR-37b in
@@ -70,6 +84,18 @@ inline constexpr std::uint32_t kJeepReverse     = 0x003U;  /* reverse + PRNDL  *
  * docs/JEEP-WK-CAN-ID-byte-map.md. */
 inline constexpr std::uint32_t kJeepTrip        = 0x014U;  /* odo + ambient    */
 inline constexpr std::uint32_t kJeepCoolant     = 0x02CU;  /* coolant temp     */
+/* ...and three more that are decoded ONLY in a jeep build, for the custom
+ * 0xB0-0xB8 telemetry block (docs/CUSTOM-TX-SPEC.md). Same argument in the
+ * other direction: they carry signals the BENZ protocol has nowhere to show.
+ * The decoders live in custom_decode.hpp; the dispatch below calls them behind
+ * `if constexpr (!cfg::kIsBenz)`. None of these is a stock case -- in the
+ * stock image they all fall into the 0x400..0x43F service handler, which
+ * returns immediately because (id & 0xFC0) != 0x400, so intercepting them
+ * costs no stock behaviour. */
+inline constexpr std::uint32_t kJeepFuel        = 0x159U;  /* level + gate     */
+inline constexpr std::uint32_t kJeepParkBrake   = 0x0D0U;
+inline constexpr std::uint32_t kJeepThrottle    = 0x2C0U;  /* pedal + mirror   */
+inline constexpr std::uint32_t kJeepCompass     = 0x1B4U;  /* sector + heading */
 inline constexpr std::uint32_t kJeepDoors       = 0x013U;
 inline constexpr std::uint32_t kJeepSteering    = 0x015U;
 inline constexpr std::uint32_t kJeepIllum       = 0x210U;  /* + dimmer percent */

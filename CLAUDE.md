@@ -63,6 +63,10 @@ typed, linker-allocated struct · `docs/misra-cpp.md` the C++ subset and its dev
 The Benz emulation is `app/services/hu_raise_benz.cpp` (wire dialect) and
 `app/logic/raise_benz_decode.cpp` + `raise_benz_tx.cpp` (telemetry in, Benz frames out);
 `app/services/head_unit.cpp` holds only what both dialects share.
+The jeep-only **custom `0xB0`–`0xBD` telemetry block** is
+`app/logic/custom_decode.cpp` + `custom_tx.cpp`, same shape: WK CAN in,
+`ram::CustomSignals` in physical units, packed payloads out. Its contract is
+`docs/CUSTOM-TX-SPEC.md`, and the six stock TX slots are untouched by it.
 
 Keep the `/* 0x0800xxxx */` stock-address annotations on reconstructed functions, and keep
 the explanatory comments — in this repo they are the reverse-engineering record, not noise.

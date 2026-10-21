@@ -281,6 +281,19 @@ inline bool decodeVendor7ffCommon(const volatile std::uint8_t* d) noexcept
 
 /* Hiworld node-addressing / SWC service protocol on 0x400..0x43F.
  *
+ * THE NAMES IN HERE ARE MISLEADING AND ARE KEPT ONLY FOR THE GHIDRA DIFF.
+ * On the Jeep WK this range is the OSEK/VDX network-management token ring, and
+ * the match is byte for byte: d[0]==0xFD is the NM "ring data / alive" opcode,
+ * the low 6 bits of the id are the NODE ADDRESS (id = 0x400 + addr), d[1] is
+ * the address of the NEXT node, and the d[2] probe values are NM status --
+ * 0x3F awake, 0xBF sleep requested, 0xFF ring down. So this function is the
+ * box's NM participation and sleep detection, which is why the 0xBF/0xFF paths
+ * drive the ACC and bus-down logic, and why it has never produced a key code
+ * on this car. Steering-wheel buttons are NOT in this range.
+ * See docs/REQUIREMENTS.md, the note after FR-53, and
+ * ../canbus-to-canbox-signal-map.md section 11. Behaviour is correct as-is --
+ * do not "fix" anything here.
+ *
  * THE LOW 6 BITS OF THE IDENTIFIER ARE THE KEY INDEX: the frame id selects
  * which software-timer slot is armed (svc::timers::armForKeycode reads
  * ram::AppRam::swc.keycode, which is set immediately before the call -- that

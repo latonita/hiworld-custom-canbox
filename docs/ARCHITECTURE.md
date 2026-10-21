@@ -310,12 +310,20 @@ ternary.
 |---|---|---|
 | framing | `AA 55 LEN CMD payload CKS`, CKS = sum − 1 | `2E CMD LEN payload CKS`, CKS = ~sum |
 | wire overhead | 5 | 4 |
-| TX slots | 6 (`0x72 0xA6 0x73 0xF0 0x12 0x32`) | 5 (`0x08 0x07`, three pages of `0x41`) |
+| TX slots | 14: the stock 6 (`0x72 0xA6 0x73 0xF0 0x12 0x32`) + the custom 8 (`0xB0 0xB2 0xB3 0xB4 0xB5 0xB8 0xBB 0xBD`) | 5 (`0x08 0x07`, three pages of `0x41`) |
 | head-unit protocol id | 3009001 | 1034025 / 27 / 28 |
-| version string | `H1N4JPF20L-…` | `H1N4BNZ10L-…` |
-| wire behaviour | must stay stock-equivalent | deliberately diverges |
+| version string | `H1N4JPF20L-211026` | `H1N4BNZ10L-…` |
+| wire behaviour | stock-equivalent for the stock 6 slots | deliberately diverges |
 
-Only the **jeep** build is a faithful rebuild. Everything Benz-specific — the
+Only the **jeep** build is a faithful rebuild — and only for the six stock
+slots. It also carries the **custom `0xB0`–`0xB8` telemetry block**
+(`docs/CUSTOM-TX-SPEC.md`), six commands of its own in the free `0xB0`–`0xBF`
+range that publish WK signals the Hiworld protocol has no field for: coolant,
+intake air, outside air, battery volts, throttle, fuel, road speed, the parking
+brake, the odometer and a magnetic compass. The stock six are untouched, so the Android plugin's view of
+them is unchanged; the block is additional, not a modification. It is the
+jeep-side counterpart of the Benz emulation and is absent from a benz image
+for the same reason. Everything Benz-specific — the
 `0x2E` emitter and parser in `app/services/hu_raise_benz.cpp`,
 `logic::benzPublish()` in `app/logic/raise_benz_tx.cpp`, and the five WK
 decoders in `app/logic/raise_benz_decode.cpp` that feed it — is absent from a
@@ -338,6 +346,9 @@ of the bootloader's `U` greeting and costs the attempt. See the Protocol block i
 format* — four overlapping message windows over one run of bytes — so nothing
 Benz-shaped fits in it. The Benz decoders write `ram::Telemetry` in physical
 units instead, and `logic::benzPublish()` packs that into `ram::BenzFrames`.
+The custom telemetry block has the same shape and for the same reason:
+`custom_decode.cpp` writes `ram::CustomSignals`, `logic::customPublish()` packs
+that into `ram::CustomFrames`, and neither touches `ram::VehicleState`.
 `svc::hu`'s existing round-robin then transmits a payload when it differs from
 its shadow, exactly as it does for the Hiworld messages: no new scheduling.
 
@@ -439,6 +450,53 @@ notices a payload differs from its shadow and sends it, so the cadence is the st
 nothing new schedules anything. `benzPrimeFrames()` must run after the RAM block is zeroed
 and before the first transmit: a zero page byte matches no `0x41` page and the head unit
 discards the frame.
+
+### `custom_decode.hpp`
+```cpp
+void customPrimeSignals() noexcept;                              // sentinels, once at init
+void customIgnition(std::uint8_t b0) noexcept;                   // 0x000 b0
+void customEngine(const volatile std::uint8_t* d) noexcept;      // 0x002 rpm + speed
+void customGear(const volatile std::uint8_t* d) noexcept;        // 0x003 b4 ASCII PRNDL
+void customAmbient(const volatile std::uint8_t* d) noexcept;     // 0x014 b4
+void customVoltsIntake(const volatile std::uint8_t* d) noexcept; // 0x015 b1, b2
+void customCoolant(const volatile std::uint8_t* d) noexcept;     // 0x02C b1
+void customParkBrake(const volatile std::uint8_t* d) noexcept;   // 0x0D0 b0 bit 7
+void customFuel(const volatile std::uint8_t* d) noexcept;        // 0x159 b4 gate, b5
+void customThrottle(const volatile std::uint8_t* d) noexcept;    // 0x2C0 b2 (b6 mirror)
+void customOdometer(const volatile std::uint8_t* d) noexcept;    // 0x014 b0:b1:b2
+void customCompass(const volatile std::uint8_t* d) noexcept;     // 0x1B4 b0, b1
+```
+**Not stock decodes**, and the exact mirror of `raise_benz_decode.hpp`: these exist because
+the Hiworld protocol has nowhere to show any of it. Jeep WK frames in, `ram::CustomSignals`
+out; every call site sits behind `if constexpr (!cfg::kIsBenz)`.
+
+Several are **second readers** of a frame a stock decoder already handles — `0x002` for rpm,
+`0x003` for the reverse flag and PRNDL, `0x015` for the steering angle. Neither side may
+assume the other ran, and neither may write the other's destination. The same holds *within*
+this header: `customAmbient()` and `customOdometer()` both read `0x014` and stay two
+functions, because they have different gates and different validity bits — one function, one
+validity bit is what keeps the block's ownership legible.
+
+**Every decoder has a sentinel path.** On a bad sample it writes the field's "no value"
+encoding *and* clears that command's bit in the `0xB0` validity mask; it never writes a value
+derived *from* a sentinel. That is what stops `0x02C`'s all-`FF` becoming a plausible-looking
+215 °C. The encodings are in the sentinel block of `app/include/ram_map.hpp`.
+
+### `custom_tx.hpp`
+```cpp
+void customPrimeFrames() noexcept;  // sentinels into ram::AppRam::customFrames, once at init
+void customPublish() noexcept;      // ram::CustomSignals -> ram::AppRam::customFrames
+```
+Its spec is `docs/CUSTOM-TX-SPEC.md`, which also lists the four commands in the range that are
+deliberately **not** built and why (`0xB1` and `0xB6` duplicate stock `0xF0` and `0x12`;
+`0xB7` TPMS and `0xB9` KEY have no source on this car). Like `benzPublish()` it packs payload
+buffers and does **not** transmit — the round-robin notices a payload differs from its shadow.
+
+The one exception is `0xB0`, whose payload is a validity mask that may legitimately be
+constant for hours: a change-driven scheduler would only send it on the ~8.6 s keep-alive
+sweep. Nothing is toggled artificially; instead the publisher calls
+`svc::hu::requestSend(0xB0)` once a second, which is the first and only use of the
+`kSlotRequest` slot state.
 
 ### `periodic_tx.hpp`
 ```cpp

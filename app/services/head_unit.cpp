@@ -94,11 +94,12 @@ constexpr const TxDesc* kTxTable =
  * Adding a TX slot touches four things that do NOT follow from kTxSlots, and
  * every one of them fails SILENTLY:
  *
- *   - ram::AppRam::uartSlotState is a hand-sized array. If kTxSlots outgrows
- *     it, resetState() and txSched() index one past the end -- which is
+ *   - ram::AppRam::uartSlotState must have one byte per slot. It is sized from
+ *     cfg::kTxSlotCount, so that one is kept in step for free -- but if the two
+ *     ever drift, resetState() and txSched() index one past the end, which is
  *     uartTxSlotIdx, the very next byte. The scheduler would corrupt its own
  *     slot index on every sweep, and the tests would corrupt the same byte and
- *     keep passing.
+ *     keep passing. Hence the assert below rather than trust in the sizing.
  *   - a row's `len` is copied into that row's shadow with no bounds check, so a
  *     len larger than the shadow writes into the NEXT message's shadow and
  *     poisons its change detection. The symptom shows up on a different
@@ -148,6 +149,36 @@ static_assert(kRxTable[0].len == sizeof(ram::HeadUnitCommands::cluster),
               "raise the new-data flag as a side effect of the copy");
 static_assert(kRxTable[1].len == sizeof(ram::HeadUnitCommands::periodicTxCfg),
               "the 0xAD payload must match ram::HeadUnitCommands::periodicTxCfg");
+
+/* ---------------------------------------------------------------------------
+ * The first slot with an outstanding kSlotRequest, or kTxSlots if none.
+ *
+ * DELIBERATE ADDITION, and the only behavioural change this file has over the
+ * stock scheduler. It is INERT unless something calls requestSend(): the stock
+ * image never sets kSlotRequest, so in a build with no custom telemetry block
+ * this scan always returns the sentinel and txSched() runs exactly as
+ * 0x08008E62 does.
+ *
+ * WHY IT IS NEEDED. The stock kSlotRequest branch can only fire when the
+ * round-robin index happens to be standing on the requested slot, and on an
+ * idle link it never is. Trace it: a sweep that finds nothing changed parks
+ * uartTxSlotIdx on the kTxSlots sentinel, the next pass clamps that back to 0
+ * AND clears slotState[0] on the way -- so a request on slot 0 is wiped before
+ * it is ever tested, and a request on any other slot is never reached, because
+ * the index is reset to 0 on every pass. The state is unreachable as written.
+ * Pointing the index at the requesting slot first is what makes it reachable.
+ * ------------------------------------------------------------------------- */
+std::uint8_t pendingRequest() noexcept
+{
+    volatile std::uint8_t* const st = slotState();
+
+    for (std::uint8_t i = 0U; i < kTxSlots; ++i) {
+        if (st[i] == kSlotRequest) {
+            return i;
+        }
+    }
+    return kTxSlots;
+}
 
 /* ---- the slot rotation ---------------------------------------------------
  * util_wrap_index(idx, +1, hi = 5, lo = 0, wrap_mode = 0). The stock
@@ -371,6 +402,16 @@ void txSched() noexcept
     }
     r.uartTxTick = 0U;
 
+    /* An explicit send request is honoured WHEREVER it sits, not only when the
+     * index happens to be standing on it. Placed before the sentinel clamp
+     * below on purpose: that clamp clears slotState[0], which would otherwise
+     * wipe a request on slot 0 before it could be tested. See
+     * pendingRequest() -- this is a no-op in a build that never requests. */
+    const std::uint8_t requested = pendingRequest();
+    if (requested < kTxSlots) {
+        r.uartTxSlotIdx = requested;
+    }
+
     if (r.uartTxSlotIdx > static_cast<std::uint8_t>(kTxSlots - 1U)) {
         r.uartTxSlotIdx = 0U;
         st[r.uartTxSlotIdx] = kSlotIdle;
@@ -457,6 +498,31 @@ void init() noexcept
     for (std::uint8_t i = 0U; i < cfg::kVersionLength; ++i) {
         ram::g_versionString[i] = static_cast<std::uint8_t>(cfg::kVersionString[i]);
     }
+}
+
+/* ============================================================================
+ * requestSend -- mark the slot carrying `cmd` for an explicit send.
+ *
+ * NOT a stock function. Linear over the table because it is called once a
+ * second over at most twelve rows; a cmd -> slot map would be more state to
+ * keep in step with the table for no measurable gain.
+ *
+ * The request is latched in ram::AppRam::uartSlotState and consumed by the
+ * next txSched() pass that reaches its 48 ms boundary, so the worst-case
+ * latency is one frame slot, not one sweep.
+ * ==========================================================================*/
+void requestSend(std::uint8_t cmd) noexcept
+{
+    volatile std::uint8_t* const st = slotState();
+
+    for (std::uint8_t i = 0U; i < kTxSlots; ++i) {
+        if (kTxTable[i].cmd == cmd) {
+            st[i] = kSlotRequest;
+            return;
+        }
+    }
+    /* Not in this dialect's table. Deliberately silent: the caller is
+     * protocol-agnostic and a benz image genuinely has no 0xB0 row. */
 }
 
 /* ============================================================================

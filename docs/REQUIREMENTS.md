@@ -134,9 +134,37 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | **FR-48** | On profile 1, a matching `0x7FF` shall additionally map `d[4]` 0..6 into the **SWC key slot** (0→0, 1→VolDn 0x02, 2→VolUp 0x01, 3→Prev 0x09, 4→Next 0x08, 5→Mode 0x0B, 6→Mute 0x03); values 7..255 leave the slot unchanged. | `app/logic/can_decode.cpp:333-342`; test `fca_vendor_7ff_replies_on_7fe_and_maps_d4_into_the_key_slot` |
 | **FR-49** | On profile 1, a matching `0x7FF` shall also emit a one-byte reply on CAN `0x7FE` reporting the head unit's current display mode, written as four independent set-or-clear steps. | `app/logic/can_decode.cpp:346-382` |
 | **FR-50** | That display-mode reply shall reproduce the stock bug: **mode 4 is tested against bit 2 again** instead of bit 3, and its `else` branch clears bit 2. The wire values are therefore mode 1 → `0x01`, mode 2 → `0x02`, **mode 3 → `0x00` (unreportable, indistinguishable from "no mode")**, mode 4 → `0x04`: mode 4 impersonates mode 3. It is the clearing `else`, not the duplicated test on its own, that does the damage — the comment in the retired `app/port/can_decode.c` called it only "mode 4 looks like mode 3", which understates it. This must not be "fixed". | `app/logic/can_decode.cpp:347-382` (the four set-or-clear steps, and the `NOTE:` at `:370-374`); test `fca_vendor_7ff_display_mode_4_reuses_mode_3_bit` |
-| **FR-51** | Identifiers matching `0x400..0x43F` shall be treated as the Hiworld node/SWC service protocol: the **low 6 bits of the identifier are the key index**, which arms that soft-timer slot to 150 counts (1.5 s). | `app/logic/can_decode_shared.hpp:271-281`; test `swc_service_takes_the_key_index_from_the_low_six_bits_of_the_id` |
+| **FR-51** | Identifiers matching `0x400..0x43F` shall be treated as the Hiworld node/SWC service protocol: the **low 6 bits of the identifier are the key index**, which arms that soft-timer slot to 150 counts (1.5 s). **On the Jeep WK this range is the OSEK/VDX network-management token ring, not steering-wheel buttons** — see the note below. The behaviour is unchanged either way; only the naming is misleading. | `app/logic/can_decode_shared.hpp:271-281`; test `swc_service_takes_the_key_index_from_the_low_six_bits_of_the_id` |
 | **FR-52** | Within that block, `d[0] != 0xFD` shall end processing; `d[1] == 0x16` shall set the response mode to 9 and stage a `0xFD` hello reply; `d[1] == keydataRef` shall stage and send a `0xFE` key reply on `0x416` DLC 8. | `app/logic/can_decode_shared.hpp:282-298`; tests `swc_service_ignores_a_frame_that_is_not_a_key_report`, `swc_service_handshake_sets_the_response_mode`, `swc_service_repeat_key_replies_on_0x416` |
 | **FR-53** | The `d[2]` probe shall be qualified by the ACC flag: `0x3F` with ACC on and `0xBF` with ACC off update the reply status byte; `0xFF` with ACC off shall set the bus state to `kBusDown` **and flush the whole CAN TX queue**. | `app/logic/can_decode_shared.hpp:312-323`; tests `swc_service_probe_is_qualified_by_the_acc_flag`, `swc_service_bus_down_probe_clears_the_status_and_flushes_tx` |
+
+> **Note on FR-51 to FR-53: this block is network management, not buttons.**
+> Added 2026-10-21. On the Jeep WK, `0x400..0x43F` carries the OSEK/VDX
+> network-management token ring, and the stock handler's magic bytes are the NM
+> layout byte for byte:
+>
+> | stock name | NM meaning |
+> |---|---|
+> | `kSwcKeyReport = 0xFD` in `d[0]` | NM opcode `FD` = ring data / alive |
+> | "key index" = low 6 bits of the ID | `ID = 0x400 + node address` |
+> | "keydata" `d[1]` | address of the **next node** in the ring |
+> | `kSwcProbeAccOn = 0x3F` in `d[2]` | NM status, awake |
+> | `kSwcProbeAccOff = 0xBF` | NM status, **sleep requested** |
+> | `kSwcProbeBusDown = 0xFF` | ring down |
+>
+> `testlog/drive.log` carries all seven ring members — `400 402 414 415 416 41C
+> 41E`, ~2 210 frames each — with `41C`/`41E` asserting `0xBF` exactly as
+> `jeep-can-b-logs/CANB-analysis.md` §2.5 describes. So what FR-51..FR-53
+> specify is the box's **NM participation and sleep detection**, which is why
+> FR-53's `0xBF`/`0xFF` paths drive the ACC and bus-down logic and why this
+> block has never produced a key code on this car.
+>
+> **No behaviour changes and no requirement is withdrawn** — the code is correct
+> either way, and the test names are kept so the evidence column stays valid.
+> What changes: steering-wheel buttons are **not** in this range, so `0xB9` KEY
+> has no source here. `0x3A0`, which the stock firmware reads for SWC, is static
+> `00 00` across all 2 944 frames of `drive.log`.
+> See `../canbus-to-canbox-signal-map.md` §8 and §11.
 
 ### 2.7 Vehicle state block
 
@@ -184,7 +212,7 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | **FR-78** | The parser shall be a byte-at-a-time state machine over a 200-byte ring: wait for `0xAA`, require `0x55`, reject `LEN >= 0x38`, wait for `LEN + 2` further bytes before committing, then accumulate and compare the final byte with `(sum − 1) & 0xFF`. Exactly one frame is processed per call. | `app/services/hu_hiworld.cpp:206-271`; tests `head_unit_rejects_oversized_length`, `head_unit_accepts_maximum_length`, `head_unit_partial_frame_is_retried_next_pass` |
 | **FR-79** | The RX ring tail shall be committed only when the machine is back in state 0 or a frame has completed, so a half-received frame is re-parsed from its `0xAA` on the next call and no timeout is needed. The `5A A5` dialect shall never be accepted. | `app/services/hu_hiworld.cpp:226-229`, `:259-269`; test `head_unit_rejects_5A_A5_dialect` |
 | **FR-80** | The RX interrupt shall drop a byte and latch `uartRxOverflow` when advancing head would meet tail; the flag is never cleared again. | `app/services/head_unit.cpp:498-510`; test `head_unit_isr_rx_ring_overflow_drops_byte` |
-| **FR-81** | The outbound table shall be exactly six slots in transmit order `0x72`/14, `0xA6`/8, `0x73`/8, `0xF0`/17, `0x12`/10, `0x32`/14, each with its own shadow copy. | `app/services/hu_hiworld.cpp:72-79`; `docs/hiworld-firmware-analysis.md` §4.1 |
+| **FR-81** | The outbound table shall begin with the six STOCK slots in stock transmit order `0x72`/14, `0xA6`/8, `0x73`/8, `0xF0`/17, `0x12`/10, `0x32`/14, each with its own shadow copy, followed by the six slots of the custom telemetry block (FR-108). Row geometry — length against shadow and against live buffer — shall be `static_assert`ed per row. | `app/services/hu_hiworld.cpp` `kTxTable` and the asserts beside it; `docs/hiworld-firmware-analysis.md` §4.1; test `custom_jeep_build_has_twelve_tx_slots` |
 
 > The remaining head-unit behaviour is numbered FR-82 … FR-88 below; the link is the largest
 > single capability in the box and splitting it keeps each row atomic.
@@ -192,7 +220,7 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | ID | Requirement | Evidence |
 |---|---|---|
 | **FR-82** | The transmit scheduler shall run from the 8 ms slot and emit at most one data frame every **6th pass (48 ms)**; on a sweep where no payload differs from its shadow it shall wait 15 idle sweeps (~720 ms) and then send the next table entry anyway as a keep-alive, using a separate auxiliary index. | `app/services/head_unit.cpp:320-410`; tests `head_unit_scheduler_emits_only_every_sixth_pass`, `head_unit_keepalive_waits_fifteen_idle_sweeps` |
-| **FR-83** | The round-robin shall send the first slot whose live payload differs from its shadow, refresh that shadow and leave the index on that slot; a full sweep with no change parks the index on the sentinel value 6. | `app/services/head_unit.cpp:291-318`; tests `head_unit_round_robin_sends_changed_slot_and_updates_shadow`, `head_unit_round_robin_skips_unchanged_slot` |
+| **FR-83** | The round-robin shall send the first slot whose live payload differs from its shadow, refresh that shadow and leave the index on that slot; a full sweep with no change parks the index on the sentinel value `kTxSlots`. | `app/services/head_unit.cpp:291-318`; tests `head_unit_round_robin_sends_changed_slot_and_updates_shadow`, `head_unit_round_robin_skips_unchanged_slot` |
 | **FR-84** | Message `0x73` shall be transmitted as **eight zero bytes for ever**: nothing in the image ever writes its buffer. | `app/services/hu_hiworld.cpp:48-50`; `docs/hiworld-firmware-analysis.md` §4.7 |
 | **FR-85** | Inbound `0xD2` (13 bytes) and `0xAD` (2 bytes) shall be copied into their destinations **only when the payload actually changed**, and the matching "new data" flag raised for the consumer to clear. | `app/services/head_unit.cpp:225-233`; test `head_unit_unchanged_payload_does_not_reraise_new_data` |
 | **FR-86** | Inbound `0xFC` with payload `3F F3 F1 01 ?? ?? 3A A3 ??` shall be echoed back with CMD changed to `0xFD` and the checksum incremented by one, as a fixed 14-byte frame, and only while the transmitter is idle. | `app/services/head_unit.cpp:235-249`; test `head_unit_fc_handshake_echoes_fd` |
@@ -234,6 +262,52 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | **FR-107** | After the WFI the code shall still attempt a forced watchdog reset even though the WWDG clock is gated and the write lands on a dead peripheral; the reset that actually happens comes from the EXTI9_5 handler. | `app/services/power.cpp:70-76`; test `power_shutdown_forces_a_reset_on_wake` |
 
 ---
+
+### 2.14 The custom `0xB0`–`0xBD` telemetry block (jeep builds only)
+
+Not a port of anything. The WK body bus carries coolant, intake air, outside air, battery
+volts, throttle, fuel level, road speed and the parking brake; the stock Hiworld protocol has
+a field for none of them. A jeep build therefore adds eight commands of its own in the free
+`0xB0`–`0xBF` range. The full contract, including the worked test vectors, is
+`docs/CUSTOM-TX-SPEC.md`; §6.1 C records why this divergence was accepted.
+
+| ID | Requirement | Evidence |
+|---|---|---|
+| **FR-108** | A jeep build shall transmit six additional slots — `0xB0`/2 heartbeat, `0xB2`/1 ignition, `0xB3`/6 drivetrain, `0xB4`/5 engine, `0xB5`/2 climate, `0xB8`/4 fuel — through the ordinary round-robin, with the same framing, cadence and change detection as the stock six. A benz build shall transmit none of them. | `app/services/hu_hiworld.cpp` `kTxTable`; `app/logic/custom_tx.cpp`; seven worked-vector tests in `tests/host/test_custom_tx.cpp` |
+| **FR-109** | `0xB1`, `0xB6`, `0xB7` and `0xB9` shall stay **reserved and unsent**: `0xB1` duplicates stock `0xF0`, `0xB6` duplicates the door bitfield in stock `0x12`, `0xB7` TPMS is not broadcast on this car's CAN-B, and `0xB9` has no verified SWC source (`0x3A0` is static `00 00` across all 2 944 frames of `testlog/drive.log`). No row in the table shall carry `0xE0`, `0xFE`, `0xFF` or `0xD2`. | `docs/CUSTOM-TX-SPEC.md` §2; `static_assert(noReservedCommands())` in `app/services/hu_hiworld.cpp` |
+| **FR-110** | Every field shall carry a reserved "not available" encoding and shall hold it until the car has reported that signal: **`0xFF` for every +40-biased temperature** (decoded by the consumer as `XyautoProtocol.TEMP_NOT_AVAILABLE`, at the cost of making exactly 215 °C unrepresentable — the usable top is `0xFE` = 214 °C), `0xFFFF` for speed, rpm and range, `0x8000` for the one signed field (outside air, where `0xFFFF` would decode as a plausible −0.1 °C), and `0x00` for engine load, which the contract defines as unknown. The payloads shall be primed to those encodings **before the first transmit**. **No frame shall ever be suppressed to hide one bad field** — every command here carries several and the others are still good. | sentinel block in `app/include/ram_map.hpp`; `logic::customPrimeFrames()`; tests `custom_prime_puts_every_field_in_its_no_value_state`, `custom_coolant_fe_is_a_reading_not_a_sentinel` |
+| **FR-111** | `0xB0` payload byte 0 shall be the protocol revision `0x01`; byte 1 shall be a validity mask, bit 0 `0xB2`, bit 1 `0xB3`, bit 2 `0xB4`, bit 3 `0xB5`, bit 4 `0xB7` (never set in this build), bit 5 `0xB8`, bits 6–7 reserved and zero. A bit shall be **1 only while that command's source is live**. Each bit shall have exactly one owning source. | `app/logic/custom_decode.cpp`; test `custom_heartbeat_matches_the_worked_example` |
+| **FR-112** | `0xB0` shall be sent **once a second** regardless of whether its payload changed, by marking its slot `kSlotRequest` — not by toggling any byte. The scheduler shall honour an outstanding request wherever it sits in the table. | `logic::customPublish()`; `svc::hu::requestSend()`; `pendingRequest()` in `app/services/head_unit.cpp`; tests `custom_heartbeat_requests_its_slot_once_a_second`, `custom_heartbeat_request_is_honoured_on_an_idle_link`, `custom_heartbeat_request_is_consumed_once` |
+| **FR-113** | `0xB2` shall carry bit 0 ACC (from the `0x000` b0 ladder `63`/`85`/`A9` on, `00`/`01` off), bit 1 engine running (FR-114), bit 2 reverse (`0x003` b4 == `'R'`), bit 3 parking brake (`0x0D0` b0 **bit 7 only** — the `0x04` baseline is not the brake). | `app/logic/custom_decode.cpp`; tests `custom_acc_bit_follows_the_ignition_ladder`, `custom_reverse_comes_from_the_ascii_prndl_byte`, `custom_park_brake_masks_bit_seven_only` |
+| **FR-114** | "Engine running" shall be a state machine, **not** `rpm > 0`: set after **three consecutive** `0x002` frames with valid rpm ≥ 500 and not cranking; cleared **immediately** on invalid rpm, rpm < 300, or cranking (`0x000` b0 == `0xA9`). Between 300 and 500 the bit holds. The band sits between crank-max 410 and idle-min 577 on this 3.0 CRD. | `logic::customEngine()`; four tests from `custom_engine_running_needs_three_consecutive_frames` to `custom_engine_running_holds_inside_the_hysteresis_band` |
+| **FR-115** | `0xB3` shall carry speed `(0x002 b2:b3)/128` **rounded**, rpm verbatim from `0x002 b0:b1`, engine load as `0x00` (parked — `0x02C` b2 is load-shaped at r = +0.988 but uncalibrated, and no guess shall be scaled), and throttle `(0x2C0 b2 − 23)·100/211` clamped to 0…100. | `app/logic/custom_decode.cpp`, `custom_tx.cpp`; tests `custom_drivetrain_matches_the_worked_example`, `custom_speed_rounds_rather_than_truncates`, `custom_throttle_scales_the_pedal_to_percent` |
+| **FR-116** | `0x002` all-`FF` shall invalidate **both** speed and rpm: both fields go to `0xFFFF` and `0xB3`'s validity bit clears. `0xFFFF/128` shall never be computed — it is 512 km/h, a value a consumer accepts. | `logic::customEngine()`; test `custom_engine_all_ff_blanks_speed_and_rpm_and_clears_validity` |
+| **FR-117** | `0x2C0` b6 mirrors b2 in all 14 457 frames of `drive.log` and shall be used as a redundancy check: on `b2 != b6` the sample is discarded and the previous throttle value stands. | `logic::customThrottle()`; test `custom_throttle_mismatched_mirror_holds_the_previous_value` |
+| **FR-118** | `0xB4` shall carry coolant as a **verbatim** `0x02C` b1 (the car already sends °C+40, and since `0xFF` is the reserved not-available code on both sides the copy is correct in both directions — no special case on the field, only on the validity bit), intake `0x015 b2 + 40`, fuel `round(0x159 b5 × 0.6443)` clamped to 0…100, and volts `0x015 b1 × 10` centivolts. On `0x02C` unavailable, `[0]` shall be `0xFF`, `0xB4`'s validity bit shall clear, and **the frame shall still be sent** with its other three fields live. | `logic::customCoolant()`, `customVoltsIntake()`; tests `custom_engine_matches_the_worked_example`, `custom_engine_unavailable_coolant_matches_the_worked_example`, `custom_coolant_all_ff_publishes_the_sentinel_not_215_degrees`, `custom_coolant_fe_is_a_reading_not_a_sentinel` |
+| **FR-118a** | Intake shall be **clamped before biasing, never computed blindly**: `0xFF + 40` truncates to `0x27` = −1 °C, a plausible-looking lie. A source byte ≥ `0x80` — which covers both a never-observed two's-complement negative and the ≥ `0xD7` range that would bias into the reserved code — shall publish `0xFF`, **not** hold the previous value: an unavailable sensor must read unknown, not whatever it said last. It shall not clear `0xB4`'s validity bit, which belongs to coolant alone. | `logic::customVoltsIntake()`; test `custom_intake_unavailable_publishes_the_reserved_code` |
+| **FR-119** | `0x159` b4 shall be a hard gate: `b4 == 1` means b5 is not a reading, so both fuel destinations (the `0xB4` percentage and the `0xB8` litres) shall **hold their previous figure** and **`0xB8`'s validity bit shall clear while `0xB4`'s does not** — `0xB4`'s other three fields are still good. Fuel is the one field in the block that holds rather than publishing a sentinel, and the reason is physical: the gate asserts at ignition-off and a parked car's tank does not change, so the last reading is the true one and `0xB0` bit 5 is what says it is no longer refreshed. Before the first reading the primed sentinels shall stand. `0xB8` litres shall be `b5 × 5` decilitres; range shall be `0xFFFF`, no source. | `logic::customFuel()`; tests `custom_fuel_scales_litres_and_percent_from_one_byte`, `custom_fuel_percent_clamps_at_one_hundred`, `custom_fuel_gate_holds_both_destinations_and_clears_only_b8_validity`, `custom_fuel_gate_before_any_reading_leaves_the_sentinels`, `custom_fuel_matches_the_worked_example` |
+| **FR-120** | `0xB5` shall carry outside air as **signed** decidegrees, `0x014 b4 × 10`. The car's negative encoding has never been captured, so a source byte ≥ `0x80` shall hold the previous value and clear the validity bit rather than guess the sign convention — but the two's-complement **packing** shall already be correct. | `logic::customAmbient()`, `put16s()` in `custom_tx.cpp`; tests `custom_climate_matches_the_worked_example`, `custom_climate_packs_a_negative_as_twos_complement`, `custom_ambient_suspect_byte_holds_and_clears_validity` |
+| **FR-121** | The block shall not change any stock slot. `ram::CustomSignals` and `ram::CustomFrames` shall be standalone objects, never windows onto `ram::VehicleState`, whose relative offsets are the stock wire format (FR-54). | `app/include/ram_map.hpp`; `app/services/hu_hiworld.cpp` buffer accessors; test `custom_block_leaves_the_six_stock_slots_alone` |
+
+| **FR-122** | A jeep build shall transmit two further slots — `0xBB`/3 odometer and `0xBD`/3 compass — taking the block to **14 slots**. The command numbers are the allocation in `../canbus-to-canbox-signal-map.md` §9 and shall not be compacted: `0xBA` LIGHTING, `0xBC`, `0xBE` BODY2 and `0xBF` stay reserved for groups with confirmed sources and no consumer. | `app/services/hu_hiworld.cpp` `kTxTable[12..13]`; `docs/CUSTOM-TX-SPEC.md` §9; test `custom_jeep_build_has_fourteen_tx_slots` |
+| **FR-123** | `0xBB` shall carry the 24-bit odometer as a **verbatim** `0x014` b0:b1:b2 copy at 0.1 km/count — the car's encoding and the wire encoding coincide, including `FFFFFF` for unavailable. It shall **not** be converted to whole kilometres (the Benz field's constraint, not this one; the tenth is a 100 m leg a consumer can measure) and it shall **not** hold on unavailable: the sentinel is written through and bit 6 clears, per FR-110. | `logic::customOdometer()`; tests `custom_odometer_matches_the_worked_example`, `custom_odometer_unavailable_matches_the_worked_example`, `custom_odometer_keeps_tenths_of_a_kilometre` |
+| **FR-124** | `0x014` shall have **two independent readers with two independent gates**: `customAmbient()` owns bit 3 and `customOdometer()` owns bit 6. A suspect ambient byte shall not disturb the odometer and an unavailable odometer shall not disturb ambient. They shall stay two functions. | `app/logic/can_decode.cpp` `kJeepTrip` case; tests `custom_odometer_unavailable_does_not_disturb_ambient`, `custom_suspect_ambient_does_not_disturb_the_odometer` |
+| **FR-125** | `0xBD` shall carry `0x1B4` b0 as a **verbatim** 8-way sector enum (0=N … 7=NW) and b1 scaled to whole degrees as `b1 × 2` (0…358, u16). Both bytes shall be sent even though the sector is derivable: forwarding the car's own byte keeps the consumer's compass rose agreeing with the cluster at a boundary. Resolution shall stay 2°. **`0` is a real heading (due north), not a blank**; the sentinels are `0xFF` sector and `0xFFFF` heading. | `logic::customCompass()`; tests `custom_compass_matches_the_worked_example`, `custom_compass_north_zero_is_a_reading_not_a_blank`, `custom_compass_wrap_sends_both_bytes_as_the_car_sent_them`, `custom_compass_unavailable_matches_the_worked_example` |
+| **FR-126** | The compass sample shall be gated on **both bytes together**, `b0 ≤ 7 && b1 ≤ 179`, and rejected **whole** on failure — holding both previous values and clearing bit 7. **Nothing shall be masked**: a `b0` of 9 means the byte no longer means what the decoder thinks, and truncating it would publish a confident "NE". The sector shall **not** be cross-checked against `round(b1×2/45)`: unlike the `0x2C0` b2/b6 mirror a mismatch here is *expected* at boundaries (`b0`=7 with `b1`=146 is the documented case) and discarding on it would throw away one sample in two hundred for nothing. | `logic::customCompass()`; tests `custom_compass_out_of_range_heading_holds_both_values`, `custom_compass_out_of_range_sector_rejects_the_whole_sample`, `custom_compass_boundary_disagreement_is_accepted_not_discarded`, `custom_compass_heading_boundary_is_one_seventy_nine` |
+| **FR-127** | The `0xB0` validity mask is **full**: bit 6 `0xBB`, bit 7 `0xBD`, allocated in allocation order rather than command order. The documented growth path is a second mask byte at `0xB0` payload byte 2 — a **length change to a shipped command**, so firmware and consumer move together in one release, and bits 0–7 shall never be renumbered. | sentinel/bit block in `app/include/ram_map.hpp`; test `custom_heartbeat_with_all_eight_commands_live` |
+
+> **The TX budget is a requirement, not an observation.** Fourteen slots at one frame per
+> 48 ms is 672 ms worst case between two sends of the same signal and a 14 × 720 ms = 10.1 s
+> idle keep-alive — inside the consumer's 15 s staleness check with six slots of headroom.
+> 20 slots is 14.4 s and **21 crosses**, so no further slot may be added without redoing that
+> arithmetic. Pinned by `custom_tx_budget_stays_inside_the_staleness_window`, and the
+> index-corruption failure mode by `custom_full_sweep_leaves_the_slot_index_intact`.
+
+> **`0x1B4` does not stop at key-off, and that is not a bug.** The frame keeps transmitting at
+> its normal 500 ms cadence with an unchanged valid heading straight through the `0x000`
+> ignition-off transition. So `0xBD`'s validity bit stays 1 across key-off, *correctly* — the
+> compass really is still reporting. **Key-off is `0xB2` bit 0, never the compass.** A consumer
+> must not read a live `0xBD` as "the car is awake"; that half is consumer-side.
 
 ## 3. Non-functional requirements
 
@@ -326,6 +400,7 @@ These are taken as given. If any turns out to be false, requirements above fail 
 | FR-76 … FR-88 (head-unit link) | HOST + BUILD | 30 tests in `test_head_unit.cpp`; the descriptor table's lengths, shadows and buffer windows are `static_assert`ed (`app/services/hu_hiworld.cpp:97-111`). Actual 38400 8N1 framing on a wire is BENCH. |
 | FR-89 … FR-95 (parameters) | HOST | 22 tests in `test_param_store.cpp`, including the real dumped page (`param_store_load_reads_the_real_dumped_page`). Real flash timing/erase success is BENCH. |
 | FR-96 … FR-99 (status outputs) | HOST | 28 tests in `test_board_io.cpp`, including pin-crossing regressions. Electrical behaviour is BENCH. |
+| FR-108 … FR-127 (custom telemetry) | HOST | 55 tests in `test_custom_tx.cpp`, jeep only. The seven worked vectors come from `docs/CUSTOM-TX-SPEC.md` §7 and are computed from the framing rule independently of this firmware; the test file re-derives the checksum as the full byte sum rather than reusing the firmware's `sum − 1` form, so the two agreeing is the evidence. The CAN side is driven through the real `decodeProfileJeep()`. Whether the Android consumer accepts the block at all is **BENCH**. |
 | FR-100 … FR-107 (faults, sleep) | HOST + STATIC | 9 tests in `test_power.cpp` cover the teardown order, the no-op-on-refusal path and the wake reset; `power_fault_codes_do_not_collide_with_the_crt0_trap_codes` covers the code ranges. The trap table itself (FR-101) is STATIC. Actual deep sleep and the PB8 wake are **BENCH**. |
 | NFR-1 … NFR-5 | BUILD | `app/linker/app.ld` ASSERTs plus `tools/verify_preamble.py` against the bootloader dump, run on every build. |
 | NFR-6, NFR-7 | BUILD | Linker region overflow and the `_sdata`/`_ebss` ASSERTs; current figures from `arm-none-eabi-size`. |
@@ -418,6 +493,44 @@ than from the implementation.
 *Not available by this route, so do not try:* speed, battery voltage and the
 oil/coolant/trans/intake temperatures occupy `0x32` `[4..13]` but are decoded only by the
 sibling JPP004 protocol. The JPF2 handler on this head unit stops after gear and RPM.
+
+**C — the custom `0xB0`–`0xB8` telemetry block.** A jeep build transmits six head-unit
+commands the stock firmware has never sent, and the TX table grows from 6 slots to 12. This
+is the largest deliberate divergence in the image after the Benz emulation, and unlike that
+one it is present in the build that is otherwise stock-equivalent.
+
+*Why it is bounded.* The six stock slots keep their commands, their lengths, their transmit
+order and their payload sources; `custom_block_leaves_the_six_stock_slots_alone` pins that.
+The new commands sit in `0xB0`–`0xBF`, which the stock firmware never emits and the Android
+JPF2 plugin does not decode, so a head unit that does not know about them ignores them. The
+state behind them is standalone (`ram::CustomSignals`, `ram::CustomFrames`), never a window
+onto `ram::VehicleState`. Requirements FR-108…FR-121.
+
+*What it costs.* ~1.4 KB of flash, ~80 bytes of `.bss`, and eight more slots in the
+round-robin — which takes the worst-case interval between two sends of the same signal from
+288 ms to 672 ms, and the idle keep-alive from 4.3 s to 10.1 s. Both are inside the budget;
+the arithmetic is pinned by a test because the next person to add a slot will not redo it.
+The two addendum slots are also the quietest in the table — one odometer count is 100 m, and
+the compass heading delta across 196 consecutive stationary sample pairs was measured at
+exactly zero — so the effect on the `0xB3`/`0xB4` ~10 Hz alternation is nil.
+
+*One place the implementation departs from `docs/CUSTOM-TX-SPEC.md`.* §6 of the spec says the
+scheduler needs no change to honour `kSlotRequest`. It does. The stock branch is only
+reachable when the round-robin index happens to be standing on the requested slot, and on an
+idle link it never is: a sweep that finds nothing changed parks the index on the `kTxSlots`
+sentinel, and the next pass clamps it back to 0 *and* clears `slotState[0]` on the way — so a
+request on slot 0 is wiped before it is tested and a request on any other slot is never
+reached. The state was unreachable as written, which is consistent with the spec's own
+observation that nothing in the stock image has ever set it. `pendingRequest()` in
+`app/services/head_unit.cpp` points the index at the requesting slot before the clamp. It is
+**inert in any build that never calls `requestSend()`** — which is every build before this
+one, so the stock scheduler path is unchanged — and two tests fail if it is removed. FR-112.
+
+*An earlier departure that is no longer one.* The first version of the spec asked for the
+`0xB4` frame to be **suppressed entirely** when coolant is unavailable. That was withdrawn on
+2026-10-21 in favour of a reserved `0xFF` not-available code, for a better reason than the
+implementation difficulty: `0xB4` also carries intake, fuel % and voltage, and one dead
+sensor must not cost three good signals. FR-110.
 
 ### 6.2 Reproduced stock defects (not to be fixed)
 

@@ -220,10 +220,18 @@ inline constexpr std::uint8_t kUartFrameOverhead = kIsBenz ? 4U : 5U;
  * because it is the RX frame buffer's size, not a protocol rule. */
 inline constexpr std::uint8_t kUartMaxPayload = 0x37U;
 
-/* How many messages the box transmits. Six for Hiworld (0x72 0xA6 0x73 0xF0
- * 0x12 0x32); five for Benz (0x08 0x07 and three pages of 0x41). The round-
- * robin, the slot-state array and the shadow block are all sized from this. */
-inline constexpr std::uint8_t kTxSlotCount = kIsBenz ? 5U : 6U;
+/* How many messages the box transmits. FOURTEEN for Hiworld -- the six stock
+ * slots (0x72 0xA6 0x73 0xF0 0x12 0x32) plus the eight of the custom telemetry
+ * block (0xB0 0xB2 0xB3 0xB4 0xB5 0xB8 0xBB 0xBD, docs/CUSTOM-TX-SPEC.md);
+ * five for Benz (0x08 0x07 and three pages of 0x41). The round-robin, the
+ * slot-state array and the shadow block are all sized from this.
+ *
+ * THE BUDGET IS NOT FREE. One frame leaves every 48 ms, so N slots mean
+ * N x 48 ms worst case between two sends of the same signal and an idle
+ * keep-alive of N x 720 ms. At 14: 672 ms and 10.1 s, still inside the
+ * consumer's 15 s staleness check with six slots of headroom. Do not add slots
+ * without redoing that arithmetic -- 20 slots is 14.4 s and 21 crosses. */
+inline constexpr std::uint8_t kTxSlotCount = kIsBenz ? 5U : 14U;
 
 /* A Raise LEN is read by the head unit into a SIGNED byte and counted down to
  * zero, so LEN = 0 (and anything >= 0x80) makes its parser consume bytes
@@ -297,11 +305,26 @@ inline constexpr std::uint32_t kUartTxDrainSpins = 50000U;
  * cfg::kIsBenz: a string literal cannot be chosen by a ternary without
  * decaying to a pointer and losing the sizeof() that proves the length.
  * ========================================================================= */
+ /* Stock was "H1N4JPF20A-220524". The shape is H1N4 | JPF2 | 0 | A, then a
+  * DDMMYY date:
+  *   H1N4  the BSP / hardware family
+  *   JPF2  the car profile -- the SAME token the Android side knows as
+  *         protocol id 3009001. This identifies the protocol, not the build.
+  *   0     the profile's sub-revision
+  *   A     vendor image; this rebuild uses L
+  *
+  * SO ONLY THE DATE MOVES BETWEEN OUR BUILDS. Bumping "JPF20" to "JPF21" would
+  * not read as a revision bump -- it would change the profile token itself,
+  * because the digit belongs to JPF2's sub-revision and not to us. The custom
+  * 0xB0-0xB8 telemetry block is wire-visible but it does not change the
+  * profile, so the protocol identity stays put and the date tells the two
+  * images apart: -171026 speaks the six stock slots only, -211026 adds the
+  * telemetry block. */
  //                                      "H1N4JPF20A-220524"
 #if defined(CANBOX_PROTOCOL_BENZ)
 inline constexpr char kVersionString[] = "H1N4BNZ10L-171026";
 #else
-inline constexpr char kVersionString[] = "H1N4JPF20L-171026";
+inline constexpr char kVersionString[] = "H1N4JPF20L-211026";
 #endif
 inline constexpr std::uint8_t kVersionLength = 17U;
 static_assert(sizeof(kVersionString) == kVersionLength + 1U,

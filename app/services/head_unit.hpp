@@ -87,9 +87,10 @@ inline constexpr std::size_t kAckQueueTail    = 0x0BU;
 /* ===========================================================================
  * Descriptor-table geometry and scheduler constants.
  * ========================================================================= */
-/* Six on Hiworld (the stock flash table at 0x08009F2C), five on Benz. The
- * count lives in cfg:: because ram::AppRam::uartSlotState is sized from it
- * and ram_map.hpp must not depend on this header. */
+/* Twelve on Hiworld -- the six of the stock flash table at 0x08009F2C plus the
+ * six of the custom telemetry block -- and five on Benz. The count lives in
+ * cfg:: because ram::AppRam::uartSlotState is sized from it and ram_map.hpp
+ * must not depend on this header. */
 inline constexpr std::uint8_t kTxSlots       = cfg::kTxSlotCount;
 inline constexpr std::uint8_t kRxSlots       = 2U;   /* flash table 0x08009F74 */
 inline constexpr std::uint8_t kTicksPerFrame = 6U;   /* 6 x 8 ms  =  48 ms     */
@@ -127,6 +128,22 @@ void onInterrupt() noexcept;
 
 /* 0x08003088 -- shut the port down; used by the deep-sleep path. */
 void disable() noexcept;
+
+/* ---------------------------------------------------------------------------
+ * Ask for one slot to be sent on the next transmit opportunity.
+ *
+ * NOT a stock entry point -- the stock image has the kSlotRequest state and
+ * nothing that ever sets it. It exists for the custom 0xB0 heartbeat
+ * (docs/CUSTOM-TX-SPEC.md section 3), whose payload is a validity mask that may
+ * legitimately be constant for hours: the round-robin is change-driven, so a
+ * constant payload would only go out on the ~8.6 s keep-alive sweep and a
+ * "once a second" heartbeat would not be one.
+ *
+ * No-op if `cmd` is not in the ACTIVE dialect's table, which is what makes it
+ * safe to call unconditionally: a benz image has no 0xB0 row and simply
+ * ignores the request.
+ * ------------------------------------------------------------------------- */
+void requestSend(std::uint8_t cmd) noexcept;
 
 /* 0x08008CCE -- the fixed 6-byte frame  AA 55 01 <cmd> <arg> <cks>, where
  * cks = cmd + arg (which is the general rule, since LEN = 1 and 1 - 1 = 0).

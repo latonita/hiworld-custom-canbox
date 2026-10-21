@@ -27,6 +27,8 @@ suites are swapped in and out per configuration:
                                 softened into something dialect-neutral.
     test_head_unit_raise.cpp    Raise/Benz "2E" framing and the IAP escape
                                 hatch. benz only.
+    test_custom_tx.cpp          the custom 0xB0-0xB8 telemetry block. jeep only
+                                -- a benz image has none of those TX slots.
     test_raise_benz_tx.cpp      the Benz message set: WK CAN decode -> frames,
                                 against worked examples from the plugin
                                 analysis. benz only.
@@ -82,7 +84,7 @@ PROTOCOLS = {
     },
     'benz': {
         'defines': ['CANBOX_PROTOCOL_BENZ'],
-        'exclude': {'test_head_unit.cpp'},
+        'exclude': {'test_head_unit.cpp', 'test_custom_tx.cpp'},
     },
 }
 

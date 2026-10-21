@@ -40,6 +40,7 @@
 
 #include "raise_benz_tx.hpp"
 #include "board_io.hpp"
+#include "custom_tx.hpp"
 #include "can_bus.hpp"
 #include "can_link.hpp"
 #include "periodic_tx.hpp"
@@ -89,6 +90,11 @@ void bootSequence() noexcept
      * page byte matches no page and the head unit drops the frame. */
     if constexpr (cfg::kIsBenz) {
         logic::benzPrimeFrames();
+    } else {
+        /* The custom telemetry block's "no value" sentinels. Must happen
+         * before the first transmit for the same reason: a zeroed payload is
+         * not a blank, it is -40 degC coolant and 0.00 V. */
+        logic::customPrimeFrames();
     }
     svc::can::setBaudByProfile();        /* 0x08007B2C  first CAN bring-up       */
 
@@ -179,6 +185,12 @@ void waitForBus() noexcept
              * the stock 8 ms task keeps its exact shape. */
             if constexpr (cfg::kIsBenz) {
                 logic::benzPublish();
+            } else {
+                /* The same job for the custom 0xB0-0xB8 block, and in the
+                 * same place: repack before the link looks at the payloads.
+                 * Compiled out entirely in a benz build, so each dialect's
+                 * 8 ms task keeps exactly one publisher. */
+                logic::customPublish();
             }
             svc::hu::service();                  /* 0x08008FE2 */
             svc::io::writeStatusLines();         /* 0x080084F6 */

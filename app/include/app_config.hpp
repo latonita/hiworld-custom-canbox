@@ -226,12 +226,14 @@ inline constexpr std::uint8_t kUartMaxPayload = 0x37U;
  * five for Benz (0x08 0x07 and three pages of 0x41). The round-robin, the
  * slot-state array and the shadow block are all sized from this.
  *
+ * FIFTEEN once 0xB7 TYRE lands -- see docs/TPMS-POLL-SPEC.md.
+ *
  * THE BUDGET IS NOT FREE. One frame leaves every 48 ms, so N slots mean
  * N x 48 ms worst case between two sends of the same signal and an idle
- * keep-alive of N x 720 ms. At 14: 672 ms and 10.1 s, still inside the
- * consumer's 15 s staleness check with six slots of headroom. Do not add slots
+ * keep-alive of N x 720 ms. At 15: 720 ms and 10.8 s, still inside the
+ * consumer's 15 s staleness check with five slots of headroom. Do not add slots
  * without redoing that arithmetic -- 20 slots is 14.4 s and 21 crosses. */
-inline constexpr std::uint8_t kTxSlotCount = kIsBenz ? 5U : 14U;
+inline constexpr std::uint8_t kTxSlotCount = kIsBenz ? 5U : 15U;
 
 /* A Raise LEN is read by the head unit into a SIGNED byte and counted down to
  * zero, so LEN = 0 (and anything >= 0x80) makes its parser consume bytes

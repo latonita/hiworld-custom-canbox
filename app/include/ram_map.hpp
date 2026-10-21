@@ -408,6 +408,7 @@ struct UartShadows {
     volatile std::uint8_t msgB3[6];
     volatile std::uint8_t msgB4[5];
     volatile std::uint8_t msgB5[2];
+    volatile std::uint8_t msgB7[5];
     volatile std::uint8_t msgB8[4];
     volatile std::uint8_t msgBB[3];
     volatile std::uint8_t msgBD[3];
@@ -524,7 +525,7 @@ inline constexpr std::uint8_t  kCustomLoadUnknown = 0x00U;
  *     bit1  0xB3  <- 0x002 not all-FF
  *     bit2  0xB4  <- 0x02C not all-FF
  *     bit3  0xB5  <- 0x014 b4 is a usable ambient reading
- *     bit4  0xB7  -- TPMS; not broadcast on this car, so never set
+ *     bit4  0xB7  <- a WCM poll answered within the staleness window
  *     bit5  0xB8  <- 0x159 b4 validity gate clear
  *     bit6  0xBB  <- 0x014 b0:b1:b2 != FFFFFF
  *     bit7  0xBD  <- a 0x1B4 sample passed the plausibility gate
@@ -548,10 +549,29 @@ inline constexpr std::uint8_t kValidB2 = 0x01U;
 inline constexpr std::uint8_t kValidB3 = 0x02U;
 inline constexpr std::uint8_t kValidB4 = 0x04U;
 inline constexpr std::uint8_t kValidB5 = 0x08U;
-inline constexpr std::uint8_t kValidB7 = 0x10U;   /* never set in this build */
+inline constexpr std::uint8_t kValidB7 = 0x10U;
 inline constexpr std::uint8_t kValidB8 = 0x20U;
 inline constexpr std::uint8_t kValidBB = 0x40U;
 inline constexpr std::uint8_t kValidBD = 0x80U;
+
+/* 0xB7 tyre positions, as the WCM orders them in its 0x213B reply:
+ * b3=LF b4=RF b5=RR b6=LR. TRIANGULATED, NOT PROVEN -- three independent
+ * sources agree and a fourth swaps the rears, and no deflation test has ever
+ * been done. If the head unit shows the wrong corner, change these four lines
+ * and nothing else. */
+inline constexpr std::uint8_t kTyrePosLeftFront  = 0U;
+inline constexpr std::uint8_t kTyrePosRightFront = 1U;
+inline constexpr std::uint8_t kTyrePosRightRear  = 2U;
+inline constexpr std::uint8_t kTyrePosLeftRear   = 3U;
+inline constexpr std::uint8_t kTyrePosSpare      = 4U;   /* deferred, not sent */
+inline constexpr std::uint8_t kTyreCount         = 4U;   /* the spare is extra */
+
+/* Bits of the 0xB7 flags byte. Only "no signal" is ever set by this firmware:
+ * 0x213B reports no battery, leak or sensor state at all -- those live in the
+ * per-tyre fault identifiers this build deliberately does not read. */
+inline constexpr std::uint8_t kTyreFlagBatteryLow = 0x01U;
+inline constexpr std::uint8_t kTyreFlagLeak       = 0x02U;
+inline constexpr std::uint8_t kTyreFlagNoSignal   = 0x04U;
 
 /* Bits of the 0xB2 ignition byte. */
 inline constexpr std::uint8_t kIgnAccOn     = 0x01U;
@@ -576,6 +596,23 @@ struct CustomSignals {
     volatile std::uint16_t headingDeg;      /* whole deg magnetic  0x1B4 b1*2 */
     volatile std::uint8_t  compassSector;   /* 8-way enum, 0=N     0x1B4 b0   */
 
+    /* ---- TPMS, polled from the WCM. docs/TPMS-POLL-SPEC.md ---------------
+     * NOT broadcast on this car: these come from a KWP request/response
+     * exchange the box initiates, which is the only place this firmware
+     * transmits a frame nobody asked it for.
+     *
+     * Order is LF, RF, RR, LR -- the rears are NOT in the order most sources
+     * assume, and this order is triangulated from three independent sources
+     * but has never been confirmed by a deflation test. kTyrePos* below name
+     * it in one place so one test fixes it in one line. */
+    volatile std::uint16_t tyreKpa[4];      /* kPa, 0xFFFF unknown  0x500 b3..b6 */
+    volatile std::uint16_t tpmsPollDiv;     /* 8 ms passes since the last poll   */
+    volatile std::uint16_t tpmsRotateDiv;   /* 8 ms passes since the last rotate */
+    volatile std::uint8_t  tpmsPosition;    /* which corner 0xB7 is carrying     */
+    volatile std::uint8_t  tpmsPending;     /* a request is outstanding          */
+    volatile std::uint8_t  tpmsDeadline;    /* 8 ms passes left to answer        */
+    volatile std::uint8_t  tpmsFailures;    /* consecutive failed polls          */
+
     volatile std::uint8_t  ignBits;         /* the whole 0xB2 payload byte    */
     volatile std::uint8_t  valid;           /* the 0xB0 validity mask         */
 
@@ -599,6 +636,7 @@ struct CustomFrames {
     volatile std::uint8_t b3[6];   /* speed, rpm, load, throttle              */
     volatile std::uint8_t b4[5];   /* coolant, intake, fuel %, volts          */
     volatile std::uint8_t b5[2];   /* outside air, signed decidegrees         */
+    volatile std::uint8_t b7[5];   /* ONE tyre: position, kPa, temp, flags     */
     volatile std::uint8_t b8[4];   /* litres, range                           */
     volatile std::uint8_t bB[3];   /* odometer, 24-bit 0.1 km                 */
     volatile std::uint8_t bD[3];   /* compass sector, magnetic heading        */

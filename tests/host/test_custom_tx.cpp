@@ -167,6 +167,50 @@ void compass(std::uint8_t b0, std::uint8_t b1) noexcept
     pushFrame(logic::canid::kJeepCompass, d);
 }
 
+/* ---- TPMS ---------------------------------------------------------------
+ * The WCM's answer on 0x500: 06 61 3B p1 p2 p3 p4 <junk>. The trailing byte is
+ * deliberately NOT zero in these builders -- it is whatever the responder had
+ * in its buffer last, and a decoder that reads it as a fifth pressure must
+ * fail a test rather than ship. */
+void tpmsReply(std::uint8_t lf, std::uint8_t rf,
+               std::uint8_t rr, std::uint8_t lr) noexcept
+{
+    const std::uint8_t d[8] = { 0x06U, 0x61U, 0x3BU, lf, rf, rr, lr, 0xD2U };
+    pushFrame(logic::canid::kJeepVendorEcho, d);
+}
+
+/* An arbitrary 0x500 frame that is not a well-formed answer. */
+void raw500(std::uint8_t b0, std::uint8_t b1, std::uint8_t b2) noexcept
+{
+    const std::uint8_t d[8] = { b0, b1, b2, 0U, 0U, 0U, 0U, 0U };
+    pushFrame(logic::canid::kJeepVendorEcho, d);
+}
+
+/* Bring the box to the state in which a poll is allowed: bus running, and the
+ * poll divider wound to the point where the next pass fires a request. */
+void armPoll() noexcept
+{
+    ram::app().canBusStatus = cfg::kBusRunning;
+    ram::app().customSignals.tpmsPollDiv = 3749U;   /* kTpmsPollPasses - 1 */
+}
+
+/* One 8 ms pass of the poll state machine, plus the 4 ms task's drain --
+ * txEnqueue() only fills the ring; txDrain() is what hands a frame to a
+ * mailbox and so to fake::lastCanFrame(). */
+void pollPass() noexcept
+{
+    logic::customTpmsPoll();
+    svc::can::txDrain();
+}
+
+/* Drive the state machine until the outstanding request times out. */
+void runOutDeadline() noexcept
+{
+    for (int i = 0; i < 70; ++i) {
+        logic::customTpmsPoll();
+    }
+}
+
 /* 0x015: b1 volts 0.1 V/count, b2 intake air degrees C. */
 void voltsIntake(std::uint8_t b1, std::uint8_t b2) noexcept
 {
@@ -213,6 +257,7 @@ const volatile std::uint8_t* b3() noexcept { return ram::app().customFrames.b3; 
 const volatile std::uint8_t* b4() noexcept { return ram::app().customFrames.b4; }
 const volatile std::uint8_t* b5() noexcept { return ram::app().customFrames.b5; }
 const volatile std::uint8_t* b8() noexcept { return ram::app().customFrames.b8; }
+const volatile std::uint8_t* b7() noexcept { return ram::app().customFrames.b7; }
 const volatile std::uint8_t* bB() noexcept { return ram::app().customFrames.bB; }
 const volatile std::uint8_t* bD() noexcept { return ram::app().customFrames.bD; }
 
@@ -225,15 +270,15 @@ std::uint8_t ignByte() noexcept   { return ram::app().customSignals.ignBits; }
  * 0. Configuration sanity -- the five couplings section 6 of the spec warns
  *    about, four of which fail silently.
  * ========================================================================= */
-TEST(custom_jeep_build_has_fourteen_tx_slots)
+TEST(custom_jeep_build_has_fifteen_tx_slots)
 {
     CHECK_FALSE(cfg::kIsBenz);
-    CHECK_EQ(static_cast<unsigned>(cfg::kTxSlotCount), 14U);
-    CHECK_EQ(static_cast<unsigned>(svc::hu::kTxSlots), 14U);
+    CHECK_EQ(static_cast<unsigned>(cfg::kTxSlotCount), 15U);
+    CHECK_EQ(static_cast<unsigned>(svc::hu::kTxSlots), 15U);
     /* The slot-state array is sized from cfg::kTxSlotCount and is immediately
      * followed by uartTxSlotIdx: a short array means the scheduler corrupts
      * its own index every sweep and the tests keep passing. */
-    CHECK_EQ(sizeof(ram::AppRam::uartSlotState), 14U);
+    CHECK_EQ(sizeof(ram::AppRam::uartSlotState), 15U);
 }
 
 /* The index really does survive a full sweep -- the symptom of a short
@@ -263,8 +308,8 @@ TEST(custom_tx_budget_stays_inside_the_staleness_window)
     const unsigned keepAliveMs = static_cast<unsigned>(svc::hu::kTxSlots)
                                * static_cast<unsigned>(svc::hu::kIdleDelay)
                                * static_cast<unsigned>(svc::hu::kTicksPerFrame) * 8U;
-    CHECK_EQ(worstCaseMs, 672U);
-    CHECK_EQ(keepAliveMs, 10080U);     /* 14 x 720 ms = 10.1 s */
+    CHECK_EQ(worstCaseMs, 720U);
+    CHECK_EQ(keepAliveMs, 10800U);     /* 15 x 720 ms = 10.8 s */
     CHECK(keepAliveMs < 15000U);
 }
 
@@ -1285,6 +1330,283 @@ TEST(custom_cold_boot_leaves_odometer_and_compass_unavailable)
     CHECK_EQ(bD()[0], 0xFFU);  CHECK_EQ(bD()[1], 0xFFU);  CHECK_EQ(bD()[2], 0xFFU);
     CHECK_EQ(validMask() & ram::kValidBB, 0U);
     CHECK_EQ(validMask() & ram::kValidBD, 0U);
+}
+
+/* ===========================================================================
+ * 9. 0xB7 TYRE -- polling the WCM. docs/TPMS-POLL-SPEC.md.
+ * ========================================================================= */
+
+/* THE REQUEST. The PDU is `21 3B`, NOT `21 21 3B` -- a builder that re-emits
+ * the service byte for a service-qualified identifier makes every module on
+ * this bus answer nothing. DLC 3, unpadded. */
+TEST(tpms_poll_sends_the_kwp_request_on_0x600)
+{
+    primed();
+    armPoll();
+    pollPass();
+
+    const fake::CanFrame* f = fake::lastCanFrame();
+    CHECK(f != nullptr);
+    if (f != nullptr) {
+        CHECK_EQ(f->id, 0x600U);
+        CHECK_EQ(f->dlc, 3U);
+        CHECK_EQ(f->data[0], 0x02U);   /* ISO-TP single frame, 2 PDU bytes */
+        CHECK_EQ(f->data[1], 0x21U);   /* readDataByLocalIdentifier        */
+        CHECK_EQ(f->data[2], 0x3BU);   /* ...and NOT a second 0x21 here    */
+    }
+}
+
+/* THE BUS-PRESENCE GATE. abom = 0 and nart = 0 mean an unACKed frame is
+ * retried for ever and takes the controller bus-off permanently. On a bench
+ * with no second node that is exactly what a poll would cause, so the poll
+ * must not fire unless the bus is known alive. */
+TEST(tpms_poll_is_silent_unless_the_bus_is_running)
+{
+    primed();
+    armPoll();
+    ram::app().canBusStatus = cfg::kBusDown;
+    pollPass();
+    CHECK_EQ(fake::canFrameCount(), 0U);
+
+    primed();
+    armPoll();
+    ram::app().canBusStatus = cfg::kBusSettling;
+    pollPass();
+    CHECK_EQ(fake::canFrameCount(), 0U);
+
+    primed();
+    armPoll();
+    pollPass();                       /* kBusRunning */
+    CHECK_EQ(fake::canFrameCount(), 1U);
+}
+
+/* Only one request in flight at a time. */
+TEST(tpms_poll_does_not_stack_requests)
+{
+    primed();
+    armPoll();
+    pollPass();
+    CHECK_EQ(fake::canFrameCount(), 1U);
+
+    armPoll();                        /* wind the divider again */
+    pollPass();
+    CHECK_EQ(fake::canFrameCount(), 1U);   /* still one: a reply is pending */
+}
+
+/* THE WORKED EXAMPLE: the real captured reply 06 61 3B 21 20 21 1E, decoded
+ * into the four corners and packed as the head unit expects them. */
+TEST(tpms_reply_decodes_the_captured_frame)
+{
+    primed();
+    armPoll();
+    pollPass();
+
+    tpmsReply(0x21U, 0x20U, 0x21U, 0x1EU);   /* 33, 32, 33, 30 psi */
+    decodeOnce();
+
+    const ram::CustomSignals& c = ram::app().customSignals;
+    CHECK_EQ(c.tyreKpa[ram::kTyrePosLeftFront],  228U);
+    CHECK_EQ(c.tyreKpa[ram::kTyrePosRightFront], 221U);
+    CHECK_EQ(c.tyreKpa[ram::kTyrePosRightRear],  228U);
+    CHECK_EQ(c.tyreKpa[ram::kTyrePosLeftRear],   207U);
+    CHECK_EQ(validMask() & ram::kValidB7, ram::kValidB7);
+}
+
+/* ...and on the wire, one corner per frame. These are the four section-6
+ * vectors. */
+TEST(tpms_frames_match_the_worked_examples)
+{
+    static const std::uint8_t want[4][10] = {
+        { 0xAAU, 0x55U, 0x05U, 0xB7U, 0x00U, 0x00U, 0xE4U, 0xFFU, 0x00U, 0x9EU },
+        { 0xAAU, 0x55U, 0x05U, 0xB7U, 0x01U, 0x00U, 0xDDU, 0xFFU, 0x00U, 0x98U },
+        { 0xAAU, 0x55U, 0x05U, 0xB7U, 0x02U, 0x00U, 0xE4U, 0xFFU, 0x00U, 0xA0U },
+        { 0xAAU, 0x55U, 0x05U, 0xB7U, 0x03U, 0x00U, 0xCFU, 0xFFU, 0x00U, 0x8CU },
+    };
+
+    primed();
+    armPoll();
+    pollPass();
+    tpmsReply(0x21U, 0x20U, 0x21U, 0x1EU);
+    decodeOnce();
+
+    for (std::uint8_t pos = 0U; pos < ram::kTyreCount; ++pos) {
+        ram::app().customSignals.tpmsPosition = pos;
+        logic::customPublish();
+
+        std::uint8_t wire[16];
+        const std::size_t n = hiworldFrame(wire, 0xB7U, b7(), 5U);
+        CHECK_EQ(n, 10U);
+        CHECK_BYTES(wire, want[pos], 10U);
+    }
+}
+
+/* TRUST THE PCI NIBBLE, NOT THE DLC. The byte after the declared length of 6
+ * is stale buffer content; reading it as a fifth pressure would publish
+ * garbage. Only four corners exist and the junk byte is never consulted. */
+TEST(tpms_reply_ignores_the_byte_past_the_declared_length)
+{
+    primed();
+    armPoll();
+    pollPass();
+    tpmsReply(0x21U, 0x20U, 0x21U, 0x1EU);   /* trailing byte is 0xD2 */
+    decodeOnce();
+
+    /* 0xD2 would be 210 psi = 1448 kPa if it were ever read as a pressure. */
+    const ram::CustomSignals& c = ram::app().customSignals;
+    for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
+        CHECK(c.tyreKpa[i] != 1448U);
+    }
+}
+
+/* A malformed 0x500 leaves the poll open and publishes nothing. */
+TEST(tpms_reply_rejects_a_frame_that_is_not_an_answer)
+{
+    primed();
+    armPoll();
+    pollPass();
+
+    raw500(0x06U, 0x61U, 0x40U);      /* right service, WRONG identifier */
+    decodeOnce();
+    CHECK_EQ(validMask() & ram::kValidB7, 0U);
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 1U);   /* still waiting */
+
+    tpmsReply(0x21U, 0x20U, 0x21U, 0x1EU);
+    decodeOnce();
+    CHECK_EQ(validMask() & ram::kValidB7, ram::kValidB7);
+}
+
+/* A reply with no poll outstanding is ignored -- and, crucially, NOTHING is
+ * transmitted: the stock 0x500 -> 0x516 mirror is off in a jeep build. */
+TEST(tpms_reply_without_an_outstanding_poll_is_ignored_and_silent)
+{
+    primed();
+    ram::app().canBusStatus = cfg::kBusRunning;
+
+    tpmsReply(0x21U, 0x20U, 0x21U, 0x1EU);
+    decodeOnce();
+
+    CHECK_EQ(validMask() & ram::kValidB7, 0U);
+    CHECK_EQ(fake::canFrameCount(), 0U);
+}
+
+/* A negative response closes the request and counts as a failure, but carries
+ * no data and must not be echoed either. */
+TEST(tpms_negative_response_is_consumed_and_counted)
+{
+    primed();
+    armPoll();
+    pollPass();
+    const unsigned before = fake::canFrameCount();
+
+    raw500(0x03U, 0x7FU, 0x21U);      /* 7F 21 xx */
+    decodeOnce();
+
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 0U);
+    CHECK_EQ(validMask() & ram::kValidB7, 0U);
+    CHECK_EQ(fake::canFrameCount(), before);   /* nothing transmitted */
+}
+
+/* Four consecutive misses -- two minutes -- blank every corner, raise the
+ * no-signal flag and clear the validity bit. */
+TEST(tpms_goes_stale_after_four_missed_polls)
+{
+    primed();
+    armPoll();
+    pollPass();
+    tpmsReply(0x21U, 0x20U, 0x21U, 0x1EU);
+    decodeOnce();
+    CHECK_EQ(validMask() & ram::kValidB7, ram::kValidB7);
+
+    for (int miss = 0; miss < 4; ++miss) {
+        armPoll();
+        pollPass();                   /* request goes out */
+        runOutDeadline();             /* ...and times out */
+    }
+
+    logic::customPublish();
+    CHECK_EQ(validMask() & ram::kValidB7, 0U);
+    CHECK_EQ(b7()[1], 0xFFU);  CHECK_EQ(b7()[2], 0xFFU);
+    CHECK_EQ(b7()[4], ram::kTyreFlagNoSignal);
+}
+
+/* Three misses is not yet stale -- the readings stand. */
+TEST(tpms_survives_three_missed_polls)
+{
+    primed();
+    armPoll();
+    pollPass();
+    tpmsReply(0x21U, 0x20U, 0x21U, 0x1EU);
+    decodeOnce();
+
+    for (int miss = 0; miss < 3; ++miss) {
+        armPoll();
+        pollPass();
+        runOutDeadline();
+    }
+
+    CHECK_EQ(validMask() & ram::kValidB7, ram::kValidB7);
+    CHECK_EQ(ram::app().customSignals.tyreKpa[0], 228U);
+}
+
+/* Before any answer at all: sentinels, no-signal flag, bit 4 clear. The frame
+ * still goes out -- the scheduler cannot be told to skip a slot -- so every
+ * field has to be honest on its own. */
+TEST(tpms_before_the_first_answer_publishes_no_value)
+{
+    primed();
+    logic::customPublish();
+
+    std::uint8_t wire[16];
+    hiworldFrame(wire, 0xB7U, b7(), 5U);
+    const std::uint8_t want[10] = { 0xAAU, 0x55U, 0x05U, 0xB7U,
+                                    0x00U, 0xFFU, 0xFFU, 0xFFU, 0x04U, 0xBCU };
+    CHECK_BYTES(wire, want, 10U);
+    CHECK_EQ(validMask() & ram::kValidB7, 0U);
+}
+
+/* The position byte rotates 0->1->2->3->0 and never reaches 4: the spare is
+ * deferred, and publishing a corner the box never fills would show a
+ * permanently dead fifth tyre. */
+TEST(tpms_position_rotates_through_four_corners_only)
+{
+    primed();
+    ram::app().canBusStatus = cfg::kBusRunning;
+
+    std::uint8_t seen[6] = {0U, 0U, 0U, 0U, 0U, 0U};
+    std::uint8_t prev = ram::app().customSignals.tpmsPosition;
+    seen[prev] = 1U;
+
+    /* 625 passes per step, so five steps is 3125 passes. */
+    for (int i = 0; i < 3200; ++i) {
+        pollPass();
+        const std::uint8_t pos = ram::app().customSignals.tpmsPosition;
+        CHECK(pos < ram::kTyreCount);
+        if (pos != prev) {
+            CHECK_EQ(pos, static_cast<std::uint8_t>((prev + 1U) % ram::kTyreCount));
+            seen[pos] = 1U;
+            prev = pos;
+        }
+    }
+    for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
+        CHECK_EQ(seen[i], 1U);
+    }
+    CHECK_EQ(seen[ram::kTyrePosSpare], 0U);
+}
+
+/* psi -> kPa rounds rather than truncating: 33 psi is 227.5 kPa. */
+TEST(tpms_pressure_converts_psi_to_kilopascal_rounded)
+{
+    primed();
+    armPoll();
+    pollPass();
+    tpmsReply(33U, 1U, 0U, 255U);
+    decodeOnce();
+
+    const ram::CustomSignals& c = ram::app().customSignals;
+    CHECK_EQ(c.tyreKpa[0], 228U);     /* 227.49 -> 228, not 227 */
+    CHECK_EQ(c.tyreKpa[1], 7U);       /* 6.89   -> 7            */
+    CHECK_EQ(c.tyreKpa[2], 0U);
+    CHECK_EQ(c.tyreKpa[3], 1758U);    /* full scale still fits u16 */
 }
 
 /* ===========================================================================

@@ -18,6 +18,9 @@
 
 #include <cstdint>
 
+#include "app_config.hpp"
+#include "can_bus.hpp"
+#include "can_decode.hpp"
 #include "ram_map.hpp"
 
 namespace logic {
@@ -130,6 +133,57 @@ constexpr std::uint8_t  kCompassSectorMax = 7U;
 constexpr std::uint8_t  kHeadingCountMax  = 179U;   /* 179 * 2 = 358 deg */
 constexpr std::uint16_t kDegPerCount      = 2U;
 
+/* ---------------------------------------------------------------------------
+ * TPMS over KWP2000. docs/TPMS-POLL-SPEC.md.
+ *
+ * The request PDU is TWO bytes -- service 0x21, local identifier 0x3B -- under
+ * an ISO-TP single-frame PCI of 0x02. DLC 3, unpadded, which is what ISO 15765
+ * asks for and what this module was proven to accept.
+ *
+ * THE TRAP: the PDU is `21 3B`, NOT `21 21 3B`. A builder that re-emits the
+ * service byte for a service-qualified identifier sends three bytes and EVERY
+ * MODULE ANSWERS NOTHING. That cost a sibling project a debugging session.
+ * ------------------------------------------------------------------------- */
+constexpr std::uint8_t kTpmsRequest[3] = { 0x02U, 0x21U, 0x3BU };
+constexpr std::uint8_t kTpmsRequestDlc = 3U;
+static_assert(kTpmsRequestDlc == sizeof(kTpmsRequest),
+              "txEnqueue copies min(dlc, 8) bytes from a pointer whose extent it "
+              "cannot know, so a DLC longer than the buffer reads past it and puts "
+              "whatever follows in .rodata onto the vehicle bus");
+
+/* The reply: 06 61 3B p1 p2 p3 p4 [junk]. Trust the PCI nibble, never the DLC
+ * -- the byte after the declared length is whatever was in the responder's
+ * buffer last, and it is neither data nor zero. */
+constexpr std::uint8_t kTpmsReplyPci     = 0x06U;   /* single frame, 6 PDU bytes */
+constexpr std::uint8_t kTpmsReplyService = 0x61U;   /* 0x21 + 0x40 = positive    */
+constexpr std::uint8_t kTpmsReplyLid     = 0x3BU;
+constexpr std::uint8_t kKwpNegative      = 0x7FU;
+constexpr std::size_t  kTpmsFirstPsiByte = 3U;
+
+/* Cadences, in 8 ms passes of the periodic-TX task. A uint8_t divider
+ * saturates at 2.04 s, which is why the counters are 16-bit. */
+constexpr std::uint16_t kTpmsPollPasses   = 3750U;  /* 30 s between polls       */
+constexpr std::uint16_t kTpmsRotatePasses = 625U;   /*  5 s between corners     */
+constexpr std::uint8_t  kTpmsReplyPasses  = 63U;    /* ~500 ms to answer        */
+/* Four consecutive misses -- two minutes -- before the data is called stale.
+ * The exchange was measured at 47/47 on a real drive, so this is a backstop,
+ * not an expectation. */
+constexpr std::uint8_t  kTpmsStaleMisses  = 4U;
+
+/* psi -> kPa. The WCM reports plain psi at 1 psi/count; the head-unit contract
+ * wants u16 kPa. x 6.894759, rounded. Widest intermediate 255 * 68948 =
+ * 17 581 740, comfortably inside 32 bits. */
+constexpr std::uint32_t kKpaNum   = 68948U;
+constexpr std::uint32_t kKpaDen   = 10000U;
+constexpr std::uint32_t kKpaRound = kKpaDen / 2U;
+
+std::uint16_t psiToKpa(std::uint8_t psi) noexcept
+{
+    return static_cast<std::uint16_t>(
+        ((static_cast<std::uint32_t>(psi) * kKpaNum) + kKpaRound) / kKpaDen);
+}
+
+
 void setValid(std::uint8_t bit, bool live) noexcept
 {
     ram::CustomSignals& c = ram::app().customSignals;
@@ -152,6 +206,19 @@ std::uint16_t be16(const volatile std::uint8_t* d, std::size_t i) noexcept
 {
     return static_cast<std::uint16_t>(
         (static_cast<std::uint16_t>(d[i]) << 8) | d[i + 1U]);
+}
+/* Blank every corner and say so. Used before the first answer and after the
+ * data goes stale -- the frame still goes out, because the scheduler's
+ * keep-alive cannot be told to skip a slot, so every field has to be honest on
+ * its own. */
+void tpmsBlank() noexcept
+{
+    ram::CustomSignals& c = ram::app().customSignals;
+
+    for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
+        c.tyreKpa[i] = ram::kCustomUnknown16;
+    }
+    setValid(ram::kValidB7, false);
 }
 
 }  // namespace
@@ -187,6 +254,16 @@ void customPrimeSignals() noexcept
     c.odometerDeciKm = ram::kCustomUnknown24;
     c.headingDeg     = ram::kCustomUnknown16;
     c.compassSector  = ram::kCustomUnknown8;
+
+    for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
+        c.tyreKpa[i] = ram::kCustomUnknown16;
+    }
+    c.tpmsPollDiv   = 0U;
+    c.tpmsRotateDiv = 0U;
+    c.tpmsPosition  = ram::kTyrePosLeftFront;
+    c.tpmsPending   = 0U;
+    c.tpmsDeadline  = 0U;
+    c.tpmsFailures  = kTpmsStaleMisses;   /* nothing heard yet == stale */
 
     c.ignBits      = 0U;
     c.valid        = 0U;    /* nothing is live until the car says so */
@@ -622,6 +699,137 @@ void customCompass(const volatile std::uint8_t* d) noexcept
     c.headingDeg    = static_cast<std::uint16_t>(
         static_cast<std::uint16_t>(b1) * kDegPerCount);
     setValid(ram::kValidBD, true);
+}
+
+/* ============================================================================
+ * The TPMS poll. docs/TPMS-POLL-SPEC.md.
+ *
+ * THE ONLY FRAME THIS FIRMWARE SENDS UNPROMPTED. Everything else it transmits
+ * is an answer to something -- the 0x516 echo, the 0x7FD handshake, the SWC
+ * reply -- or a periodic frame the stock box also sends. That distinction is
+ * what makes the bus-presence gate below mandatory rather than defensive.
+ *
+ * WHY canBusStatus MUST BE CHECKED. svc::can configures the controller with
+ * abom = 0 (no automatic bus-off recovery) and nart = 0 (hardware retries a
+ * frame for ever). On the car that is harmless, because some other node always
+ * acknowledges. ON A BENCH WITH NO SECOND NODE, a transmitted frame is never
+ * ACKed, the transmit error counter climbs, and the controller goes BUS-OFF
+ * PERMANENTLY until reset. The stock firmware never met this because it only
+ * ever transmits in reply to traffic that proves somebody is listening; a poll
+ * has no such proof, so it has to ask for itself.
+ *
+ * Called from inside periodicTxScheduler()'s ACC hold gate, so it also stops
+ * 3.2 s after key-off and is silent throughout phase 1 (FR-14) for free.
+ * ==========================================================================*/
+void customTpmsPoll() noexcept
+{
+    ram::AppRam&        r = ram::app();
+    ram::CustomSignals& c = r.customSignals;
+
+    /* ---- the publish rotation ------------------------------------------
+     * One slot carries one corner at a time and steps every 5 s; five slots
+     * for five corners would slow every other signal in the table down
+     * permanently. The round-robin notices the changed payload and sends it,
+     * so no explicit send request is needed. */
+    c.tpmsRotateDiv = static_cast<std::uint16_t>(c.tpmsRotateDiv + 1U);
+    if (c.tpmsRotateDiv >= kTpmsRotatePasses) {
+        c.tpmsRotateDiv = 0U;
+        c.tpmsPosition  = static_cast<std::uint8_t>(c.tpmsPosition + 1U);
+        if (c.tpmsPosition >= ram::kTyreCount) {
+            /* Wraps at 4, not 5: the spare is deferred, and publishing a
+             * position the box never fills would show a permanently dead
+             * fifth tyre. */
+            c.tpmsPosition = ram::kTyrePosLeftFront;
+        }
+    }
+
+    /* ---- the outstanding request ---------------------------------------- */
+    if (c.tpmsPending != 0U) {
+        if (c.tpmsDeadline != 0U) {
+            c.tpmsDeadline = static_cast<std::uint8_t>(c.tpmsDeadline - 1U);
+        }
+        if (c.tpmsDeadline == 0U) {
+            /* Timed out. No immediate retry: the next 30 s tick tries again.
+             * A retry would be solving a problem never observed -- 47 of 47
+             * on a real drive -- at the cost of more bus traffic. */
+            c.tpmsPending = 0U;
+            if (c.tpmsFailures < kTpmsStaleMisses) {
+                c.tpmsFailures = static_cast<std::uint8_t>(c.tpmsFailures + 1U);
+            }
+            if (c.tpmsFailures >= kTpmsStaleMisses) {
+                tpmsBlank();
+            }
+        }
+        return;                       /* one request in flight at a time */
+    }
+
+    /* ---- time for the next poll? ---------------------------------------- */
+    c.tpmsPollDiv = static_cast<std::uint16_t>(c.tpmsPollDiv + 1U);
+    if (c.tpmsPollDiv < kTpmsPollPasses) {
+        return;
+    }
+    c.tpmsPollDiv = 0U;
+
+    /* The gate that keeps a bench alive. Not optional -- see the banner. */
+    if (r.canBusStatus != cfg::kBusRunning) {
+        return;
+    }
+
+    svc::can::txEnqueue(canid::kWcmTpmsRequest, 0U, kTpmsRequestDlc, kTpmsRequest);
+    c.tpmsPending  = 1U;
+    c.tpmsDeadline = kTpmsReplyPasses;
+}
+
+/* ============================================================================
+ * 0x500 -- the WCM's answer to the poll above.
+ *
+ *     06 61 3B p1 p2 p3 p4 [junk]
+ *
+ * p1..p4 are plain psi, 1 psi per count, no offset and no scaling. The order
+ * is LF, RF, RR, LR -- the rears are NOT in the order most sources assume.
+ *
+ * TRUST THE PCI NIBBLE, NOT THE DLC. The byte after the declared length of 6
+ * is whatever the responder had in its buffer last; it is neither data nor
+ * zero, and reading it as a fifth pressure would publish garbage.
+ *
+ * In a jeep build this identifier belongs entirely to TPMS: the stock
+ * 0x500 -> 0x516 mirror is switched off, see kVendorEcho500Enabled in
+ * can_decode.cpp. Anything arriving here that is not a well-formed answer is
+ * therefore DISCARDED, not echoed.
+ * ==========================================================================*/
+void customTpmsReply(const volatile std::uint8_t* d) noexcept
+{
+    ram::CustomSignals& c = ram::app().customSignals;
+
+    if (c.tpmsPending == 0U) {
+        return;                       /* nothing was asked for */
+    }
+
+    /* A negative response -- 7F 21 xx -- is a real answer, so it closes the
+     * request, but it carries no data. */
+    if (d[1] == kKwpNegative) {
+        c.tpmsPending = 0U;
+        if (c.tpmsFailures < kTpmsStaleMisses) {
+            c.tpmsFailures = static_cast<std::uint8_t>(c.tpmsFailures + 1U);
+        }
+        if (c.tpmsFailures >= kTpmsStaleMisses) {
+            tpmsBlank();
+        }
+        return;
+    }
+
+    if ((d[0] != kTpmsReplyPci) || (d[1] != kTpmsReplyService) ||
+        (d[2] != kTpmsReplyLid)) {
+        return;                       /* not our answer; leave the poll open */
+    }
+
+    for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
+        c.tyreKpa[i] = psiToKpa(d[kTpmsFirstPsiByte + i]);
+    }
+
+    c.tpmsPending  = 0U;
+    c.tpmsFailures = 0U;
+    setValid(ram::kValidB7, true);
 }
 
 }  // namespace logic

@@ -310,7 +310,7 @@ ternary.
 |---|---|---|
 | framing | `AA 55 LEN CMD payload CKS`, CKS = sum − 1 | `2E CMD LEN payload CKS`, CKS = ~sum |
 | wire overhead | 5 | 4 |
-| TX slots | 14: the stock 6 (`0x72 0xA6 0x73 0xF0 0x12 0x32`) + the custom 8 (`0xB0 0xB2 0xB3 0xB4 0xB5 0xB8 0xBB 0xBD`) | 5 (`0x08 0x07`, three pages of `0x41`) |
+| TX slots | 15: the stock 6 (`0x72 0xA6 0x73 0xF0 0x12 0x32`) + the custom 9 (`0xB0 0xB2 0xB3 0xB4 0xB5 0xB7 0xB8 0xBB 0xBD`) | 5 (`0x08 0x07`, three pages of `0x41`) |
 | head-unit protocol id | 3009001 | 1034025 / 27 / 28 |
 | version string | `H1N4JPF20L-211026` | `H1N4BNZ10L-…` |
 | wire behaviour | stock-equivalent for the stock 6 slots | deliberately diverges |
@@ -465,7 +465,15 @@ void customFuel(const volatile std::uint8_t* d) noexcept;        // 0x159 b4 gat
 void customThrottle(const volatile std::uint8_t* d) noexcept;    // 0x2C0 b2 (b6 mirror)
 void customOdometer(const volatile std::uint8_t* d) noexcept;    // 0x014 b0:b1:b2
 void customCompass(const volatile std::uint8_t* d) noexcept;     // 0x1B4 b0, b1
+void customTpmsPoll() noexcept;                                  // -> 0x600, every 30 s
+void customTpmsReply(const volatile std::uint8_t* d) noexcept;   // 0x500 KWP answer
 ```
+**`customTpmsPoll()` is the one place this firmware originates a frame.** Everything else it
+transmits is either an answer to something or a periodic frame the stock box also sends.
+It runs inside `periodicTxScheduler()`'s ACC hold gate and additionally checks
+`canBusStatus == kBusRunning`, because `abom = 0` / `nart = 0` mean an unACKed frame takes
+the controller bus-off permanently — which is what a poll would do on a bench with no second
+node. See `docs/TPMS-POLL-SPEC.md`.
 **Not stock decodes**, and the exact mirror of `raise_benz_decode.hpp`: these exist because
 the Hiworld protocol has nowhere to show any of it. Jeep WK frames in, `ram::CustomSignals`
 out; every call site sits behind `if constexpr (!cfg::kIsBenz)`.

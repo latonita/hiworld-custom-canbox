@@ -806,8 +806,16 @@ TEST(fca_vendor_7ff_display_mode_4_reuses_mode_3_bit)
     }
 }
 
-/* 0x500 d[0]:d[1] is retransmitted as 0x516, zero-padded to 8 bytes. */
-TEST(jeep_echo_500_retransmits_as_516_zero_padded)
+/* 0x500 d[0]:d[1] is retransmitted as 0x516, zero-padded to 8 bytes -- in a
+ * BENZ build. In a jeep build that mirror is switched OFF, because 0x500 is the
+ * WCM's KWP response id and a jeep image polls the WCM for tyre pressures
+ * (docs/TPMS-POLL-SPEC.md). Both halves are asserted here rather than split
+ * across two files, because the point of the test is that the two builds
+ * deliberately differ on exactly this frame.
+ *
+ * Why turning it off is safe: 0x500 appears in ZERO of the 221 853 frames of
+ * testlog/drive.log, so the stock mirror has never fired on this car. */
+TEST(jeep_echo_500_mirrors_to_516_only_in_a_benz_build)
 {
     fake::reset();
 
@@ -817,14 +825,22 @@ TEST(jeep_echo_500_retransmits_as_516_zero_padded)
     drainTx();
 
     const fake::CanFrame* f = fake::lastCanFrame();
-    CHECK(f != nullptr);
-    if (f != nullptr) {
-        CHECK_EQ(f->id, kTx516);
-        CHECK_EQ(f->dlc, 8U);
-        CHECK_EQ(f->data[0], 0xAAU);
-        CHECK_EQ(f->data[1], 0xBBU);
-        CHECK_EQ(f->data[2], 0x00U);   /* only TWO bytes are echoed here */
-        CHECK_EQ(f->data[7], 0x00U);
+
+    if constexpr (cfg::kIsBenz) {
+        CHECK(f != nullptr);
+        if (f != nullptr) {
+            CHECK_EQ(f->id, kTx516);
+            CHECK_EQ(f->dlc, 8U);
+            CHECK_EQ(f->data[0], 0xAAU);
+            CHECK_EQ(f->data[1], 0xBBU);
+            CHECK_EQ(f->data[2], 0x00U);   /* only TWO bytes are echoed here */
+            CHECK_EQ(f->data[7], 0x00U);
+        }
+    } else {
+        /* Nothing at all goes out. A jeep build must not answer 0x500, or
+         * every tyre poll would inject a frame onto the radio's KWP response
+         * identifier. */
+        CHECK_EQ(fake::canFrameCount(), 0U);
     }
 }
 

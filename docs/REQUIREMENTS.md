@@ -274,7 +274,7 @@ a field for none of them. A jeep build therefore adds eight commands of its own 
 | ID | Requirement | Evidence |
 |---|---|---|
 | **FR-108** | A jeep build shall transmit six additional slots — `0xB0`/2 heartbeat, `0xB2`/1 ignition, `0xB3`/6 drivetrain, `0xB4`/5 engine, `0xB5`/2 climate, `0xB8`/4 fuel — through the ordinary round-robin, with the same framing, cadence and change detection as the stock six. A benz build shall transmit none of them. | `app/services/hu_hiworld.cpp` `kTxTable`; `app/logic/custom_tx.cpp`; seven worked-vector tests in `tests/host/test_custom_tx.cpp` |
-| **FR-109** | `0xB1`, `0xB6`, `0xB7` and `0xB9` shall stay **reserved and unsent**: `0xB1` duplicates stock `0xF0`, `0xB6` duplicates the door bitfield in stock `0x12`, `0xB7` TPMS is not broadcast on this car's CAN-B, and `0xB9` has no verified SWC source (`0x3A0` is static `00 00` across all 2 944 frames of `testlog/drive.log`). No row in the table shall carry `0xE0`, `0xFE`, `0xFF` or `0xD2`. | `docs/CUSTOM-TX-SPEC.md` §2; `static_assert(noReservedCommands())` in `app/services/hu_hiworld.cpp` |
+| **FR-109** | `0xB1`, `0xB6` and `0xB9` shall stay **reserved and unsent** (`0xB7` was unparked 2026-10-21, FR-128): `0xB1` duplicates stock `0xF0`, `0xB6` duplicates the door bitfield in stock `0x12`, and `0xB9` has no verified SWC source (`0x3A0` is static `00 00` across all 2 944 frames of `testlog/drive.log`). No row in the table shall carry `0xE0`, `0xFE`, `0xFF` or `0xD2`. | `docs/CUSTOM-TX-SPEC.md` §2; `static_assert(noReservedCommands())` in `app/services/hu_hiworld.cpp` |
 | **FR-110** | Every field shall carry a reserved "not available" encoding and shall hold it until the car has reported that signal: **`0xFF` for every +40-biased temperature** (decoded by the consumer as `XyautoProtocol.TEMP_NOT_AVAILABLE`, at the cost of making exactly 215 °C unrepresentable — the usable top is `0xFE` = 214 °C), `0xFFFF` for speed, rpm and range, `0x8000` for the one signed field (outside air, where `0xFFFF` would decode as a plausible −0.1 °C), and `0x00` for engine load, which the contract defines as unknown. The payloads shall be primed to those encodings **before the first transmit**. **No frame shall ever be suppressed to hide one bad field** — every command here carries several and the others are still good. | sentinel block in `app/include/ram_map.hpp`; `logic::customPrimeFrames()`; tests `custom_prime_puts_every_field_in_its_no_value_state`, `custom_coolant_fe_is_a_reading_not_a_sentinel` |
 | **FR-111** | `0xB0` payload byte 0 shall be the protocol revision `0x01`; byte 1 shall be a validity mask, bit 0 `0xB2`, bit 1 `0xB3`, bit 2 `0xB4`, bit 3 `0xB5`, bit 4 `0xB7` (never set in this build), bit 5 `0xB8`, bits 6–7 reserved and zero. A bit shall be **1 only while that command's source is live**. Each bit shall have exactly one owning source. | `app/logic/custom_decode.cpp`; test `custom_heartbeat_matches_the_worked_example` |
 | **FR-112** | `0xB0` shall be sent **once a second** regardless of whether its payload changed, by marking its slot `kSlotRequest` — not by toggling any byte. The scheduler shall honour an outstanding request wherever it sits in the table. | `logic::customPublish()`; `svc::hu::requestSend()`; `pendingRequest()` in `app/services/head_unit.cpp`; tests `custom_heartbeat_requests_its_slot_once_a_second`, `custom_heartbeat_request_is_honoured_on_an_idle_link`, `custom_heartbeat_request_is_consumed_once` |
@@ -296,9 +296,18 @@ a field for none of them. A jeep build therefore adds eight commands of its own 
 | **FR-126** | The compass sample shall be gated on **both bytes together**, `b0 ≤ 7 && b1 ≤ 179`, and rejected **whole** on failure — holding both previous values and clearing bit 7. **Nothing shall be masked**: a `b0` of 9 means the byte no longer means what the decoder thinks, and truncating it would publish a confident "NE". The sector shall **not** be cross-checked against `round(b1×2/45)`: unlike the `0x2C0` b2/b6 mirror a mismatch here is *expected* at boundaries (`b0`=7 with `b1`=146 is the documented case) and discarding on it would throw away one sample in two hundred for nothing. | `logic::customCompass()`; tests `custom_compass_out_of_range_heading_holds_both_values`, `custom_compass_out_of_range_sector_rejects_the_whole_sample`, `custom_compass_boundary_disagreement_is_accepted_not_discarded`, `custom_compass_heading_boundary_is_one_seventy_nine` |
 | **FR-127** | The `0xB0` validity mask is **full**: bit 6 `0xBB`, bit 7 `0xBD`, allocated in allocation order rather than command order. The documented growth path is a second mask byte at `0xB0` payload byte 2 — a **length change to a shipped command**, so firmware and consumer move together in one release, and bits 0–7 shall never be renumbered. | sentinel/bit block in `app/include/ram_map.hpp`; test `custom_heartbeat_with_all_eight_commands_live` |
 
-> **The TX budget is a requirement, not an observation.** Fourteen slots at one frame per
-> 48 ms is 672 ms worst case between two sends of the same signal and a 14 × 720 ms = 10.1 s
-> idle keep-alive — inside the consumer's 15 s staleness check with six slots of headroom.
+| **FR-128** | A jeep build shall poll the WCM for tyre pressures: a KWP2000 `readDataByLocalIdentifier` on CAN `0x600`, **DLC 3, payload `02 21 3B`**, every **30 s**. The PDU shall be `21 3B` and **not** `21 21 3B` — a re-emitted service byte makes every module on this bus answer nothing. No diagnostic session, no security access, no tester-present, no ISO-TP flow control; it is a single frame each way. A benz build shall poll nothing. | `logic::customTpmsPoll()`; `docs/TPMS-POLL-SPEC.md`; test `tpms_poll_sends_the_kwp_request_on_0x600` |
+| **FR-129** | The poll shall transmit **only** while `canBusStatus == kBusRunning`, in addition to the gates it inherits by living inside `periodicTxScheduler()` (the 3.2 s post-ACC hold, the profile gate, FR-14's phase-1 silence). This is not defensive: `abom = 0` and `nart = 0` mean an unacknowledged frame is retried for ever and takes the controller **bus-off permanently** — which is precisely what an unprompted poll causes on a bench with no second node. | `logic::customTpmsPoll()`; test `tpms_poll_is_silent_unless_the_bus_is_running` |
+| **FR-130** | At most **one request shall be in flight**. A reply that does not arrive within ~500 ms shall close the request with no immediate retry; the next 30 s tick tries again. | `logic::customTpmsPoll()`; test `tpms_poll_does_not_stack_requests` |
+| **FR-131** | The reply on `0x500` shall be accepted only as `06 61 3B p1 p2 p3 p4`, with `p1..p4` plain psi at 1 psi/count, converted to u16 kPa as `round(psi × 6.894759)`. The byte **past the declared PCI length is stale buffer content** and shall never be read. Corner order shall be **LF, RF, RR, LR**, named once in `ram::kTyrePos*`. A `7F` negative response shall close the request and count as a failure. Anything else shall be discarded with the request left open. | `logic::customTpmsReply()`; tests `tpms_reply_decodes_the_captured_frame`, `tpms_reply_ignores_the_byte_past_the_declared_length`, `tpms_reply_rejects_a_frame_that_is_not_an_answer`, `tpms_negative_response_is_consumed_and_counted`, `tpms_pressure_converts_psi_to_kilopascal_rounded` |
+| **FR-132** | `0xB7` shall carry **one corner per frame** — `[0]` position, `[1:2]` u16 kPa, `[3]` temperature, `[4]` flags — rotating through the four corners every 5 s on a **single TX slot**. Five slots for five corners would permanently slow every other signal in the table. The rotation shall wrap at 4 and never publish the spare, which is deferred. | `logic::customTpmsPoll()` rotation, `customPublish()` packing; tests `tpms_frames_match_the_worked_examples`, `tpms_position_rotates_through_four_corners_only` |
+| **FR-133** | `[3]` temperature shall **always** be `0xFF`, the reserved not-available code: `21 3B` carries no temperature, and the per-sensor identifiers that do decode it by an unconfirmed `raw − 40` hypothesis. `[4]` shall report **only** bit 2 "no signal", and only when stale: battery, leak and sensor state live in fault identifiers this build does not read, so claiming them would be inventing data. | `logic::customPublish()`; test `tpms_frames_match_the_worked_examples` |
+| **FR-134** | Before the first answer, and after **four consecutive failed polls** (two minutes), every corner shall read `0xFFFF`, `[4]` bit 2 shall set and `0xB0` **bit 4 shall clear**. The frame is still transmitted — the scheduler's keep-alive cannot be told to skip a slot — so every field must be honest on its own. | `logic::customTpmsPoll()`, `tpmsBlank()`; tests `tpms_before_the_first_answer_publishes_no_value`, `tpms_goes_stale_after_four_missed_polls`, `tpms_survives_three_missed_polls` |
+| **FR-135** | In a **jeep** build the stock `0x500` → `0x516` mirror shall be **switched off**, because `0x500` is the WCM's KWP response identifier and `0x516` is the radio's. In a **benz** build, which never polls, it shall be preserved exactly as stock. `jeepEcho500()` shall be kept, not deleted, behind a named constant. | `kVendorEcho500Enabled` in `app/logic/can_decode.cpp`; tests `jeep_echo_500_mirrors_to_516_only_in_a_benz_build`, `tpms_reply_without_an_outstanding_poll_is_ignored_and_silent` |
+
+> **The TX budget is a requirement, not an observation.** Fifteen slots at one frame per
+> 48 ms is 720 ms worst case between two sends of the same signal and a 15 × 720 ms = 10.8 s
+> idle keep-alive — inside the consumer's 15 s staleness check with five slots of headroom.
 > 20 slots is 14.4 s and **21 crosses**, so no further slot may be added without redoing that
 > arithmetic. Pinned by `custom_tx_budget_stays_inside_the_staleness_window`, and the
 > index-corruption failure mode by `custom_full_sweep_leaves_the_slot_index_intact`.
@@ -400,7 +409,7 @@ These are taken as given. If any turns out to be false, requirements above fail 
 | FR-76 … FR-88 (head-unit link) | HOST + BUILD | 30 tests in `test_head_unit.cpp`; the descriptor table's lengths, shadows and buffer windows are `static_assert`ed (`app/services/hu_hiworld.cpp:97-111`). Actual 38400 8N1 framing on a wire is BENCH. |
 | FR-89 … FR-95 (parameters) | HOST | 22 tests in `test_param_store.cpp`, including the real dumped page (`param_store_load_reads_the_real_dumped_page`). Real flash timing/erase success is BENCH. |
 | FR-96 … FR-99 (status outputs) | HOST | 28 tests in `test_board_io.cpp`, including pin-crossing regressions. Electrical behaviour is BENCH. |
-| FR-108 … FR-127 (custom telemetry) | HOST | 55 tests in `test_custom_tx.cpp`, jeep only. The seven worked vectors come from `docs/CUSTOM-TX-SPEC.md` §7 and are computed from the framing rule independently of this firmware; the test file re-derives the checksum as the full byte sum rather than reusing the firmware's `sum − 1` form, so the two agreeing is the evidence. The CAN side is driven through the real `decodeProfileJeep()`. Whether the Android consumer accepts the block at all is **BENCH**. |
+| FR-108 … FR-135 (custom telemetry) | HOST | 69 tests in `test_custom_tx.cpp`, jeep only. The seven worked vectors come from `docs/CUSTOM-TX-SPEC.md` §7 and are computed from the framing rule independently of this firmware; the test file re-derives the checksum as the full byte sum rather than reusing the firmware's `sum − 1` form, so the two agreeing is the evidence. The CAN side is driven through the real `decodeProfileJeep()`. Whether the Android consumer accepts the block at all is **BENCH**. |
 | FR-100 … FR-107 (faults, sleep) | HOST + STATIC | 9 tests in `test_power.cpp` cover the teardown order, the no-op-on-refusal path and the wake reset; `power_fault_codes_do_not_collide_with_the_crt0_trap_codes` covers the code ranges. The trap table itself (FR-101) is STATIC. Actual deep sleep and the PB8 wake are **BENCH**. |
 | NFR-1 … NFR-5 | BUILD | `app/linker/app.ld` ASSERTs plus `tools/verify_preamble.py` against the bootloader dump, run on every build. |
 | NFR-6, NFR-7 | BUILD | Linker region overflow and the `_sdata`/`_ebss` ASSERTs; current figures from `arm-none-eabi-size`. |
@@ -531,6 +540,34 @@ one, so the stock scheduler path is unchanged — and two tests fail if it is re
 2026-10-21 in favour of a reserved `0xFF` not-available code, for a better reason than the
 implementation difficulty: `0xB4` also carries intake, fuel % and voltage, and one dead
 sensor must not cost three good signals. FR-110.
+
+**D — the box now polls the WCM, and one stock path is switched off.** FR-128…FR-135.
+
+This is the first time the rebuild **originates** a CAN frame. Every other frame it sends is
+an answer — the `0x516` echo, the `0x7FD` handshake, the `0x416` SWC reply — or a periodic
+frame the stock box also sends. It is also the first time a stock behaviour is turned **off**
+rather than added beside.
+
+*Why it was accepted.* TPMS is not broadcast on this car at all, so there is no passive route
+to it; the owner's constraint was that non-stock traffic stay **minimal**, and one 3-byte
+frame every 30 s is about as minimal as a poll gets. The exchange itself is not speculative:
+it was proven on this vehicle by a sibling project with **47 requests and 47 answers** over a
+7-minute drive, cross-checked against a stored `C0077 Low Tire Pressure` DTC.
+
+*Why switching off the `0x500` mirror costs nothing.* `0x500` is the WCM's KWP response
+identifier, and `jeepEcho500()` would mirror our own tyre reply onto `0x516` — the *radio's*
+response identifier. `0x500` appears in **zero** of the 221 853 frames of `testlog/drive.log`,
+so the mirror has never fired on this car. It is disabled in a jeep build only, behind a named
+constant, and kept intact in a benz build, which never polls.
+
+*The risk that is real and mitigated.* `abom = 0` with `nart = 0` means an unacknowledged
+frame is retried for ever and takes the node bus-off permanently. Stock never met this because
+it only transmits in reply to traffic that proves somebody is listening. FR-129 is that
+mitigation and it is not optional.
+
+*What is still unproven:* the corner order. Three independent sources agree on LF/RF/RR/LR and
+a fourth swaps the rears; **no deflation test has been done**. It is named once in
+`ram::kTyrePos*` so one test fixes it in one line, and the head unit can re-map meanwhile.
 
 ### 6.2 Reproduced stock defects (not to be fixed)
 

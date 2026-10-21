@@ -168,6 +168,29 @@ void jeepEngine(const volatile std::uint8_t* d) noexcept
     ram::app().vehicle.setRpm(d[0], d[1]);
 }
 
+/* ---------------------------------------------------------------------------
+ * IS THE STOCK 0x500 -> 0x516 MIRROR ENABLED?
+ *
+ * Switched OFF in a jeep build, on the owner's decision (2026-10-21), because
+ * 0x500 is the WCM's KWP response identifier and a jeep image now POLLS the
+ * WCM for tyre pressures (docs/TPMS-POLL-SPEC.md). Left on in a benz build,
+ * which never polls and therefore has no collision.
+ *
+ * WHAT THE COLLISION WOULD BE. jeepEcho500() copies d[0]:d[1], zero-pads to
+ * eight and transmits the result on 0x516 -- which is the RADIO's KWP response
+ * id. Wired naively, every tyre poll would inject 06 61 00 00 00 00 00 00 onto
+ * the car's bus on an identifier that belongs to another module's diagnostics.
+ *
+ * WHAT IT COSTS: nothing observable. 0x500 appears in ZERO of the 221 853
+ * frames of testlog/drive.log, so this path has never fired on this car.
+ *
+ * The function is kept, with its stock address, rather than deleted: this is
+ * the first time the rebuild turns a stock path OFF rather than adding beside
+ * one, and the next reader needs to see what was turned off. Set this true to
+ * restore stock behaviour exactly.
+ * ------------------------------------------------------------------------- */
+constexpr bool kVendorEcho500Enabled = cfg::kIsBenz;
+
 /* 0x500 d[0]:d[1] -- vendor echo, retransmitted as 0x516 ZERO-PADDED TO 8.
  * (Profile 1 echoes four bytes from 0x513; the padding is the same.) */
 void jeepEcho500(const volatile std::uint8_t* d) noexcept
@@ -473,7 +496,17 @@ void decodeProfileJeep() noexcept
             break;
         case canid::kJeepIllum:      decodeIllumLevel(d[1]);  break; /* illum + %  */
         case canid::kJeepSwcButtons: decodeSwcButtons(d);     break; /* SWC keys   */
-        case canid::kJeepVendorEcho: jeepEcho500(d);          break; /* -> 0x516   */
+        case canid::kJeepVendorEcho:
+            /* Stock: mirror to 0x516. Jeep: this is the WCM's KWP reply to our
+             * own tyre-pressure poll, and the mirror is off -- see
+             * kVendorEcho500Enabled above and docs/TPMS-POLL-SPEC.md. */
+            if constexpr (!cfg::kIsBenz) {
+                customTpmsReply(d);
+            }
+            if constexpr (kVendorEcho500Enabled) {
+                jeepEcho500(d);                                      /* -> 0x516   */
+            }
+            break;
         case canid::kVendorHandshake: decodeVendor7fc(d);     break; /* -> 0x7FD   */
         case canid::kVendorStatus:
             (void)decodeVendor7ffCommon(d);                   break; /* injection  */

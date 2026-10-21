@@ -96,6 +96,11 @@ inline constexpr std::uint32_t kJeepFuel        = 0x159U;  /* level + gate     *
 inline constexpr std::uint32_t kJeepParkBrake   = 0x0D0U;
 inline constexpr std::uint32_t kJeepThrottle    = 0x2C0U;  /* pedal + mirror   */
 inline constexpr std::uint32_t kJeepCompass     = 0x1B4U;  /* sector + heading */
+/* THE ONE FRAME THIS BOX SENDS UNPROMPTED. A KWP readDataByLocalIdentifier to
+ * the WCM, whose reply lands on 0x500 -- i.e. on kJeepVendorEcho below, whose
+ * name is now misleading in a jeep build and is kept because the Ghidra diff
+ * depends on the stock names. docs/TPMS-POLL-SPEC.md. */
+inline constexpr std::uint32_t kWcmTpmsRequest  = 0x600U;  /* -> reply on 0x500 */
 inline constexpr std::uint32_t kJeepDoors       = 0x013U;
 inline constexpr std::uint32_t kJeepSteering    = 0x015U;
 inline constexpr std::uint32_t kJeepIllum       = 0x210U;  /* + dimmer percent */

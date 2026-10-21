@@ -66,7 +66,7 @@ unless a field says otherwise.
 | `0xB4` | ENGINE | **yes** | 1 |
 | `0xB5` | CLIMATE | **yes** | 1 |
 | `0xB6` | BODY | **NO** — redundant | 0 |
-| `0xB7` | TYRE | **NO** — parked | 0 |
+| `0xB7` | TYRE | **yes** — polled, see `TPMS-POLL-SPEC.md` | 1 |
 | `0xB8` | FUEL | **yes** | 1 |
 | `0xB9` | KEY | **NO** — no source | 0 |
 | `0xBB` | ODOMETER | **yes**, §9 | 1 |
@@ -85,8 +85,14 @@ in stock Hiworld `0xF0`: a 17-byte periodic TX slot whose live buffer is
 (`H1N4JPF20L-211026` on this build). It is on the wire and in the `rxpduses`
 mirror already. Reserved.
 
-**Do not implement `0xB7`.** TPMS is not broadcast on this car's CAN-B; it needs
-a request/response exchange that has not been reverse-engineered. Reserved.
+~~**Do not implement `0xB7`.** TPMS is not broadcast on this car's CAN-B; it
+needs a request/response exchange that has not been reverse-engineered.
+Reserved.~~
+**Superseded 2026-10-21.** The exchange *has* now been reverse-engineered — on
+the car, by a sibling project, with a 47/47 live success rate — so the only
+reason for the reservation is gone. `0xB7` is **built**: the box polls the WCM
+with a KWP `21 3B` every 30 s. The contract, the evidence and the one stock
+behaviour it switches off are in **`docs/TPMS-POLL-SPEC.md`**.
 
 **Do not implement `0xB9`.** Steering-wheel buttons have no verified source on
 this car: `0x3A0`, which the stock decoder reads, is static `00 00` across all
@@ -358,7 +364,7 @@ Also test, against the host unit tests in `tests/host/`:
 
 ## 8. Out of scope — do not do these
 
-- `0xB1`, `0xB6`, `0xB7`, `0xB9` (§2).
+- `0xB1`, `0xB6`, `0xB9` (§2). `0xB7` is now built — `TPMS-POLL-SPEC.md`.
 - Anything in `0xBA`–`0xBF`. Lighting, belts and the 4WD/wiper group all have
   confirmed sources, but no consumer yet.
   **Amended 2026-10-21:** odometer and compass now have one, are specified as

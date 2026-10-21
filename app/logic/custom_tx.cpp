@@ -156,6 +156,28 @@ void customPublish() noexcept
     /* ---- 0xB5 CLIMATE: outside air, signed decidegrees ------------------- */
     put16s(&f.b5[0], c.outsideDeciC);
 
+    /* ---- 0xB7 TYRE: ONE corner per frame, rotating -----------------------
+     * The position byte is advanced by customTpmsPoll() every 5 s, so this
+     * packs whichever corner is current. Temperature is ALWAYS the reserved
+     * not-available code: 0x213B carries no temperature at all, and the
+     * per-sensor identifiers that do have one decode it by a hypothesis
+     * (raw - 40) that nobody has confirmed.
+     *
+     * The flags byte reports only "no signal", and only when the data has gone
+     * stale. Battery, leak and sensor state live in per-tyre fault identifiers
+     * this build deliberately does not read, so claiming them would be
+     * inventing data. */
+    {
+        const std::uint8_t  pos = c.tpmsPosition;
+        const std::uint16_t kpa = c.tyreKpa[pos];
+        const bool          live = (kpa != ram::kCustomUnknown16);
+
+        f.b7[0] = pos;
+        put16(&f.b7[1], kpa);
+        f.b7[3] = ram::kCustomUnknown8;
+        f.b7[4] = live ? 0U : ram::kTyreFlagNoSignal;
+    }
+
     /* ---- 0xB8 FUEL: decilitres, range ------------------------------------ */
     put16(&f.b8[0], c.fuelDecilitres);
     put16(&f.b8[2], kRangeNoSource);

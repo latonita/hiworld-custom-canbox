@@ -63,6 +63,7 @@ volatile std::uint8_t* bufB2() noexcept { return ram::app().customFrames.b2; }
 volatile std::uint8_t* bufB3() noexcept { return ram::app().customFrames.b3; }
 volatile std::uint8_t* bufB4() noexcept { return ram::app().customFrames.b4; }
 volatile std::uint8_t* bufB5() noexcept { return ram::app().customFrames.b5; }
+volatile std::uint8_t* bufB7() noexcept { return ram::app().customFrames.b7; }
 volatile std::uint8_t* bufB8() noexcept { return ram::app().customFrames.b8; }
 volatile std::uint8_t* bufBB() noexcept { return ram::app().customFrames.bB; }
 volatile std::uint8_t* bufBD() noexcept { return ram::app().customFrames.bD; }
@@ -79,6 +80,7 @@ volatile std::uint8_t* shadowB2() noexcept { return ram::app().uartShadows.msgB2
 volatile std::uint8_t* shadowB3() noexcept { return ram::app().uartShadows.msgB3; }
 volatile std::uint8_t* shadowB4() noexcept { return ram::app().uartShadows.msgB4; }
 volatile std::uint8_t* shadowB5() noexcept { return ram::app().uartShadows.msgB5; }
+volatile std::uint8_t* shadowB7() noexcept { return ram::app().uartShadows.msgB7; }
 volatile std::uint8_t* shadowB8() noexcept { return ram::app().uartShadows.msgB8; }
 volatile std::uint8_t* shadowBB() noexcept { return ram::app().uartShadows.msgBB; }
 volatile std::uint8_t* shadowBD() noexcept { return ram::app().uartShadows.msgBD; }
@@ -117,6 +119,7 @@ extern constexpr TxDesc kTxTable[kSlots] = {
     { 0xB3U,  6U, &bufB3, &shadowB3 },  /* speed, rpm, load, throttle        */
     { 0xB4U,  5U, &bufB4, &shadowB4 },  /* coolant, intake, fuel %, volts    */
     { 0xB5U,  2U, &bufB5, &shadowB5 },  /* outside air                       */
+    { 0xB7U,  5U, &bufB7, &shadowB7 },  /* ONE tyre, rotating through corners */
     { 0xB8U,  4U, &bufB8, &shadowB8 },  /* fuel litres, range                */
     { 0xBBU,  3U, &bufBB, &shadowBB },  /* odometer, 0.1 km                  */
     { 0xBDU,  3U, &bufBD, &shadowBD },  /* compass sector + heading          */
@@ -149,9 +152,10 @@ static_assert(kTxTable[7].len == sizeof(ram::UartShadows::msgB2), "0xB2 shadow")
 static_assert(kTxTable[8].len == sizeof(ram::UartShadows::msgB3), "0xB3 shadow");
 static_assert(kTxTable[9].len == sizeof(ram::UartShadows::msgB4), "0xB4 shadow");
 static_assert(kTxTable[10].len == sizeof(ram::UartShadows::msgB5), "0xB5 shadow");
-static_assert(kTxTable[11].len == sizeof(ram::UartShadows::msgB8), "0xB8 shadow");
-static_assert(kTxTable[12].len == sizeof(ram::UartShadows::msgBB), "0xBB shadow");
-static_assert(kTxTable[13].len == sizeof(ram::UartShadows::msgBD), "0xBD shadow");
+static_assert(kTxTable[11].len == sizeof(ram::UartShadows::msgB7), "0xB7 shadow");
+static_assert(kTxTable[12].len == sizeof(ram::UartShadows::msgB8), "0xB8 shadow");
+static_assert(kTxTable[13].len == sizeof(ram::UartShadows::msgBB), "0xBB shadow");
+static_assert(kTxTable[14].len == sizeof(ram::UartShadows::msgBD), "0xBD shadow");
 
 /* Row -> live buffer. The four VehicleState rows must match their window
  * lengths; the other two are standalone objects. */
@@ -169,9 +173,10 @@ static_assert(kTxTable[7].len == sizeof(ram::CustomFrames::b2), "0xB2 buffer");
 static_assert(kTxTable[8].len == sizeof(ram::CustomFrames::b3), "0xB3 buffer");
 static_assert(kTxTable[9].len == sizeof(ram::CustomFrames::b4), "0xB4 buffer");
 static_assert(kTxTable[10].len == sizeof(ram::CustomFrames::b5), "0xB5 buffer");
-static_assert(kTxTable[11].len == sizeof(ram::CustomFrames::b8), "0xB8 buffer");
-static_assert(kTxTable[12].len == sizeof(ram::CustomFrames::bB), "0xBB buffer");
-static_assert(kTxTable[13].len == sizeof(ram::CustomFrames::bD), "0xBD buffer");
+static_assert(kTxTable[11].len == sizeof(ram::CustomFrames::b7), "0xB7 buffer");
+static_assert(kTxTable[12].len == sizeof(ram::CustomFrames::b8), "0xB8 buffer");
+static_assert(kTxTable[13].len == sizeof(ram::CustomFrames::bB), "0xBB buffer");
+static_assert(kTxTable[14].len == sizeof(ram::CustomFrames::bD), "0xBD buffer");
 
 /* The reserved commands must never appear in the table. 0xE0 is the head
  * unit's own reboot trigger, 0xFE/0xFF are ACK/NAK and 0xD2 is cluster text;

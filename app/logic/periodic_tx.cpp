@@ -20,6 +20,7 @@
 #include "ram_map.hpp"
 
 #include "can_bus.hpp"
+#include "custom_decode.hpp"
 #include "param_store.hpp"
 
 #include "periodic_tx.hpp"
@@ -599,6 +600,16 @@ void periodicTxScheduler() noexcept
          * phase counter is NOT advanced here, so the table resumes where it
          * stopped rather than from phase 0. */
         return;
+    }
+
+    /* --- 2b. the TPMS poll -------------------------------------------------
+     * Deliberately placed AFTER the hold-timer return above, so it inherits
+     * the 3.2 s post-ACC gate, the profile gate below and FR-14's phase-1
+     * silence without a guard of its own. It is the only outbound frame this
+     * box originates rather than answers -- docs/TPMS-POLL-SPEC.md. Compiled
+     * out entirely in a benz build, which never polls. */
+    if constexpr (!cfg::kIsBenz) {
+        customTpmsPoll();
     }
 
     /* --- 3. phase table --------------------------------------------------- */

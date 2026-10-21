@@ -29,7 +29,7 @@
  *   0xB4 ENGINE      5 B   coolant, intake air, fuel %, volts
  *   0xB5 CLIMATE     2 B   outside air, signed decidegrees
  *   0xB6 BODY        --    NOT built: stock 0x12 already carries the doors
- *   0xB7 TYRE        --    NOT built: TPMS is not broadcast on this car
+ *   0xB7 TYRE        5 B   ONE tyre: position, kPa, temp, flags (polled)
  *   0xB8 FUEL        4 B   litres, range
  *   0xB9 KEY         --    NOT built: no verified source for SWC on this car
  *   0xBB ODOMETER    3 B   24-bit distance at 0.1 km/count
@@ -79,6 +79,7 @@ inline constexpr std::uint8_t kCmdIgnition   = 0xB2U;
 inline constexpr std::uint8_t kCmdDrivetrain = 0xB3U;
 inline constexpr std::uint8_t kCmdEngine     = 0xB4U;
 inline constexpr std::uint8_t kCmdClimate    = 0xB5U;
+inline constexpr std::uint8_t kCmdTyre       = 0xB7U;
 inline constexpr std::uint8_t kCmdFuel       = 0xB8U;
 inline constexpr std::uint8_t kCmdOdometer   = 0xBBU;
 inline constexpr std::uint8_t kCmdCompass    = 0xBDU;

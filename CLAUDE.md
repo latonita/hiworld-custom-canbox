@@ -67,6 +67,10 @@ The jeep-only **custom `0xB0`–`0xBD` telemetry block** is
 `app/logic/custom_decode.cpp` + `custom_tx.cpp`, same shape: WK CAN in,
 `ram::CustomSignals` in physical units, packed payloads out. Its contract is
 `docs/CUSTOM-TX-SPEC.md`, and the six stock TX slots are untouched by it.
+`0xB7` TYRE is the exception to "WK CAN in": it is **polled** from the WCM over
+KWP2000 every 30 s (`docs/TPMS-POLL-SPEC.md`), the only frame this box sends
+unprompted — and the only place a stock path (the `0x500` -> `0x516` mirror) is
+switched off rather than added beside.
 
 Keep the `/* 0x0800xxxx */` stock-address annotations on reconstructed functions, and keep
 the explanatory comments — in this repo they are the reverse-engineering record, not noise.

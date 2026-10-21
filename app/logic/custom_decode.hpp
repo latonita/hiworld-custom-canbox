@@ -83,6 +83,22 @@ void customOdometer(const volatile std::uint8_t* d) noexcept;
 /* 0x1B4 b0 compass sector, b1 magnetic heading at 2 deg/count. */
 void customCompass(const volatile std::uint8_t* d) noexcept;
 
+/* ---------------------------------------------------------------------------
+ * TPMS -- the one exchange this box INITIATES. docs/TPMS-POLL-SPEC.md.
+ *
+ * Everything else in this header is a passive reader of a frame the car was
+ * going to send anyway. These two are a request/response pair: customTpmsPoll()
+ * transmits a KWP readDataByLocalIdentifier to the WCM every 30 s and
+ * customTpmsReply() consumes the answer.
+ * ------------------------------------------------------------------------- */
+
+/* Run the poll state machine. Called from the 8 ms periodic-TX task, INSIDE
+ * the ACC hold gate, so polling stops 3.2 s after key-off for free. */
+void customTpmsPoll() noexcept;
+
+/* 0x500 -- the WCM's answer. Also runs the staleness bookkeeping. */
+void customTpmsReply(const volatile std::uint8_t* d) noexcept;
+
 /* 0x015 b1 battery volts (0.1 V/count), b2 intake air temperature. */
 void customVoltsIntake(const volatile std::uint8_t* d) noexcept;
 

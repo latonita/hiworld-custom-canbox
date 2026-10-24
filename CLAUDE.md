@@ -5,7 +5,7 @@ to re-flash through the stock IAP bootloader.
 
 **Read `AGENTS.md` for the full brief** — goal, hard constraints, workflow, and acceptance
 criteria. Then `docs/ARCHITECTURE.md` (the layer contract and every module's public API),
-`README.md` (layout), and `app/REBUILD.md` (build + flash detail).
+`docs/DEVELOPER.md` (layout, source status, device facts; `README.md` is the user-facing page), and `app/REBUILD.md` (build + flash detail).
 
 ## Build and test
 
@@ -63,7 +63,8 @@ typed, linker-allocated struct · `docs/misra-cpp.md` the C++ subset and its dev
 The Benz emulation is `app/services/hu_raise_benz.cpp` (wire dialect) and
 `app/logic/raise_benz_decode.cpp` + `raise_benz_tx.cpp` (telemetry in, Benz frames out);
 `app/services/head_unit.cpp` holds only what both dialects share.
-The jeep-only **custom `0xB0`–`0xBD` telemetry block** is
+The jeep-only **custom `0xB0`–`0xBD` telemetry block** (16 slots: `0xB0 B2 B3 B4 B5 B7 B8 BB BD`
+plus `0xBC` FLOW, a 1 s average of CAN `0x1A7` in 0.1 L/h; `0xBA`/`0xBE`/`0xBF` stay reserved) is
 `app/logic/custom_decode.cpp` + `custom_tx.cpp`, same shape: WK CAN in,
 `ram::CustomSignals` in physical units, packed payloads out. Its contract is
 `docs/CUSTOM-TX-SPEC.md`, and the six stock TX slots are untouched by it.

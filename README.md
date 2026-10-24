@@ -1,159 +1,125 @@
-# Hiworld canbox — Nations N32L406 rebuild project - WORK IN PROGRESS
+# JPF20L — replacement firmware for the Hiworld JPF2 canbox (Jeep WK)
 
-Reverse-engineered source, documentation, and tooling for the Hiworld car-radio CAN
-adapter ("canbox") built on a **Nations N32L406CBL7** (ARM Cortex-M4F, 128 KB flash
-@ `0x08000000`, 24 KB SRAM @ `0x20000000`, LQFP48). The goal of this folder is to
-**prepare a rebuild of the APP** while keeping the original IAP bootloader intact.
+Replacement firmware for the **Hiworld JPF2 canbox** (Nations N32L406) in a **Jeep Grand Cherokee
+WK, 2005–2010**, on an Android head unit. It installs through the stock canbox updater and sends the
+head unit far more car data than the stock firmware does.
 
-## Why it exists
-Two problems I've got with original HiWorld H1N4JPF20A canbox on my Jeep Grand Cherokee WH 3.0 CRD 2005:
-1) it was using wrong can messages
-2) it only gave bare minimum to let radio work
+| | |
+|---|---|
+| Version tag | `H1N4JPF20L-<ddmmyy>` (current build: `H1N4JPF20L-241026`) |
+| `L` | latonita (the author); the stock vendor image is `A` |
+| Stock firmware | `H1N4JPF20A-220524` |
+| Protocol | Hiworld JPF2, protocol id 3009001 (unchanged) |
+| Alternative | A Raise Benz emulation build (`H1N4BNZ10L`) also exists. It is not actively used. |
 
-So I understood how does this box work and its bootloader.
-I rewrote JPF firmware and also made version which mimics Raise Benz17 and provides more information from CAN bus like RPM, Temps, etc.
+## What the box exports to the head unit
 
-Build process creates standard IAP files - those can be loaded with standard HiWorld canbox update procedure: put on a device, then upload from debug menu.
+Link: UART, 38400 baud, Hiworld frames `AA 55 LEN CMD payload CHK`. CAN sources are on the WK body
+bus (83.333 kbit/s), written `ID bN` (CAN id, data byte). Full byte-level detail:
+[`data-provided-JPF20L.md`](data-provided-JPF20L.md).
 
-## Building it
+### Stock commands (still sent)
 
-Docker is the only prerequisite -- no cross toolchain, no Python, no compiler:
-
-```bash
-./build-docker.sh         # Linux / macOS / WSL / Git Bash
-```
-```powershell
-.\build-docker.ps1       # Windows
-```
-
-Both `.iap` files land in `build/`, ready for the radio's update screen. To build
-natively instead (arm-none-eabi GCC 15.x with C++ and binutils >= 2.39, plus
-Python 3.8+ and any host C++ compiler for the tests), see [`BUILD.md`](BUILD.md).
-
-Flashing is never containerised -- it needs the USB serial port and an SWD probe,
-so `tools/iap_upload.py` runs on the host.
-
-## Some docs to read
-
-- [`docs/canbus-architecture.md`](docs/canbus-architecture.md) — the data flow end to end:
-  the car's buses, what this box is wired to and can actually see, and the UART link up to
-  the head unit. Every claim is tagged VERIFIED / SOURCED / INFERRED.
-- [`docs/hiworld-iap-format.md`](docs/hiworld-iap-format.md) — the `.iap` container itself:
-  fixed-size checksummed records, the header, and the obfuscation key the file carries. This
-  is what `tools/iaptool.py` packs and unpacks byte-for-byte identically.
-- [`docs/hiworld-iap-update-sequence.md`](docs/hiworld-iap-update-sequence.md) — the update
-  as it happens on the wire, both sides of it: the radio tells the running app to reset into
-  the bootloader with `AA 55 02 E0 00 00 E1`, and the record-by-record handshake follows.
-
-**Technical AI slop goes below**
-
-## Why bootloader and app are separate
-
-The flash has two independent programs:
-
-| Region | Span | What | Rebuild? |
+| Signal | Unit / resolution | CAN source | Command |
 |---|---|---|---|
-| **Bootloader** | `0x08000000`–`0x08001FFF` (8 KB) | Vendor IAP loader. Owns the vector table (`VTOR=0x08000000`, `MSP=0x20000600`). Receives `.iap` files over UART and flashes the app. | **NO — never overwrite.** It is what lets us flash new firmware over the radio. |
-| **App** | `0x08002000`–`0x0801F7FF` (118 KB) | The actual canbox logic (CAN↔UART translation, Jeep WK profile). Delivered as the `.iap` payload. | **YES — this is what we rebuild.** |
-| Param page | `0x0801F800`–`0x0801FFFF` (2 KB) | Emulated EEPROM (model/profile byte, settings). | No (runtime data). |
+| ACC on | flag | `000` b0 | `0x72` |
+| Illumination on, dash level | flag; 0–100 % | `210` b1 | `0x72` |
+| Reverse | flag | `003` b2 | `0x72` |
+| Steering-wheel key | key code | `3A0` b0:b1 | `0x72` |
+| Steering angle | 0.5 deg/LSB, updated only in reverse | `015` b4:b5 | `0x72` |
+| Doors LF/RF/LR/RR, tailgate | open flags | `013` b2 | `0x12` |
+| Gear (P R N D S) | 1 P, 2 N, 3 R, 4 D, 5 S | `003` b4 | `0x32` |
+| Engine RPM | 1 rpm | `002` b0:b1 | `0x32` |
+| Amplifier / tone / volume, firmware version | settings; ASCII | box | `0xA6`, `0x12`, `0xF0` |
 
-The app has **no vector table of its own** — it runs on the bootloader's. The bootloader
-enters it via `bl 0x08002202` after checking a valid-app marker at `0x08001800`. A rebuilt
-app must reproduce that entry convention and be packaged back into `.iap`. See
-[`app/REBUILD.md`](app/REBUILD.md).
+### Custom telemetry block (new)
 
-## Layout
+| Signal | Unit / resolution | CAN source | Command |
+|---|---|---|---|
+| Heartbeat, validity bits | protocol rev + 8 "data is live" bits | box | `0xB0` |
+| Ignition (ACC), engine running, reverse, parking brake | flags | `000`, `002`, `003`, `0D0` | `0xB2` |
+| Vehicle speed | 1 km/h | `002` b2:b3 / 128 | `0xB3` |
+| Engine RPM | 1 rpm | `002` b0:b1 | `0xB3` |
+| Throttle | 0–100 % | `2C0` b2 | `0xB3` |
+| Coolant temperature | 1 deg C | `02C` b1 | `0xB4` |
+| Intake air temperature | 1 deg C | `015` b2 | `0xB4` |
+| Fuel level | 0–100 % | `159` b5 | `0xB4` |
+| Battery voltage | 0.1 V steps | `015` b1 | `0xB4` |
+| Outside air temperature | 0.1 deg C | `014` b4 | `0xB5` |
+| Tyre pressure, 4 corners | 1 kPa, one corner per 5 s | polled from the tyre module (WCM) every 30 s | `0xB7` |
+| Fuel in tank | 0.1 L | `159` b5 | `0xB8` |
+| Odometer | 0.1 km | `014` b0:b2 | `0xBB` |
+| Compass (8-way sector + heading) | 2 deg heading, magnetic | `1B4` b0:b1 | `0xBD` |
+| Fuel flow | 0.1 L/h, 1 s average | `1A7` b0:b1 | `0xBC` |
 
-```
-README.md                  — this file
-app/                       — THE REBUILD. Three layers; see docs/ARCHITECTURE.md.
-  startup/crt0.S           — the fixed preamble: 59 IRQ veneers + the 0x08002202 entry
-  startup/startup.c        — RAM init, then main_loop (replaces the ARM C-lib __main chain)
-  hal/*.{c,h}              — C11 register drivers. MMIO only, no RAM state (data = bss = 0)
-  services/*.{cpp,hpp}     — C++17 stateful services: scheduler, clock, timers, params,
-                             CAN transport, head-unit link, board I/O, power
-  logic/*.{cpp,hpp}        — C++17 vehicle behaviour: the two CAN profile decoders, the
-                             periodic TX table, cluster text, link state, main loop,
-                             and the five interrupt entry points
-  include/ram_map.hpp      — all runtime state as one typed struct, linker-allocated;
-                             each field notes the stock address it came from
-  include/app_config.hpp   — clock tree, tick cadences, protocol constants, box identity
-  include/n32l406_hw.h     — peripheral register layouts, generated from the vendor SDK
-  linker/app.ld            — linker script for the app region (see REBUILD.md)
-  REBUILD.md               — how to rebuild & re-flash the app (entry convention, IAP, verify)
-  MEMORY_MAP.md            — full flash + SRAM map
+Not sent (no source on this car's bus): engine load (always 0), range (always "n/a"), tyre
+temperature (always "n/a"). `0xBC` has no validity bit; `FFFF` means "no data".
 
-  src/*.c                  — REFERENCE ONLY: decompiled, NAMED C by subsystem. This is the
-                             behavioural spec the rebuild is written against, not built.
-  src/can_rx_decode.c      — the two CAN profile decoders (83k = this car, 125k = FCA variant)
-  include/n32l406.h        — Ghidra pseudo-types for reference/decompile/app/ only
-                             (the old include/globals.h absolute-address macros are gone;
-                             the address -> name key is ghidra/merged_globals.tsv)
-  services/app_state.cpp   — the one definition of the firmware's runtime state
-bootloader/
-  src/*.c                  — decompiled bootloader (reference only; do not rebuild)
-  src/n32l406.h
-docs/                      — all analysis documents
-  notes/                   — field/bench notes (RDP, SWD, IAP bench setup, profiles, …)
-tests/
-  host/                    — host unit tests: the logic layers built for x86 against a
-                             recording fake HAL. `python tools/test.py`
-build-docker.sh / .ps1     — build in a container on a machine with no toolchain
-docker/
-  Dockerfile               — the builder image: pinned xPack arm-none-eabi GCC + host g++
-  build-all.sh             — its entrypoint: tests, then both protocols, packed
-tools/
-  build.py                 — compile + link + verify the preamble (the primary build driver)
-  test.py                  — build and run the host unit tests
-  verify_preamble.py       — fails the build if the entry veneer or a veneer slot moved
-  iaptool.py               — pack/unpack/verify .iap containers
-  iap_upload.py            — drive the bootloader over UART (reset→U→magic→records→E)
-  dumper/                  — the SRAM-copy bootloader dumper (how the 8 KB loader was extracted)
-ghidra/
-  functions.tsv            — addr → current function name (272 functions)
-  final_function_names.txt — snapshot of all names
-  merged_globals.tsv / known_globals.tsv / slot2ram.tsv / mmio_slots.tsv — the global/pointer maps
-  rename_hiworld.py        — re-applies the canonical names to a fresh Ghidra import
-reference/
-  bootloader_0x08000000_8k.bin   — original bootloader dump (sha256 60c8a757…)
-  2429-H1N4JPF20A-220524.app.bin — original DECODED app image (the rebuild target to diff against)
-  parampage_0x0801F800_2k.bin    — param page dump
-```
+### Confirmed vs not
 
-## Source status (important)
+| Item | State |
+|---|---|
+| Fuel-flow scale (`Q/160` = L/h) | **Not verified at the pump.** Fits idle, rated power and a 10.4 L/100 km drive replay. Treat as a rate estimate. |
+| Fuel level / litres scale | **Not verified** against a pump fill or a dipstick. |
+| Tyre corner order (LF, RF, RR, LR) | Taken from the module's reply; **not yet confirmed by a deflation test**. |
+| Spare tyre | Not read. |
+| Steering-wheel keys | The CAN id the firmware reads (`3A0`) stays `00 00` in the drive log, so no key presses arrive on this car. |
+| Illumination source (`210`) | Best guess (medium-low confidence). |
+| Outside / intake temperature below 0 deg C | Never observed on the car; negative values are untested. |
+| Compass | Magnetic heading, not true north. |
 
-There are two generations of source here, and only one of them is built.
+## Stock JPF20A vs JPF20L
 
-**`app/hal/`, `app/services/`, `app/logic/`, `app/startup/` — the rebuild.** Real,
-compilable C11 + C++17. This is what `python tools/build.py` turns into `build/app.bin`.
-Layering and the public API of every module are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md);
-the C++ subset and its recorded deviations are in [`docs/misra-cpp.md`](docs/misra-cpp.md).
+| Feature | Stock JPF20A | JPF20L |
+|---|---|---|
+| ACC, illumination, reverse | ✓ | ✓ unchanged |
+| Reverse / illumination hardwired lines to the radio | ✓ | ✓ unchanged |
+| Steering angle | ✓ | ✓ unchanged |
+| Doors | ✓ | ✓ unchanged |
+| Steering-wheel keys | decoded from `3A0` | same (no data on this car, see above) |
+| Gear | — (byte always 0 on this profile) | ✓ |
+| Engine RPM | — | ✓ |
+| Vehicle speed | — | ✓ |
+| Parking brake | — | ✓ |
+| Engine running flag | — | ✓ |
+| Throttle | — | ✓ |
+| Coolant, intake, outside temperature | — | ✓ |
+| Fuel level, litres | — | ✓ |
+| Battery voltage | — | ✓ |
+| Odometer | — | ✓ |
+| Compass | — | ✓ |
+| Fuel flow L/h | — | ✓ (scale unverified) |
+| Tyre pressures (TPMS) | — | ✓ polled every 30 s |
+| Engine load, range, tyre temperature | — | — (fields exist, always "n/a") |
+| Data validity reporting | — | ✓ per-signal bits in `0xB0` |
+| Stock protocol 3009001 | ✓ | ✓ still works; stock frames unchanged except `0x32` (gear and RPM now filled) |
+| Custom block `0xB0`–`0xBD` | — | additive; needs an app that reads it (for example Dashwheel) |
+| Firmware updatable from the radio | ✓ | ✓ same updater, bootloader untouched |
 
-**`reference/decompile/app/*.c` and `reference/decompile/bootloader/*.c` — the spec.** Ghidra decompiler output with names
-applied: real function/global/register names, correct addresses, and plate comments, but
-with Ghidra pseudo-types (`undefined`, `uint`, `byte`) declared in `n32l406.h`, and `DAT_`
-left only where it points to flash constant tables or dead code. **These do not compile and
-are not meant to.** They are the behavioural reference the rebuild is written against and
-the host tests are written from, and they stay in the tree for exactly that reason.
+Differences to know about:
 
-> **A note on `app/port/` references.** Comments throughout the rebuilt layers cite files like
-> `the retired app/port/hw_can.c`. That was the *earlier single-layer C port* — one flat directory, weak
-> no-op stubs between subsystems, and absolute-address macros for state. The layering refactor
-> replaced it, and its explanatory comments were carried forward into the files that cite it,
-> so the references record where a piece of reasoning came from. The directory itself is in git
-> history (it was last present at commit `ff070e1`) if you ever want to diff against it.
+- Stock apps ignore the custom block, so with a stock radio app you get the same behaviour as before plus gear and RPM.
+- The tyre poll sends one small diagnostic request on the car's body bus every 30 s. The stock `0x500` to `0x516` CAN mirror is switched off in this build, because `0x500` is the tyre module's reply id.
 
-Every reconstructed function carries the original flash address of what it reproduces in a
-`/* 0x0800xxxx */` comment, so any part of the rebuild can be diffed back against Ghidra or
-against `reference/2429-H1N4JPF20A-220524.app.bin`.
+## Install
 
-This box is **box 2429 / part H1N4JPF20A** (Jeep WK family, 83.333 kbit body bus). The 16-byte
-`.iap` target magic for it is `01 09 07 08 00 02 01 07 91 32 47 a4` + `4e 33 14 f2` ("N3").
+1. Get `canupdateH1N4JPF20L-<date>.iap`. **No separator** between `canupdate` and the version: `canupdateH1N4JPF20L-241026.iap` is correct; do not add a dash after `canupdate`.
+2. Copy it to the head unit's **sdcard root** (the updater takes the first `.iap` it finds in a storage root or in `CanBus/box/`, so leave only one `.iap` there).
+3. On the head unit open the canbus settings (debug menu), choose the canbox update (Hiworld) and run it. Keep the unit powered and do not touch it until it reports success. The box resets into its bootloader, takes the file, then restarts.
+4. Check the version shown in the canbus settings: `H1N4JPF20L-<ddmmyy>`.
 
-## Device facts
-- MCU Nations N32L406CBL7, Cortex-M4F @ 64 MHz. STM32F1-like register map but NOT identical
-  (e.g. ADC is at `0x40020800`, GPIO set/clear at `+0x18`/`+0x28`).
-- Flash is **RDP Level 1** locked — can't be read over SWD, but flash-resident code can read it
-  (that is how the bootloader was dumped; see `tools/dumper/` and `docs/notes/`).
-- `.iap` has no signature — only a per-record checksum + the 16-byte magic — so a correctly
-  repacked image is accepted. Full modify→flash→verify loop is proven (`docs/notes/iap-upload-pipeline-works.md`).
+**Back to stock:** run the same update with the stock `.iap` for `H1N4JPF20A-220524` (kept in the repo's `hiworld/` folder, not in this one).
+
+**Safety:** the 8 KB bootloader is never touched or replaced, so a bad or interrupted update can always be fixed by flashing again.
+
+## Status and limitations
+
+- WIP; used daily on one car: Jeep Grand Cherokee WH, 3.0 CRD, 2005.
+- Unverified items are listed above. Range, engine load and tyre temperature have no source.
+- Other WK-family years and engines are untested.
+- For reading the data in an app: Dashwheel (the launcher, repo `dashwheel`) reads the custom block.
+
+## For developers
+
+Building, firmware layout, protocol specs, reverse-engineering notes: [`docs/DEVELOPER.md`](docs/DEVELOPER.md).
+Build commands: [`BUILD.md`](BUILD.md).

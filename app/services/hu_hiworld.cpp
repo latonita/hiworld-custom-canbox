@@ -67,6 +67,7 @@ volatile std::uint8_t* bufB7() noexcept { return ram::app().customFrames.b7; }
 volatile std::uint8_t* bufB8() noexcept { return ram::app().customFrames.b8; }
 volatile std::uint8_t* bufBB() noexcept { return ram::app().customFrames.bB; }
 volatile std::uint8_t* bufBD() noexcept { return ram::app().customFrames.bD; }
+volatile std::uint8_t* bufBC() noexcept { return ram::app().customFrames.bC; }
 
 /* ---- shadows: ram::AppRam::uartShadows, the old bare literals ------------ */
 volatile std::uint8_t* shadow72() noexcept { return ram::app().uartShadows.msg72; }
@@ -84,6 +85,7 @@ volatile std::uint8_t* shadowB7() noexcept { return ram::app().uartShadows.msgB7
 volatile std::uint8_t* shadowB8() noexcept { return ram::app().uartShadows.msgB8; }
 volatile std::uint8_t* shadowBB() noexcept { return ram::app().uartShadows.msgBB; }
 volatile std::uint8_t* shadowBD() noexcept { return ram::app().uartShadows.msgBD; }
+volatile std::uint8_t* shadowBC() noexcept { return ram::app().uartShadows.msgBC; }
 
 /* The non-payload bytes THIS dialect puts on the wire: AA 55 LEN CMD .. CKS.
  * Spelled out rather than read from cfg::kUartFrameOverhead, which follows the
@@ -103,9 +105,11 @@ constexpr std::size_t kWireOverhead = 5U;
  * are pure duplicates of stock 0xF0 and 0x12; 0xB7 TPMS and 0xB9 KEY have no
  * source on this car). Those four stay RESERVED: do not fill the gap in the
  * numbering just because it looks untidy -- and the same goes for the gaps at
- * 0xBA, 0xBC and 0xBE, which ../canbus-to-canbox-signal-map.md section 9 has
- * already allocated to LIGHTING, BODY2 and a spare. 0xBB and 0xBD are not
- * free choices either; they are that allocation. */
+ * 0xBA and 0xBE (and 0xBF), which ../canbus-to-canbox-signal-map.md section 9
+ * has already allocated to LIGHTING, BODY2 and a spare. 0xBB and 0xBD are not
+ * free choices either; they are that allocation. 0xBC was reserved for GEAR
+ * there and struck out (gear is already in stock 0x32), which freed the number
+ * for FLOW, the last row -- appended, so the rows above keep their indices. */
 extern constexpr TxDesc kTxTable[kSlots] = {
     { 0x72U, 14U, &buf72, &shadow72 },  /* flags, SWC key, illum, steering   */
     { 0xA6U,  8U, &bufA6, &shadowA6 },  /* amplifier level + tone alias      */
@@ -123,6 +127,7 @@ extern constexpr TxDesc kTxTable[kSlots] = {
     { 0xB8U,  4U, &bufB8, &shadowB8 },  /* fuel litres, range                */
     { 0xBBU,  3U, &bufBB, &shadowBB },  /* odometer, 0.1 km                  */
     { 0xBDU,  3U, &bufBD, &shadowBD },  /* compass sector + heading          */
+    { 0xBCU,  2U, &bufBC, &shadowBC },  /* fuel flow, 0.1 L/h (appended last) */
 };
 
 /* ===========================================================================
@@ -156,6 +161,7 @@ static_assert(kTxTable[11].len == sizeof(ram::UartShadows::msgB7), "0xB7 shadow"
 static_assert(kTxTable[12].len == sizeof(ram::UartShadows::msgB8), "0xB8 shadow");
 static_assert(kTxTable[13].len == sizeof(ram::UartShadows::msgBB), "0xBB shadow");
 static_assert(kTxTable[14].len == sizeof(ram::UartShadows::msgBD), "0xBD shadow");
+static_assert(kTxTable[15].len == sizeof(ram::UartShadows::msgBC), "0xBC shadow");
 
 /* Row -> live buffer. The four VehicleState rows must match their window
  * lengths; the other two are standalone objects. */
@@ -177,6 +183,7 @@ static_assert(kTxTable[11].len == sizeof(ram::CustomFrames::b7), "0xB7 buffer");
 static_assert(kTxTable[12].len == sizeof(ram::CustomFrames::b8), "0xB8 buffer");
 static_assert(kTxTable[13].len == sizeof(ram::CustomFrames::bB), "0xBB buffer");
 static_assert(kTxTable[14].len == sizeof(ram::CustomFrames::bD), "0xBD buffer");
+static_assert(kTxTable[15].len == sizeof(ram::CustomFrames::bC), "0xBC buffer");
 
 /* The reserved commands must never appear in the table. 0xE0 is the head
  * unit's own reboot trigger, 0xFE/0xFF are ACK/NAK and 0xD2 is cluster text;

@@ -96,6 +96,11 @@ inline constexpr std::uint32_t kJeepFuel        = 0x159U;  /* level + gate     *
 inline constexpr std::uint32_t kJeepParkBrake   = 0x0D0U;
 inline constexpr std::uint32_t kJeepThrottle    = 0x2C0U;  /* pedal + mirror   */
 inline constexpr std::uint32_t kJeepCompass     = 0x1B4U;  /* sector + heading */
+/* Instantaneous fuel-flow RATE, b0:b1 big-endian, L/h = Q/160, ~100 ms while
+ * the engine runs. Feeds 0xBC FLOW (spec section 10). Same no-op argument as
+ * the others: 0x1A7 is below 0x400 and falls into decodeSwcService() in the
+ * stock image, which returns at once. */
+inline constexpr std::uint32_t kJeepFuelFlow    = 0x1A7U;
 /* THE ONE FRAME THIS BOX SENDS UNPROMPTED. A KWP readDataByLocalIdentifier to
  * the WCM, whose reply lands on 0x500 -- i.e. on kJeepVendorEcho below, whose
  * name is now misleading in a jeep build and is kept because the Ghidra diff

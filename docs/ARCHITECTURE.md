@@ -310,9 +310,9 @@ ternary.
 |---|---|---|
 | framing | `AA 55 LEN CMD payload CKS`, CKS = sum − 1 | `2E CMD LEN payload CKS`, CKS = ~sum |
 | wire overhead | 5 | 4 |
-| TX slots | 15: the stock 6 (`0x72 0xA6 0x73 0xF0 0x12 0x32`) + the custom 9 (`0xB0 0xB2 0xB3 0xB4 0xB5 0xB7 0xB8 0xBB 0xBD`) | 5 (`0x08 0x07`, three pages of `0x41`) |
+| TX slots | 16: the stock 6 (`0x72 0xA6 0x73 0xF0 0x12 0x32`) + the custom 10 (`0xB0 0xB2 0xB3 0xB4 0xB5 0xB7 0xB8 0xBB 0xBD 0xBC`) | 5 (`0x08 0x07`, three pages of `0x41`) |
 | head-unit protocol id | 3009001 | 1034025 / 27 / 28 |
-| version string | `H1N4JPF20L-211026` | `H1N4BNZ10L-…` |
+| version string | `H1N4JPF20L-241026` | `H1N4BNZ10L-…` |
 | wire behaviour | stock-equivalent for the stock 6 slots | deliberately diverges |
 
 Only the **jeep** build is a faithful rebuild — and only for the six stock

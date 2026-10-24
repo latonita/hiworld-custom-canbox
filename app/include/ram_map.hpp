@@ -412,6 +412,7 @@ struct UartShadows {
     volatile std::uint8_t msgB8[4];
     volatile std::uint8_t msgBB[3];
     volatile std::uint8_t msgBD[3];
+    volatile std::uint8_t msgBC[2];   /* 0xBC FLOW, appended last (spec s10) */
 };
 
 /* ===========================================================================
@@ -553,6 +554,9 @@ inline constexpr std::uint8_t kValidB7 = 0x10U;
 inline constexpr std::uint8_t kValidB8 = 0x20U;
 inline constexpr std::uint8_t kValidBB = 0x40U;
 inline constexpr std::uint8_t kValidBD = 0x80U;
+/* 0xBC FLOW has NO validity bit -- the mask above is full and a second mask
+ * byte is a length change to a shipped command (spec section 10.4). Its own
+ * 0xFFFF sentinel is the only "absent" signal, and the consumer must honour it. */
 
 /* 0xB7 tyre positions, as the WCM orders them in its 0x213B reply:
  * b3=LF b4=RF b5=RR b6=LR. TRIANGULATED, NOT PROVEN -- three independent
@@ -595,6 +599,21 @@ struct CustomSignals {
     volatile std::uint32_t odometerDeciKm;  /* 0.1 km, 24-bit  0x014 b0:b1:b2 */
     volatile std::uint16_t headingDeg;      /* whole deg magnetic  0x1B4 b1*2 */
     volatile std::uint8_t  compassSector;   /* 8-way enum, 0=N     0x1B4 b0   */
+    volatile std::uint16_t flowDeciLph;     /* 0.1 L/h, 0xFFFF=n/a 0x1A7 b0:b1/16 */
+
+    /* ---- fuel-flow averaging window (logic::customFuelFlow / ...Tick) -----
+     * A rate, not a level, so it needs the box's own clock. sumQdt is
+     * sum(Q * dt_ms) and sumDt is sum(dt_ms) over the current 1000 ms window,
+     * both u32: Q <= 0xFFFE and every counted dt is <= 300 ms, so one window
+     * holds at most ~1.3 s of dt and ~8.6e7 of Q*dt, 50x inside 2^32 (the
+     * u32 only overflows after 65 s of integrated dt in ONE window). lastMs is
+     * the sched.counter stamp of the previous accepted 0x1A7 frame and
+     * haveLast says whether that stamp may be used at all. */
+    volatile std::uint32_t flowSumQdt;
+    volatile std::uint32_t flowSumDt;
+    volatile std::uint32_t flowLastMs;
+    volatile std::uint32_t flowWindowMs;    /* sched.counter at window start */
+    volatile std::uint8_t  flowHaveLast;
 
     /* ---- TPMS, polled from the WCM. docs/TPMS-POLL-SPEC.md ---------------
      * NOT broadcast on this car: these come from a KWP request/response
@@ -640,6 +659,7 @@ struct CustomFrames {
     volatile std::uint8_t b8[4];   /* litres, range                           */
     volatile std::uint8_t bB[3];   /* odometer, 24-bit 0.1 km                 */
     volatile std::uint8_t bD[3];   /* compass sector, magnetic heading        */
+    volatile std::uint8_t bC[2];   /* fuel flow, u16 0.1 L/h, 0xFFFF = n/a    */
 };
 
 /* ===========================================================================

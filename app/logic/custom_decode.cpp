@@ -56,6 +56,16 @@ constexpr std::uint16_t kRunSetRpm      = 500U;
 constexpr std::uint16_t kRunClearRpm    = 300U;
 constexpr std::uint8_t  kRunStreakNeeded = 3U;
 
+/* 0x1A7 fuel flow (spec section 10): the averaging window, the longest
+ * inter-frame gap still integrated (three missed 100 ms frames), and the top
+ * of the published range -- 0xFFFF is the sentinel, so 0xFFFE is the ceiling.
+ * It is DEFENSIVE: Q <= 0xFFFE gives at most 4096 deci-L/h (409.6 L/h), so the
+ * clamp cannot bind today; it is there so a future change to the divisor can
+ * never make a reading collide with the sentinel. */
+constexpr std::uint32_t kFlowWindowMs = 1000U;
+constexpr std::uint32_t kFlowMaxGapMs = 300U;
+constexpr std::uint32_t kFlowMaxDeci  = 0xFFFEU;
+
 /* 0x003 b4 is the ASCII code of the character the cluster displays. */
 constexpr std::uint8_t kAsciiR = 0x52U;   /* 'R' */
 
@@ -254,6 +264,17 @@ void customPrimeSignals() noexcept
     c.odometerDeciKm = ram::kCustomUnknown24;
     c.headingDeg     = ram::kCustomUnknown16;
     c.compassSector  = ram::kCustomUnknown8;
+
+    /* Fuel flow: a zeroed field would claim "0.0 L/h" -- a real reading (fuel
+     * cut on overrun) the car never sent. 0xFFFF is the ONLY absent signal for
+     * 0xBC, there being no validity bit. The window starts now so the first
+     * close is a full second after boot, and no previous frame exists yet. */
+    c.flowDeciLph    = ram::kCustomUnknown16;
+    c.flowSumQdt     = 0U;
+    c.flowSumDt      = 0U;
+    c.flowLastMs     = 0U;
+    c.flowHaveLast   = 0U;
+    c.flowWindowMs   = ram::app().sched.counter;
 
     for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
         c.tyreKpa[i] = ram::kCustomUnknown16;
@@ -699,6 +720,97 @@ void customCompass(const volatile std::uint8_t* d) noexcept
     c.headingDeg    = static_cast<std::uint16_t>(
         static_cast<std::uint16_t>(b1) * kDegPerCount);
     setValid(ram::kValidBD, true);
+}
+
+/* ============================================================================
+ * 0x1A7 b0:b1 -- fuel-flow RATE, for 0xBC FLOW. docs/CUSTOM-TX-SPEC.md s10.
+ * Evidence: id 0x1A7, rate identity probable; the divisor is anchored at idle
+ * (~0.76 L/h), at rated power (40.0 vs 40.3 L/h) and by urban consumption, and
+ * a 1449.6 s drive replay integrates to 10.43 L/100 km. NOT yet verified at the
+ * pump -- which is why this stays a rate and the litres stay the radio's job.
+ *
+ * Q = (b0 << 8) | b1, unsigned big-endian, and it is ALREADY a rate:
+ * L/h = Q / 160, so deci-L/h = Q / 16. Three ways to get this wrong, all of
+ * which the byte map warns about:
+ *   - NEVER MULTIPLY BY RPM. Q is not per-revolution; that turns a rate into
+ *     a number that tracks the tachometer, not the injectors.
+ *   - NEVER PLAIN-SUM FRAMES. The frame cadence is ~100 ms running but ~400 ms
+ *     at key-off, so a frame count is a clock that changes with engine state.
+ *   - Q == 0 IS A REAL READING. Fuel cut on overrun injects nothing; it must
+ *     be integrated as zero, not read as "no data". Only 0xFFFF is absent.
+ *
+ * THE AVERAGE. On each accepted frame, dt = now - lastFlowMs on the box's own
+ * free-running millisecond counter. With no previous frame, or dt > 300 ms
+ * (three missed frames: the stream stopped and restarted, and a Q held across
+ * that hole would be invented), the interval is NOT integrated -- only the
+ * stamp is refreshed. Otherwise sumQdt += Q*dt and sumDt += dt. Q is the NEW
+ * frame's value applied backwards over the interval that ended at it, which is
+ * what makes "600 ms at Q=1600, then 400 ms at Q=0" come out at exactly 6.0 L/h.
+ *
+ * A 0xFFFF frame is rejected AND clears haveLast, so the interval after it is
+ * not counted either: its dt would otherwise be paired with a Q taken from
+ * the far side of a hole. customFuelFlowTick() turns the sums into a value.
+ *
+ * Overflow: Q <= 0xFFFE and each counted dt <= 300 ms; a window collects at
+ * most ~1.3 s of dt, so sumQdt <= ~8.6e7 and u32 is 50x clear of 4.29e9.
+ *
+ * No DLC check: the dispatcher hands over the data pointer only, like every
+ * other custom decoder here. The id is unique to this signal on the WK body
+ * bus.
+ * ==========================================================================*/
+void customFuelFlow(const volatile std::uint8_t* d) noexcept
+{
+    ram::CustomSignals& c = ram::app().customSignals;
+
+    const std::uint32_t q = (static_cast<std::uint32_t>(d[0]) << 8)
+                          |  static_cast<std::uint32_t>(d[1]);
+    const std::uint32_t now = ram::app().sched.counter;
+
+    if (q == ram::kCustomUnknown16) {
+        c.flowHaveLast = 0U;          /* reject, and void the next interval */
+        return;
+    }
+
+    if (c.flowHaveLast != 0U) {
+        const std::uint32_t dt = now - c.flowLastMs;   /* wraps correctly */
+        if (dt <= kFlowMaxGapMs) {
+            c.flowSumQdt += q * dt;
+            c.flowSumDt  += dt;
+        }
+    }
+    c.flowLastMs   = now;
+    c.flowHaveLast = 1U;
+}
+
+/* The window close. Every 1000 ms: if any interval was integrated, publish
+ * round-half-up(sumQdt / sumDt / 16) deci-L/h clamped to 0xFFFE (0xFFFF is the
+ * sentinel and must not be reachable as a reading); otherwise 0xFFFF. Both sums
+ * reset either way. Runs from the 8 ms task so a silent bus -- no 0x1A7 at all
+ * -- still turns into 0xFFFF after a second instead of holding the last value
+ * for ever. Integer half-up: floor((S + 8*T) / (16*T)). The 0.1 L/h
+ * resolution is the deadband, as 0.1 V is for volts. */
+void customFuelFlowTick() noexcept
+{
+    ram::CustomSignals& c = ram::app().customSignals;
+    const std::uint32_t now = ram::app().sched.counter;
+
+    if ((now - c.flowWindowMs) < kFlowWindowMs) {
+        return;
+    }
+    c.flowWindowMs = now;
+
+    if (c.flowSumDt > 0U) {
+        std::uint32_t v = (c.flowSumQdt + 8U * c.flowSumDt)
+                        / (16U * c.flowSumDt);
+        if (v > kFlowMaxDeci) {
+            v = kFlowMaxDeci;
+        }
+        c.flowDeciLph = static_cast<std::uint16_t>(v);
+    } else {
+        c.flowDeciLph = ram::kCustomUnknown16;
+    }
+    c.flowSumQdt = 0U;
+    c.flowSumDt  = 0U;
 }
 
 /* ============================================================================

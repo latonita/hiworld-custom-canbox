@@ -83,13 +83,13 @@ void rxDispatch() noexcept;
 /* ---- the stock Hiworld dialect, hu_hiworld.cpp -------------------------- */
 namespace hiworld {
 
-/* Fifteen: the six stock slots from the flash table at 0x08009F2C, plus the
- * nine of the custom 0xB0-0xBD telemetry block (docs/CUSTOM-TX-SPEC.md, and
- * docs/TPMS-POLL-SPEC.md for 0xB7). A
+/* Sixteen: the six stock slots from the flash table at 0x08009F2C, plus the
+ * ten of the custom 0xB0-0xBD telemetry block (docs/CUSTOM-TX-SPEC.md,
+ * docs/TPMS-POLL-SPEC.md for 0xB7, spec section 10 for 0xBC). A
  * static_assert in head_unit.cpp couples this to cfg::kTxSlotCount, which is
  * what ram::AppRam::uartSlotState is sized from -- change one and the build
  * stops rather than the scheduler corrupting its own index. */
-inline constexpr std::uint8_t kSlots = 15U;
+inline constexpr std::uint8_t kSlots = 16U;
 
 extern const TxDesc kTxTable[];
 

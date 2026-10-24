@@ -270,15 +270,15 @@ std::uint8_t ignByte() noexcept   { return ram::app().customSignals.ignBits; }
  * 0. Configuration sanity -- the five couplings section 6 of the spec warns
  *    about, four of which fail silently.
  * ========================================================================= */
-TEST(custom_jeep_build_has_fifteen_tx_slots)
+TEST(custom_jeep_build_has_sixteen_tx_slots)
 {
     CHECK_FALSE(cfg::kIsBenz);
-    CHECK_EQ(static_cast<unsigned>(cfg::kTxSlotCount), 15U);
-    CHECK_EQ(static_cast<unsigned>(svc::hu::kTxSlots), 15U);
+    CHECK_EQ(static_cast<unsigned>(cfg::kTxSlotCount), 16U);
+    CHECK_EQ(static_cast<unsigned>(svc::hu::kTxSlots), 16U);
     /* The slot-state array is sized from cfg::kTxSlotCount and is immediately
      * followed by uartTxSlotIdx: a short array means the scheduler corrupts
      * its own index every sweep and the tests keep passing. */
-    CHECK_EQ(sizeof(ram::AppRam::uartSlotState), 15U);
+    CHECK_EQ(sizeof(ram::AppRam::uartSlotState), 16U);
 }
 
 /* The index really does survive a full sweep -- the symptom of a short
@@ -308,8 +308,8 @@ TEST(custom_tx_budget_stays_inside_the_staleness_window)
     const unsigned keepAliveMs = static_cast<unsigned>(svc::hu::kTxSlots)
                                * static_cast<unsigned>(svc::hu::kIdleDelay)
                                * static_cast<unsigned>(svc::hu::kTicksPerFrame) * 8U;
-    CHECK_EQ(worstCaseMs, 720U);
-    CHECK_EQ(keepAliveMs, 10800U);     /* 15 x 720 ms = 10.8 s */
+    CHECK_EQ(worstCaseMs, 768U);
+    CHECK_EQ(keepAliveMs, 11520U);     /* 16 x 720 ms = 11.52 s */
     CHECK(keepAliveMs < 15000U);
 }
 
@@ -351,6 +351,11 @@ TEST(custom_prime_puts_every_field_in_its_no_value_state)
      * coolant, not less. 0 is a real heading. */
     CHECK_EQ(bB()[0], 0xFFU);  CHECK_EQ(bB()[1], 0xFFU);  CHECK_EQ(bB()[2], 0xFFU);
     CHECK_EQ(bD()[0], 0xFFU);  CHECK_EQ(bD()[1], 0xFFU);  CHECK_EQ(bD()[2], 0xFFU);
+
+    /* 0xBC: a zeroed field would claim "0.0 L/h", a real overrun reading the
+     * car never sent. The 0xFFFF sentinel is the only absent signal. */
+    CHECK_EQ(ram::app().customFrames.bC[0], 0xFFU);
+    CHECK_EQ(ram::app().customFrames.bC[1], 0xFFU);
 }
 
 /* ===========================================================================
@@ -1638,4 +1643,307 @@ TEST(custom_block_leaves_the_six_stock_slots_alone)
         ram::app().vehicle.window(ram::VehicleState::kWin32Off);
     CHECK_EQ(win32[2], 0x0AU);
     CHECK_EQ(win32[3], 0x8DU);
+}
+
+/* ===========================================================================
+ * 10. Addendum B -- 0xBC FLOW (fuel flow, 0.1 L/h), spec section 10.
+ *
+ * Driven through the REAL decoder with the box's own millisecond counter set by
+ * hand (ram::app().sched.counter), because the whole point of 0xBC is that it
+ * is a time-weighted average. The window opens at counter 0 after primed() and
+ * closes on the first customPublish() at or after 1000 ms.
+ *
+ * L/h = Q / 160, so deci-L/h = Q / 16: Q = 1600 is 10.0 L/h, Q = 1968 is
+ * 12.3 L/h exactly. The expected values below are worked out by hand from that
+ * and never read back from the firmware.
+ * ========================================================================= */
+
+namespace {
+
+const volatile std::uint8_t* bC() noexcept { return ram::app().customFrames.bC; }
+
+void clockAt(std::uint32_t ms) noexcept { ram::app().sched.counter = ms; }
+
+/* 0x1A7: b0:b1 = Q big-endian, b2..b5 = 0, DLC 6 on the real bus. The test
+ * ring writes DLC 8; the decoder never reads it, like every other custom one. */
+void flowFrame(std::uint32_t atMs, std::uint16_t q) noexcept
+{
+    clockAt(atMs);
+    const std::uint8_t d[8] = { static_cast<std::uint8_t>(q >> 8),
+                                static_cast<std::uint8_t>(q), 0U, 0U, 0U, 0U, 0U, 0U };
+    pushFrame(logic::canid::kJeepFuelFlow, d);
+    decodeOnce();
+}
+
+/* Close the window at t = 1000 and build the packed 0xBC wire frame. */
+void closeWindow(std::uint8_t* wire) noexcept
+{
+    clockAt(1000U);
+    logic::customPublish();
+    hiworldFrame(wire, 0xBCU, bC(), 2U);
+}
+
+/* Feed Q every 100 ms from t = 0 through t = 1000 inclusive. */
+void steadyFlow(std::uint16_t q) noexcept
+{
+    for (std::uint32_t t = 0U; t <= 1000U; t += 100U) {
+        flowFrame(t, q);
+    }
+}
+
+}  // namespace
+
+/* Spec vector: 12.3 L/h = Q 1968 steady -> 123 deci-L/h = 0x007B. */
+TEST(flow_normal_value_matches_the_worked_example)
+{
+    primed();
+    steadyFlow(1968U);
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    const std::uint8_t want[7] = { 0xAAU, 0x55U, 0x02U, 0xBCU,
+                                   0x00U, 0x7BU, 0x38U };
+    CHECK_BYTES(wire, want, 7U);
+}
+
+/* Spec vector, and THE TRAP: Q = 0 is fuel cut on overrun, a real 0.0 L/h that
+ * must be published as zero -- not skipped, and not confused with 0xFFFF. */
+TEST(flow_zero_overrun_is_a_reading_not_a_blank)
+{
+    primed();
+    steadyFlow(0U);
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    const std::uint8_t want[7] = { 0xAAU, 0x55U, 0x02U, 0xBCU,
+                                   0x00U, 0x00U, 0xBDU };
+    CHECK_BYTES(wire, want, 7U);
+}
+
+/* Spec vector: no frame at all in the window -> 0xFFFF. Also the cold-boot
+ * case in time: the first second after power-up is a silent second. */
+TEST(flow_silent_second_publishes_unavailable)
+{
+    primed();
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    const std::uint8_t want[7] = { 0xAAU, 0x55U, 0x02U, 0xBCU,
+                                   0xFFU, 0xFFU, 0xBBU };
+    CHECK_BYTES(wire, want, 7U);
+}
+
+TEST(flow_cold_boot_primes_unavailable_before_the_first_window)
+{
+    primed();
+    logic::customPublish();            /* counter still 0: window not due */
+    CHECK_EQ(bC()[0], 0xFFU);
+    CHECK_EQ(bC()[1], 0xFFU);
+    CHECK_EQ(ram::app().customSignals.flowDeciLph, 0xFFFFU);
+}
+
+/* A silent bus AFTER a good window must not hold the old value. */
+TEST(flow_bus_going_silent_returns_to_unavailable)
+{
+    primed();
+    steadyFlow(1600U);
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    CHECK_EQ(bC()[0], 0x00U);
+    CHECK_EQ(bC()[1], 0x64U);          /* 10.0 L/h */
+
+    clockAt(2000U);
+    logic::customPublish();            /* second window: no frames */
+    CHECK_EQ(bC()[0], 0xFFU);
+    CHECK_EQ(bC()[1], 0xFFU);
+}
+
+/* 600 ms at Q = 1600 (10.0 L/h) then 400 ms at Q = 0 -> 0.6 x 10 = 6.0 L/h,
+ * i.e. 60 = 0x3C. A plain frame average would say 6/11 x 10 = 5.45. */
+TEST(flow_mixed_values_are_time_weighted)
+{
+    primed();
+    for (std::uint32_t t = 0U; t <= 600U; t += 100U) { flowFrame(t, 1600U); }
+    for (std::uint32_t t = 700U; t <= 1000U; t += 100U) { flowFrame(t, 0U); }
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    const std::uint8_t want[7] = { 0xAAU, 0x55U, 0x02U, 0xBCU,
+                                   0x00U, 0x3CU, 0xF9U };
+    CHECK_BYTES(wire, want, 7U);
+}
+
+/* Unequal spacing is weighted by dt, not by frame count: Q = 3200 over one
+ * 250 ms interval and Q = 0 over one 50 ms interval -> 3200*250/300 = 2666.7
+ * -> /16 = 166.7 -> 167. */
+TEST(flow_weights_by_interval_length_not_frame_count)
+{
+    primed();
+    flowFrame(0U, 3200U);
+    flowFrame(250U, 3200U);
+    flowFrame(300U, 0U);
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    CHECK_EQ(bC()[0], 0x00U);
+    CHECK_EQ(bC()[1], 0xA7U);          /* 167 */
+}
+
+/* A 0xFFFF frame is rejected whole AND voids the interval after it. Timeline:
+ *   t=0   Q 1600   first frame, nothing to integrate
+ *   t=100 Q 1600   +100 ms @ 1600
+ *   t=200 FFFF     rejected, lastFlowMs invalidated
+ *   t=300 Q 3200   NOT counted (its dt would span the hole)
+ *   t=400 Q 1600   +100 ms @ 1600
+ * -> 1600 exactly = 10.0 L/h = 100. If the interval after the FFFF were
+ * counted the answer would be 640000/300 = 2133 = 13.3 L/h, and if the 0xFFFF
+ * were read as a Q it would be hundreds of L/h. */
+TEST(flow_unavailable_frame_is_rejected_and_skips_the_next_interval)
+{
+    primed();
+    flowFrame(0U, 1600U);
+    flowFrame(100U, 1600U);
+    flowFrame(200U, 0xFFFFU);
+    flowFrame(300U, 3200U);
+    flowFrame(400U, 1600U);
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    CHECK_EQ(bC()[0], 0x00U);
+    CHECK_EQ(bC()[1], 0x64U);
+}
+
+/* A window holding only 0xFFFF frames has integrated nothing: 0xFFFF out. */
+TEST(flow_all_unavailable_frames_publish_unavailable)
+{
+    primed();
+    for (std::uint32_t t = 0U; t <= 1000U; t += 100U) { flowFrame(t, 0xFFFFU); }
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    CHECK_EQ(bC()[0], 0xFFU);
+    CHECK_EQ(bC()[1], 0xFFU);
+}
+
+/* A gap over 300 ms is not integrated. t=100 -> t=500 is 400 ms: the 16000
+ * frame that ends it is dropped (it would be 100 L/h), and only the 100 ms
+ * intervals around it count. */
+TEST(flow_gap_over_300ms_is_dropped)
+{
+    primed();
+    flowFrame(0U, 1600U);
+    flowFrame(100U, 1600U);
+    flowFrame(500U, 16000U);           /* 400 ms gap: stamp only */
+    flowFrame(600U, 1600U);            /* +100 ms @ 1600 */
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    CHECK_EQ(bC()[0], 0x00U);
+    CHECK_EQ(bC()[1], 0x64U);
+}
+
+/* ...and 300 ms exactly is still integrated (the rule is dt > 300). */
+TEST(flow_gap_of_exactly_300ms_is_kept)
+{
+    primed();
+    flowFrame(0U, 1600U);
+    flowFrame(300U, 3200U);            /* 300 ms @ 3200 = 20.0 L/h */
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    CHECK_EQ(bC()[0], 0x00U);
+    CHECK_EQ(bC()[1], 0xC8U);          /* 200 */
+}
+
+/* Integer rounding is half-up: Q 1960 = 122.5 -> 123, Q 1959 = 122.4375 -> 122. */
+TEST(flow_rounds_half_up)
+{
+    primed();
+    steadyFlow(1960U);
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    CHECK_EQ(bC()[1], 123U);
+
+    primed();
+    steadyFlow(1959U);
+    closeWindow(wire);
+    CHECK_EQ(bC()[1], 122U);
+}
+
+/* Largest representable reading. Q = 0xFFFE is 409.6 L/h = 4096 = 0x1000, so
+ * the 0xFFFE clamp is defensive only -- but the result must never be 0xFFFF,
+ * which is the sentinel. */
+TEST(flow_maximum_reading_is_not_confused_with_the_sentinel)
+{
+    primed();
+    steadyFlow(0xFFFEU);
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    const std::uint8_t want[7] = { 0xAAU, 0x55U, 0x02U, 0xBCU,
+                                   0x10U, 0x00U, 0xCDU };
+    CHECK_BYTES(wire, want, 7U);
+    CHECK(ram::app().customSignals.flowDeciLph != 0xFFFFU);
+}
+
+/* Each window stands alone: the sums reset on close, so a quiet second after
+ * a busy one is not contaminated. */
+TEST(flow_windows_do_not_leak_into_each_other)
+{
+    primed();
+    steadyFlow(1600U);
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    CHECK_EQ(bC()[1], 0x64U);
+
+    for (std::uint32_t t = 1100U; t <= 2000U; t += 100U) { flowFrame(t, 0U); }
+    clockAt(2000U);
+    logic::customPublish();
+    CHECK_EQ(bC()[0], 0x00U);
+    CHECK_EQ(bC()[1], 0x00U);          /* 0.0, and not 5.0 carried over */
+}
+
+/* 0xBC has NO validity bit (the 0xB0 mask is full): accepting flow frames must
+ * leave the mask alone, and 0x1A7 must not touch the tank level of 0xB8. */
+TEST(flow_has_no_validity_bit_and_leaves_fuel_level_alone)
+{
+    primed();
+    fuel(0U, 0x8BU);
+    decodeOnce();
+    logic::customPublish();
+    const std::uint8_t maskBefore = validMask();
+    const std::uint8_t litre0 = b8()[0];
+    const std::uint8_t litre1 = b8()[1];
+
+    steadyFlow(1968U);
+    std::uint8_t wire[8];
+    closeWindow(wire);
+    CHECK_EQ(validMask(), maskBefore);
+    CHECK_EQ(b8()[0], litre0);
+    CHECK_EQ(b8()[1], litre1);
+}
+
+/* Sixteen slots, the geometry intact, and 0xBC really leaves on the wire. */
+TEST(flow_block_is_sixteen_slots_and_0xBC_reaches_the_wire)
+{
+    CHECK_EQ(static_cast<unsigned>(cfg::kTxSlotCount), 16U);
+    CHECK_EQ(static_cast<unsigned>(svc::hu::kTxSlots), 16U);
+    CHECK_EQ(sizeof(ram::AppRam::uartSlotState), 16U);
+    CHECK_EQ(sizeof(ram::UartShadows::msgBC), 2U);
+    CHECK_EQ(sizeof(ram::CustomFrames::bC), 2U);
+
+    /* The fake USART records only what the TXE interrupt clocks out, and holds
+     * 256 bytes, so run the scheduler and the ISR together and scan after every
+     * frame rather than once at the end. */
+    fake::reset();
+    svc::hu::resetState();
+    logic::customPrimeFrames();
+    fake::returns().usartItStatus = 1;
+    fake::returns().usartRxByte   = 0x00U;
+
+    const std::uint8_t want[7] = { 0xAAU, 0x55U, 0x02U, 0xBCU, 0xFFU, 0xFFU, 0xBBU };
+    bool found = false;
+    for (int pass = 0; pass < 8 * 60 && !found; ++pass) {
+        svc::hu::service();
+        for (int k = 0; k < 24; ++k) { svc::hu::onInterrupt(); }
+        const std::uint8_t* tx = fake::usartTxBytes();
+        const std::size_t   n  = fake::usartTxCount();
+        for (std::size_t a = 0U; (a + 7U) <= n; ++a) {
+            bool m = true;
+            for (std::size_t b = 0U; b < 7U; ++b) { m = m && (tx[a + b] == want[b]); }
+            found = found || m;
+        }
+    }
+    CHECK(ram::app().uartTxSlotIdx <= svc::hu::kTxSlots);
+    CHECK(found);
 }

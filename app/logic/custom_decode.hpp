@@ -83,6 +83,16 @@ void customOdometer(const volatile std::uint8_t* d) noexcept;
 /* 0x1B4 b0 compass sector, b1 magnetic heading at 2 deg/count. */
 void customCompass(const volatile std::uint8_t* d) noexcept;
 
+/* 0x1A7 b0:b1 -- fuel-flow RATE (L/h = Q/160). Accumulates a time-weighted
+ * sum for the 1 s window; publishes nothing itself. One function, one signal:
+ * deliberately NOT folded into customFuel() (0x159, the tank LEVEL). */
+void customFuelFlow(const volatile std::uint8_t* d) noexcept;
+
+/* Close the 1000 ms fuel-flow window if it is due. Called every pass of the
+ * 8 ms publish task (from customPublish) rather than from the decoder, so a
+ * silent bus still turns into 0xFFFF one second later. */
+void customFuelFlowTick() noexcept;
+
 /* ---------------------------------------------------------------------------
  * TPMS -- the one exchange this box INITIATES. docs/TPMS-POLL-SPEC.md.
  *

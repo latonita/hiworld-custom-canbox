@@ -47,11 +47,15 @@ constexpr std::uint8_t kHeartbeatPasses = 125U;
  * outside the set of values the field can legitimately report as a surprise. */
 constexpr std::uint8_t kLoadParked = ram::kCustomLoadUnknown;
 
-/* Range to empty: no source. The box would need a consumption history it does
- * not keep -- 0x1A7 carries an instantaneous injection rate whose divisor is
- * still a candidate, and integrating a candidate into a distance is how a
- * dashboard ends up confidently wrong. 0xFFFF is outside any plausible range
- * and is rejected for free by a consumer that range-checks at all. */
+/* Range to empty: still parked. The box keeps no history (no trip, no
+ * persistent store), and range is litres-left over a CONSUMPTION average,
+ * which is exactly such a history. 0xBC now publishes the instantaneous flow
+ * (0x1A7, L/h = Q/160), so the raw ingredient is on the wire -- but its divisor
+ * is not yet verified at the pump, and folding a candidate divisor into a
+ * distance is how a dashboard ends up confidently wrong. The radio side owns
+ * the integration (litres = sum(flow x 1 s)) and so owns range. 0xFFFF is
+ * outside any plausible range and is rejected for free by a consumer that
+ * range-checks at all. */
 constexpr std::uint16_t kRangeNoSource = ram::kCustomUnknown16;
 
 void put16(volatile std::uint8_t* p, std::uint16_t v) noexcept
@@ -191,6 +195,13 @@ void customPublish() noexcept
      * boundary and why that disagreement must survive to the consumer. */
     f.bD[0] = c.compassSector;
     put16(&f.bD[1], c.headingDeg);
+
+    /* ---- 0xBC FLOW: deci-L/h, 0xFFFF = absent ---------------------------
+     * The window is closed first so this pass packs the value it produces. The
+     * decoder owns the arithmetic; this only moves two bytes. No validity bit
+     * backs this slot (the 0xB0 mask is full) -- the sentinel is all there is. */
+    customFuelFlowTick();
+    put16(&f.bC[0], c.flowDeciLph);
 
     /* ---- the 1 Hz heartbeat request -------------------------------------
      * 0xB0's payload may be identical for hours -- a validity mask that does

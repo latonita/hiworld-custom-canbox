@@ -21,10 +21,14 @@
 > and `0xBD` COMPASS, took the block from 12 slots to 14. §1–§9 all describe
 > the shipped image now; nothing in this document is outstanding.
 >
+> **§10 is BUILT too, 2026-10-24.** `0xBC` FLOW (fuel flow, 0.1 L/h) took the
+> block from 15 slots (with `0xB7` TYRE) to 16. It was never added to `0xB8`:
+> that command's contract is the tank *level* and it stays untouched.
+>
 > Scope decided 2026-10-21: **no contract changes.** `0xB3` keeps rpm even
 > though stock `0x32` also carries it; `0xB2` keeps all four bits even though
-> ACC and reverse are also in stock `0x72`. Fuel flow is **not** added to
-> `0xB8`. Engine load is **parked**. `0xB1` and `0xB6` are dropped as pure
+> ACC and reverse are also in stock `0x72`. Fuel flow was **not** added to
+> `0xB8`; it went into its own `0xBC` slot on 2026-10-24 (§10). Engine load is **parked**. `0xB1` and `0xB6` are dropped as pure
 > duplicates of stock `0xF0` and `0x12` — they add no signal, only slots.
 
 ---
@@ -82,7 +86,7 @@ work and is not your concern.
 **Do not implement `0xB1`.** The firmware version already goes to the head unit
 in stock Hiworld `0xF0`: a 17-byte periodic TX slot whose live buffer is
 `ram::g_versionString`, filled from `cfg::kVersionString` in `svc::hu::init()`
-(`H1N4JPF20L-211026` on this build). It is on the wire and in the `rxpduses`
+(`H1N4JPF20L-241026` on this build). It is on the wire and in the `rxpduses`
 mirror already. Reserved.
 
 ~~**Do not implement `0xB7`.** TPMS is not broadcast on this car's CAN-B; it
@@ -368,8 +372,9 @@ Also test, against the host unit tests in `tests/host/`:
 - Anything in `0xBA`–`0xBF`. Lighting, belts and the 4WD/wiper group all have
   confirmed sources, but no consumer yet.
   **Amended 2026-10-21:** odometer and compass now have one, are specified as
-  `0xBB` and `0xBD` in **§9**, and are **built**. The rest of the range stays
-  out of scope.
+  `0xBB` and `0xBD` in **§9**, and are **built**. **Amended 2026-10-24:** fuel
+  flow is `0xBC` in **§10** and is **built**. The rest of the range (`0xBA`,
+  `0xBE`, `0xBF`) stays out of scope.
 - Changing stock `0x72`, `0x12`, `0x32`, `0xA6`, `0x73` or `0xF0`. They work and
   they already carry doors, gear, rpm, reverse, ACC, illumination and steering.
 - Touching the `0x400`–`0x43F` handler. It looks like a steering-wheel-button
@@ -614,7 +619,8 @@ Also test, against the host unit tests in `tests/host/`:
 
 - `0xBA` LIGHTING, `0xBE` BODY2, `0xBF`. Confirmed sources, no consumer.
 - Trip distance, average speed, consumption. All need persistent state the box
-  does not keep.
+  does not keep. (Instantaneous fuel *flow* is not one of these: it is `0xBC`,
+  §10. Integrating it into litres or L/100 km stays out of scope here.)
 - True north. `1B4` b1 is **magnetic** heading and the variance correction is
   not on this bus. `1B4` b2 is constant `07` in 2 953/2 953 frames and is
   *likely* a variance-zone/status byte — only its constancy is established, so
@@ -622,3 +628,211 @@ Also test, against the host unit tests in `tests/host/`:
 - Yaw rate. A circular derivative of a 2°/count heading at 2 Hz is a coarse
   proxy at best; sustained turns run 18–26°/s with a genuine 192°/s peak, which
   a 500 ms sample cannot represent honestly. Do not publish one.
+
+---
+
+## 10. Addendum B — fuel flow (**BUILT** 2026-10-24)
+
+> **This section has been executed.** `0xBC` FLOW is in the image, the block is
+> **16 slots** (15 with `0xB7` TYRE, which landed after §9 was written, plus
+> this one), and the voice below describes what the firmware does. 16 tests in
+> `tests/host/test_custom_tx.cpp` section 10, every §10.6 vector among them.
+> Requirements FR-136…FR-141. Shipped as `H1N4JPF20L-241026`.
+>
+> It is the third deliberate use of the `0xBA`–`0xBF` range, and the first to
+> carry a **rate that needs the box's own clock** rather than a field copied or
+> scaled out of one frame.
+
+### 10.1 What is added
+
+| cmd | name | bytes | slots | source |
+|---|---|---|---|---|
+| `0xBC` | FLOW | 2 | 1 | `1A7` b0:b1, time-averaged over 1 s |
+
+`0xBC` was reserved for GEAR in `../canbus-to-canbox-signal-map.md` §9 and
+struck out because gear is already in stock `0x32`. The number is free, and it
+is used here because the alternative is a gap in the middle of a block whose
+numbering is otherwise allocation, not compaction. **`0xBA` LIGHTING, `0xBE`
+BODY2 and `0xBF` stay reserved; do not touch them.**
+
+### 10.2 `0xBC` FLOW — 2 bytes
+
+| off | field | source | arithmetic |
+|---|---|---|---|
+| 0:1 | fuel flow, u16 big-endian, **0.1 L/h** | `1A7` b0:b1 | **1 s time-weighted average**, `round(Σ(Q·dt) / Σ(dt) / 16)` |
+
+`1A7` is 6 bytes at ~100 ms while the engine runs (~400 ms at key-off).
+`Q = (b0<<8)|b1`, unsigned big-endian, and **it is already a rate**:
+`L/h = Q / 160`, so `deci-L/h = Q / 16`. Three rules, each of which is a way to
+get a plausible wrong number:
+
+- **Never multiply by rpm.** `Q` is not per-revolution.
+- **Never plain-sum samples.** The frame cadence changes with engine state, so a
+  frame count is a clock that is not constant. Integrate `Q·dt` on a real clock.
+- **`Q == 0` is a real reading.** Fuel cut on overrun injects nothing and must
+  be integrated as zero. Only `Q == 0xFFFF` means unavailable.
+
+Evidence for `/160`: idle ~0.76 L/h, rated power 40.0 vs 40.3 L/h, urban
+consumption, and a 1449.6 s drive replay that integrates to 10.43 L/100 km.
+**Not yet verified at the pump.** That is why the box publishes the rate and
+nothing derived from it (§10.7). The reference implementation of the same
+integration on another device is `jeep-carputer/core/Trip.h`.
+
+Resolution of 0.1 L/h doubles as the deadband, by the same reasoning as volts at
+0.1 V: the payload cannot change on sub-resolution noise, so it claims a TX slot
+only when a human-visible digit moves. Full scale is `0xFFFE` = 6553.4 L/h; the
+largest reading the divisor can produce is `Q = 0xFFFE` → `0x1000` = 409.6 L/h,
+so the clamp in §10.3 is defensive and cannot bind.
+
+### 10.3 The averaging window
+
+Fixed **1000 ms** on the box's own free-running millisecond counter
+(`ram::Scheduler::counter`, bumped by TIM2 at 1 kHz).
+
+On each accepted `1A7` frame (`customFuelFlow()`, from the RX dispatcher):
+
+```
+dt = now - lastFlowFrameMs                   (u32 subtraction, wrap-safe)
+if no previous frame, or dt > 300 ms:  integrate nothing, just lastFlowFrameMs = now
+else:                                  sumQdt += Q*dt ;  sumDt += dt
+Q == 0xFFFF:  reject the sample AND invalidate lastFlowFrameMs
+              (the interval after it is not counted either)
+```
+
+`Q` is the **new** frame's value applied backwards over the interval that ended
+at it. A gap over 300 ms (three missed frames) is a hole, and carrying a `Q`
+across a hole invents data. Exactly 300 ms is kept (`dt > 300` is the test).
+
+Every 1000 ms (`customFuelFlowTick()`, **from the 8 ms publish task**, not from
+the decoder — so a bus that has gone silent still turns into `0xFFFF` after a
+second instead of holding the last number for ever):
+
+```
+if sumDt > 0:  publish min( floor((sumQdt + 8*sumDt) / (16*sumDt)), 0xFFFE )
+else:          publish 0xFFFF
+sumQdt = sumDt = 0
+```
+
+`floor((S + 8T) / 16T)` is integer round-half-up of `S / T / 16`.
+
+**Overflow bound (u32 is enough).** `Q ≤ 0xFFFE` and each counted `dt ≤ 300 ms`.
+Intervals are attributed to the window in which their frame arrived, so one
+window holds at most ~1000 + 300 ms of `dt` plus the 8 ms task slop, call it
+1.3 s: `sumQdt ≤ 65 534 × 1 310 ≈ 8.6e7`, 50× inside `2^32`. Even with the main
+loop stalled the sums cannot grow without bound, because a counted `dt` is
+capped at 300 ms per frame and the ring holds 50 entries. `8·sumDt` in the
+rounding term adds ~10 000 — nothing.
+
+Zero state: both sums zero, `haveLast` clear, window start = the counter at
+priming. `customFuelFlow()` is **its own function**, one signal; it is
+deliberately not folded into `customFuel()` (`0x159`, the tank level).
+
+### 10.4 No validity bit — read this before you add a consumer
+
+The `0xB0` mask is full (§9.4). The growth path, a second mask byte, is a
+**length change to a shipped command** and out of scope. So `0xBC` has **no**
+validity bit and the **`0xFFFF` sentinel is the only "absent" signal**:
+
+- the consumer **must treat `0xFFFF` as absent** and never as 6553.5 L/h;
+- `0xFFFF` is published at boot (primed, §10.5 step 7), after any window in
+  which no interval could be integrated (bus silent, every frame `0xFFFF`,
+  every gap over 300 ms), and nothing else is;
+- the timing of the decay is therefore the consumer's check: after the engine
+  or the bus stops, `0xBC` reads `0xFFFF` within ~1 s plus up to one slot sweep
+  (768 ms).
+
+### 10.5 Wiring — the §9.5 checklist, for one more slot
+
+Reproduce every step; four of the nine fail silently.
+
+1. `cfg::kTxSlotCount` (`app_config.hpp`) — `kIsBenz ? 5U : 15U` becomes
+   `kIsBenz ? 5U : 16U`.
+2. `svc::hu::hiworld::kSlots` (`hu_dialect.hpp`) — 15 → 16. The `static_assert`
+   in `head_unit.cpp` couples the two.
+3. `ram::AppRam::uartSlotState` is sized from `cfg::kTxSlotCount`, so step 1
+   carries it. It is **immediately followed by `uartTxSlotIdx`** — a short array
+   makes the scheduler corrupt its own index every sweep while the tests keep
+   passing.
+4. New live buffer and shadow: `ram::CustomFrames::bC[2]` and
+   `ram::UartShadows::msgBC[2]`. **Append** the shadow after `msgBD`.
+5. One row in `hiworld::kTxTable` (`{ 0xBCU, 2U, &bufBC, &shadowBC }`, appended
+   **last**, index 15, so every earlier index stays put) with its accessor pair,
+   and the two row-geometry `static_assert`s at `[15]` — one against the shadow,
+   one against the buffer. `noReservedCommands()` and `txFramesFit()` are folds
+   over `kSlots` and need no edit.
+6. `CustomSignals` gains `flowDeciLph` (u16) and the window state `flowSumQdt`,
+   `flowSumDt`, `flowLastMs`, `flowWindowMs` (u32) and `flowHaveLast` (u8).
+   No new sentinel constant: `0xFFFF` is `kCustomUnknown16`.
+7. `customPrimeSignals()` primes `flowDeciLph = 0xFFFF`, zeroes the sums and
+   opens the window at the current counter. A zeroed field would claim
+   "0.0 L/h" — a real reading (overrun) the car never sent.
+8. `customFuelFlow()` and `customFuelFlowTick()` in `custom_decode.cpp`,
+   declared in `custom_decode.hpp`; `canid::kJeepFuelFlow = 0x1A7U` in
+   `can_decode.hpp` and a `case` beside `kJeepCompass` in the profile-0
+   dispatcher, behind `if constexpr (!cfg::kIsBenz)`. The CAN filter is
+   accept-all, and `0x1A7` is below `0x400`, so the no-op argument that makes
+   intercepting the other jeep-only ids safe applies unchanged.
+9. `logic::kCmdFlow = 0xBCU` in `custom_tx.hpp`; `customPublish()` calls
+   `customFuelFlowTick()` and packs `flowDeciLph` with `put16()`.
+
+**The Benz build is unaffected and sends nothing new** (`kIsBenz ? 5U : 16U`).
+
+**Budget after this change: 16 slots.** One frame per 48 ms gives 768 ms worst
+case per signal, and the idle keep-alive is `16 × 720 ms` = **11.52 s**, still
+inside Dashwheel's 15 s staleness check with four slots of headroom — 20 slots
+is 14.4 s and 21 crosses. `0xBC` changes about once a second at most (a 1 s
+average at 0.1 L/h resolution), so it is among the quietest slots and does not
+disturb the `0xB3`/`0xB4` alternation.
+
+### 10.6 Test vectors
+
+Computed from the §1 rule (`CKS = (L + CMD + Σpayload − 1) & 0xFF`) and each
+double-checked against the full byte sum including `AA 55`.
+
+| frame | meaning |
+|---|---|
+| `AA 55 02 BC 00 7B 38` | 12.3 L/h (`Q` = 1968 steady for 1 s → 123 deci-L/h) |
+| `AA 55 02 BC 00 00 BD` | **0.0 L/h — overrun fuel cut, a real reading, not a blank** |
+| `AA 55 02 BC FF FF BB` | unavailable (boot, silent second, only-rejected frames) |
+| `AA 55 02 BC 00 3C F9` | 6.0 L/h (600 ms at `Q`=1600 + 400 ms at `Q`=0) |
+| `AA 55 02 BC 10 00 CD` | 409.6 L/h, the largest value the divisor can produce |
+
+Worked check on the first: `0x02 + 0xBC + 0x00 + 0x7B − 1 = 0x138` → `0x38`;
+full sum `0xAA + 0x55 + 0x02 + 0xBC + 0x00 + 0x7B = 0x238` → `0x38`. ✓
+`1968 / 16 = 123.0`, and `1968 / 160 = 12.3`. Third: `0x02 + 0xBC + 0xFF + 0xFF −
+1 = 0x2BB` → `0xBB`. Fourth: `960 000 / 1000 / 16 = 60 = 0x3C`; `0x02 + 0xBC +
+0x3C − 1 = 0xF9`. Second: `0x02 + 0xBC − 1 = 0xBD`. Fifth: `0x02 + 0xBC + 0x10 − 1
+= 0xCD`.
+
+Also tested:
+
+- `Q = 0` frames are integrated as zero: the result is `00 00`, **not** `FF FF`.
+- a `0xFFFF` frame is rejected, and the interval after it is skipped:
+  `Q` 1600, 1600, `FFFF`, 3200, 1600 at 100 ms spacing → exactly 10.0 L/h (if
+  the 3200 interval were counted it would be 13.3).
+- a gap over 300 ms is dropped (a 400 ms hole with a `Q` = 16000 frame after it
+  does not move the result); a gap of exactly 300 ms is kept.
+- a window with no frames at all → `FF FF`, and a good window followed by a
+  silent one → `FF FF` again, not the old value.
+- time-weighting by interval length, not frame count (250 ms at 3200 + 50 ms at
+  0 → 167, not 80).
+- round half-up: `Q` 1960 → 123, `Q` 1959 → 122.
+- the sums reset on close: a quiet second after a busy one reads 0.0.
+- `0xFFFE` never collides with the sentinel (maximum reading → `10 00`).
+- accepting flow frames leaves the `0xB0` mask and `0xB8` untouched.
+- cold boot: `0xBC` is `FF FF` before the first window closes.
+- `kTxSlotCount` == 16 ⇒ `uartSlotState` is 16 long, `uartTxSlotIdx` is intact
+  after a sweep, and `AA 55 02 BC FF FF BB` appears in the clocked-out UART
+  stream.
+
+### 10.7 Still out of scope after this
+
+- **Trip litres, consumption (L/100 km) and range.** All need persistent state
+  or a history the box does not keep. They stay on the radio side as
+  `Σ(value × 1 s)` over `0xBC`, which is exactly why the window is a fixed
+  second: the consumer integrates a flow with a known step. `0xB8`'s range
+  field stays parked at `0xFFFF`.
+- A validity bit for `0xBC` (§10.4) — needs the second mask byte.
+- `0xBA` LIGHTING, `0xBE` BODY2, `0xBF`.
+- Verifying the `/160` divisor at the pump. Until then the rate is published and
+  nothing derived from it is trusted on this side.

@@ -494,6 +494,9 @@ void decodeProfileJeep() noexcept
         case canid::kJeepCompass:
             if constexpr (!cfg::kIsBenz) { customCompass(d); }
             break;
+        case canid::kJeepFuelFlow:
+            if constexpr (!cfg::kIsBenz) { customFuelFlow(d); }
+            break;
         case canid::kJeepIllum:      decodeIllumLevel(d[1]);  break; /* illum + %  */
         case canid::kJeepSwcButtons: decodeSwcButtons(d);     break; /* SWC keys   */
         case canid::kJeepVendorEcho:

@@ -34,9 +34,10 @@
  *   0xB9 KEY         --    NOT built: no verified source for SWC on this car
  *   0xBB ODOMETER    3 B   24-bit distance at 0.1 km/count
  *   0xBD COMPASS     3 B   8-way sector + magnetic heading
+ *   0xBC FLOW        2 B   fuel flow, u16 0.1 L/h, 1 s average, 0xFFFF = n/a
  *
- * The four that are not built stay RESERVED, and so do the GAPS at 0xBA, 0xBC
- * and 0xBE: ../canbus-to-canbox-signal-map.md section 9 has already allocated
+ * The four that are not built stay RESERVED, and so do the GAPS at 0xBA and
+ * 0xBE (0xBC, once reserved for GEAR and struck out, is now FLOW): ../canbus-to-canbox-signal-map.md section 9 has already allocated
  * them to LIGHTING, BODY2 and a spare. 0xBB and 0xBD are that allocation, not
  * free choices -- do not compact the numbering. Those three groups have
  * confirmed sources but no consumer yet, so they are not sent.
@@ -83,6 +84,7 @@ inline constexpr std::uint8_t kCmdTyre       = 0xB7U;
 inline constexpr std::uint8_t kCmdFuel       = 0xB8U;
 inline constexpr std::uint8_t kCmdOdometer   = 0xBBU;
 inline constexpr std::uint8_t kCmdCompass    = 0xBDU;
+inline constexpr std::uint8_t kCmdFlow       = 0xBCU;
 
 /* Put the signals and the payloads into their "no value" state. Called once
  * from the boot sequence, BEFORE the first transmit -- a zeroed payload is a

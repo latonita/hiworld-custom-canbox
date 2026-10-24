@@ -49,7 +49,7 @@ session, exactly one non-volatile region outside SRAM is readable:
   address. SRAM and the info page, read the same way in the same session, come
   back bit-identical - so it is the region, not the probe.
 - Info/option page 0x1FFFF800 (2K): READABLE and stable. Saved to
-  reference/infopage_1FFFF800_2k.bin
+  `reference/infopage_1FFFF800_2k.bin`
   (sha256 323adae2b1521fb65143077028315980354e7e430a5a4eb82958af24af6e5559).
   Option bytes: RDP=0xFF (valid complement 0x00) => read protection ON
   (unprotected would be 0xA5); user option byte at 0x1FFFF810 = 0x8F; rest FF.

@@ -53,7 +53,7 @@ become the `AA 55` UART frames documented in
 
 | Item | Value |
 |---|---|
-| Project file | `<ghidra_projects>/hiworld.gpr` |
+| Project file | `<ghidra_projects>/hiworld.gpr` (local, not in the repo) |
 | Program | `/2429-H1N4JPF20A-220524.app.bin` |
 | Ghidra | 12.1.3 PUBLIC, headless (`analyzeHeadless.bat`), Java 21 |
 | Loader | **Binary Loader** |

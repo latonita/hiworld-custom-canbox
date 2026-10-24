@@ -35,7 +35,7 @@ jobs:
           echo "iap=$iap" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ steps.img.outputs.version }}
           path: |

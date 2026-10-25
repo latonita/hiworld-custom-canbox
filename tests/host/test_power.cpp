@@ -22,6 +22,7 @@
 #include <initializer_list>
 
 #include "fake_hal.hpp"
+#include "param_store.hpp"
 #include "power.hpp"
 #include "ram_map.hpp"
 
@@ -210,4 +211,26 @@ TEST(power_shutdown_forces_a_reset_on_wake)
 
     CHECK_EQ(fake::countOf("wwdg_force_reset"), 1U);
     CHECK(posOf("pwr_enter_stop") < posOf("wwdg_force_reset"));
+}
+
+/* A pending parameter page is flushed before the box sleeps (FR-144): the wake
+ * is a reset that zeroes RAM, and the periodic save now waits ~5 s after the
+ * last amp change, so without this a late volume change would be lost. */
+TEST(power_shutdown_flushes_a_dirty_parameter_page_first)
+{
+    fake::reset();
+    ram::app().param[svc::params::kVolume] = 17U;     /* dirty vs the shadow */
+    svc::params::noteChange();                        /* window still open   */
+
+    svc::power::shutdownDeepSleep();
+
+    CHECK_EQ(fake::eraseCount(), 1U);
+    CHECK(posOf("flash_erase_page") < posOf("pwr_enter_stop"));
+}
+
+TEST(power_shutdown_with_a_clean_page_writes_no_flash)
+{
+    fake::reset();
+    svc::power::shutdownDeepSleep();
+    CHECK_EQ(fake::eraseCount(), 0U);
 }

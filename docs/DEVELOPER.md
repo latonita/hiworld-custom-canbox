@@ -49,10 +49,11 @@ so `tools/iap_upload.py` runs on the host.
 Version string shape: `H1N4` (BSP family) `JPF2` (car profile, same token as Android protocol id
 3009001) `0` (profile sub-revision) `L` (vendor image; stock is `A`) `-ddmmyy`. Only the date moves
 between our builds. Authoritative comment: `app/include/app_config.hpp` (Box identity). Current
-`kVersionString`: `H1N4JPF20L-241026` (jeep), `H1N4BNZ10L-171026` (benz).
+`kVersionString`: `H1N4JPF20L-251025` (jeep), `H1N4BNZ10L-171026` (benz).
 
 Build history on the wire: `-171026` stock six slots only, `-211026` adds the telemetry block,
-`-241026` adds `0xBC` fuel flow.
+`-241026` adds `0xBC` fuel flow, `-251025` reorders `0x3D0` for the WK amp, restores the
+saved volume at boot and saves settings only once they settle.
 
 ## Signal reference
 

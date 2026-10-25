@@ -325,12 +325,14 @@ inline constexpr std::uint32_t kUartTxDrainSpins = 50000U;
   * 0xB0-0xB8 telemetry block is wire-visible but it does not change the
   * profile, so the protocol identity stays put and the date tells the two
   * images apart: -171026 speaks the six stock slots only, -211026 adds the
-  * telemetry block, and -241026 adds 0xBC fuel flow. */
+  * telemetry block, -241026 adds 0xBC fuel flow, and -251025 reorders the
+  * 0x3D0 amplifier frame for the WK amp, restores the saved volume at boot
+  * and saves the parameter page only once changes settle. */
  //                                      "H1N4JPF20A-220524"
 #if defined(CANBOX_PROTOCOL_BENZ)
 inline constexpr char kVersionString[] = "H1N4BNZ10L-171026";
 #else
-inline constexpr char kVersionString[] = "H1N4JPF20L-241026";
+inline constexpr char kVersionString[] = "H1N4JPF20L-251025";
 #endif
 inline constexpr std::uint8_t kVersionLength = 17U;
 static_assert(sizeof(kVersionString) == kVersionLength + 1U,

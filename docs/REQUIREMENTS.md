@@ -174,7 +174,8 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | **FR-55** | The flags byte shall carry: bit 0 ACC, bit 1 illumination, bit 2 reverse, bit 3 spare, bit 4 raw ignition, bit 5 CAN-error latch, bit 6 autobaud-searching, bit 7 latched profile. | `app/include/ram_map.hpp:239-251` |
 | **FR-56** | On every superloop pass, if the change-source byte differs from its shadow, the shadow shall be updated and the change counter incremented — the counter the head unit watches. | `app/logic/main_loop.cpp:152-158` |
 | **FR-57** | The five stored tone bytes shall be aliased into the `0x12` window at payload bytes `[4..9]` as well as into the `0xA6` window, reproducing the documented "`0A 0A 0D 0A 0A` tail" quirk. `0x12` payload bytes `[0] [1] [3]` are never written. | `app/logic/periodic_tx.cpp:490-513`; `docs/hiworld-firmware-analysis.md` §4.4; test `prime_tx_templates_duplicates_the_tone_tail` |
-| **FR-58** | The reported amplifier level shall be primed to `0x1E` (30) on profile 1 and `0x14` (20) on profile 0. | `app/logic/periodic_tx.cpp:515-517`; test `prime_tx_templates_amp_level_follows_the_profile` |
+| **FR-58** | *(stock constant superseded by FR-143, §6.1 G)* Stock primed the reported amplifier level to `0x1E` (30) on profile 1 and `0x14` (20) on profile 0. Those constants are now the **upper cap** of the restored boot volume; see FR-143. | `app/logic/periodic_tx.cpp` `bootVolume()`; test `prime_tx_templates_amp_level_is_the_saved_volume_on_either_profile` |
+| **FR-143** | *(not stock — §6.1 G)* At boot the saved volume `param[0x10]` shall be restored instead of a constant, clamped to **[5 .. 20] on profile 0 and [5 .. 30] on profile 1**. It shall be primed into `kAmpLevel` (`0xA6` byte 0) and `kVolume` (`0x12` byte 0) together; `txFrameAmp[0]` shall follow from `kAmpLevel` at the ACC debounce re-prime in `dispatchGate()` (stock leaves it 0 until then, kept), so the car and the `0xA6` readback always agree. A virgin page (volume 0) boots at 5. The clamp shall touch the RAM copies only: `param[0x10]` is **not** written back. | `app/logic/periodic_tx.cpp` `bootVolume()`, `primeTxTemplates()`; `app/logic/can_decode.cpp` `dispatchGate()`; tests `boot_volume_in_range_is_restored_on_both_profiles`, `boot_volume_range_edges_are_kept`, `boot_volume_below_five_is_floored_to_five`, `boot_volume_above_the_cap_is_held_at_the_cap_per_profile`, `boot_volume_clamp_does_not_write_the_param_back`, `boot_volume_wire_and_0xa6_readback_agree_after_the_debounce_reprime` |
 
 ### 2.8 Periodic CAN transmission
 
@@ -190,6 +191,7 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | **FR-66** | A pending `0xD2` cluster-text block shall be consumed (flag cleared, translation run) only while the hold timer is non-zero; with ACC long gone it stays pending for ever. | `app/logic/periodic_tx.cpp:630-636`; test `periodic_tx_consumes_the_cluster_new_data_flag_and_runs_the_translation` |
 | **FR-67** | Cluster text shall translate the `0xD2` sub-class into the `0x190`/`0x18C`/`0x09F` buffers: class 0 → code 0x1D; classes 1..3 → code 1 with the numeric value whose **units digit comes from cluster byte 8**; classes 4..5 → code 0 with the units digit from **byte 7**; classes 6,7,0x0D,0x0E,0x15,0x16 → code 4 sub-code 3 (class 7 overwrites the sub-code with 8) and a three-digit value from bytes 1..3 parsed only if byte 1 is an ASCII digit; classes 0x0A/0x0C → codes 8/6; everything else accepted and ignored. On the numeric classes `txFrame9f[1]` is OR-ed with 0x20, on the text classes it is not. | `app/logic/periodic_tx.cpp:199-218`, `:268-349`; tests `cluster_text_class1_…`, `cluster_text_class4_takes_the_units_digit_from_byte_7_not_byte_8`, `cluster_text_class7_overwrites_the_sub_code_with_8` |
 | **FR-68** | A pending `0xAD` tone/volume command shall be clamped (selector 1 → ≤ 0x26; otherwise 0 → 1 and ≥ 0x14 → 0x13), written back into the command block, then applied to **three places at once** — the amplifier CAN frame, the vehicle-state byte and the parameter page — and the amplifier frame transmitted immediately rather than at the next lap. Selectors 0 and 7..255 write nothing but still trigger the transmit. | `app/logic/periodic_tx.cpp:415-454`, `:638-655`; tests `periodic_tx_volume_is_clamped_to_0x26`, `periodic_tx_tone_zero_is_pulled_up_to_one`, `periodic_tx_tone_command_lands_in_all_three_places_for_every_selector` |
+| **FR-142** | *(not stock — §6.1 F)* On profile 0 the amplifier frame `0x3D0` shall carry the factory-amp layout **VOL BASS MID TRE BAL FADE FF**: selector 1→b0, 2 (BAL)→b4, 3 (FAD)→b5, 4 (BASS)→b1, 5 (MID)→b2, 6 (TRE)→b3, and b6 primed `0xFF` at boot. The `0xA6`/`0x12` readback and the parameter page stay in selector order. Profile 1 (`0x3D9`) keeps the stock `sel − 1` order and leaves b6 alone. | `app/logic/periodic_tx.cpp` `kAmpWireP0`, `ampWireIndex()`; `docs/JEEP-WK-CAN-ID-byte-map.md` row `3D0`; tests `periodic_tx_profile0_bass_lands_in_byte_1_of_0x3d0`, `periodic_tx_profile1_keeps_the_stock_amp_byte_order`, `prime_tx_templates_profile0_reorders_the_amp_frame_only` |
 | **FR-69** | `txEnqueue()` shall drop the frame and OR `kCanErrTxRingFull` when the ring is full; bytes past DLC in a reused slot keep the previous occupant's content. | `app/services/can_bus.cpp:293-323`; tests `can_tx_enqueue_on_a_full_ring_drops_the_frame`, `can_tx_enqueue_copies_only_dlc_bytes` |
 | **FR-70** | `txDrain()` shall transmit at most 10 entries per 4 ms pass; on "no free mailbox" it shall **assign** (not OR) `kCanErrTxNoMailbox`, bump a stall counter that wraps to 0 at 100, leave the frame queued and return. | `app/services/can_bus.cpp:357-387`; tests `can_tx_drain_stops_after_ten_frames_per_pass`, `can_tx_drain_assigns_the_error_flag_rather_than_or_ing_it`, `can_tx_drain_stall_counter_wraps_at_one_hundred` |
 
@@ -238,6 +240,7 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | **FR-93** | A dirty save shall run: mask interrupts → kick → **HSI on for flash** → unlock → kick → erase page → kick → for each of 32 bytes { update shadow, program word, kick } → lock → unmask. The HSI step must precede the unlock. | `app/services/param_store.cpp:107-137`; tests `param_store_save_enables_hsi_before_unlocking`, `param_store_save_kicks_the_watchdog_around_every_step` |
 | **FR-94** | Save shall **ignore every status return** — no retry, no error latch, no early exit — and shall update the shadow regardless, so a failed burn is not retried until the live block changes again. | `app/services/param_store.cpp:100-106`, `:128-133`; tests `param_store_save_ignores_a_flash_error_status`, `param_store_save_ignores_a_refused_status_and_an_unready_hsi` |
 | **FR-95** | `setProfile()` shall store the byte verbatim with **no range check**, matching stock; the clamp lives only in validation. | `app/services/param_store.cpp:180-184`; test `param_store_set_profile_does_not_clamp_like_stock` |
+| **FR-144** | *(not stock — §6.1 H)* The 1024 ms task shall save the page only after **no `0xAD` has been applied for `kSettleTicks` = 6 ticks** (5.1 – 6.1 s, never under 5 s); every applied `0xAD` (volume or tone) restarts the window, so a continuous drag defers the save until it stops. The counter (`paramSettleTicks`) resets to 0 = settled, so a boot with a dirty page (virgin defaults) still saves on the first tick as stock. The autobaud profile-toggle `save()` and a **pre-sleep flush** in `shutdownDeepSleep()` shall ignore the window and save at once (the wake from stop mode is a reset that zeroes RAM). | `app/services/param_store.cpp` `noteChange()`, `saveSettled()`; `app/logic/periodic_tx.cpp` `applyPendingValue()`; `app/logic/main_loop.cpp`; `app/services/power.cpp`; tests `settle_save_does_not_save_while_amp_changes_keep_arriving`, `settle_save_happens_once_the_amp_has_been_quiet_long_enough`, `settle_save_window_restarts_on_every_change`, `settle_save_tone_changes_restart_the_window_too`, `settle_save_boot_defaults_are_saved_on_the_first_tick`, `settle_save_profile_toggle_save_is_still_immediate`, `power_shutdown_flushes_a_dirty_parameter_page_first` |
 
 ### 2.12 Hardwired status outputs
 
@@ -257,7 +260,7 @@ The box sits between a Jeep/Chrysler interior CAN bus and an Android head unit. 
 | **FR-102** | The five live handlers `TIM2_IRQHandler`, `CAN_RX0_IRQHandler`, `USART2_IRQHandler`, `EXTI2_IRQHandler`, `EXTI9_5_IRQHandler` shall be `extern "C"`, non-weak, and shall do nothing but acknowledge and delegate. | `app/logic/interrupts.cpp:49-97`; non-weakness checked against the linked ELF by `tools/check_stubs.py`; delegation covered by 12 tests in `tests/host/test_interrupts.cpp` |
 | **FR-103** | `EXTI2_IRQHandler` shall clear line 2 and call `fatalErrorReset(0x7A)`; `EXTI9_5_IRQHandler` shall clear line 8 and call `fatalErrorReset(0x85)`. Both codes are stock. | `app/logic/interrupts.cpp:76-95`; `app/services/power.hpp:69-70` |
 | **FR-104** | The deep-sleep path shall do **nothing at all** if the CAN controller does not acknowledge sleep; the caller keeps spinning and the still-clocked watchdog resolves it. | `app/services/power.cpp:45-51`; test `power_shutdown_does_nothing_at_all_when_can_refuses_to_sleep` |
-| **FR-105** | On a successful sleep acknowledgement the order shall be: transceiver to standby → status lines down → three ADC writes (inert; the ADC is never clocked) → USART2 off → WWDG clock gated → **PB8 armed as the EXTI wake source** → `WFI` with stop/standby configuration. | `app/services/power.cpp:45-69`; tests `power_shutdown_follows_the_stock_teardown_order`, `power_shutdown_arms_the_pb8_wake_source_before_sleeping` |
+| **FR-105** | Before any of that, a dirty parameter page shall be flushed (FR-144, not stock). On a successful sleep acknowledgement the order shall be: transceiver to standby → status lines down → three ADC writes (inert; the ADC is never clocked) → USART2 off → WWDG clock gated → **PB8 armed as the EXTI wake source** → `WFI` with stop/standby configuration. | `app/services/power.cpp:45-69`; tests `power_shutdown_follows_the_stock_teardown_order`, `power_shutdown_arms_the_pb8_wake_source_before_sleeping` |
 | **FR-106** | PB8 wake arming shall issue, in stock order: priority grouping `0x500` → NVIC EXTI9_5 (IRQ 23) preempt 0 → PB8 as EXTI falling-edge input → AFIO line source port B → EXTI line 8 interrupt enable. **This is the only wake source armed before the WFI.** | `app/services/board_io.cpp:176-185`; test `board_io_pb8_wake_issues_the_five_steps_in_stock_order` |
 | **FR-107** | After the WFI the code shall still attempt a forced watchdog reset even though the WWDG clock is gated and the write lands on a dead peripheral; the reset that actually happens comes from the EXTI9_5 handler. | `app/services/power.cpp:70-76`; test `power_shutdown_forces_a_reset_on_wake` |
 
@@ -577,6 +580,50 @@ mitigation and it is not optional.
 *What is still unproven:* the corner order. Three independent sources agree on LF/RF/RR/LR and
 a fourth swaps the rears; **no deflation test has been done**. It is named once in
 `ram::kTyrePos*` so one test fixes it in one line, and the head unit can re-map meanwhile.
+
+**F — the `0x3D0` amplifier byte order.** FR-142. Stock fills `0x3D0` in the radio app's
+selector order — VOL BAL FAD BASS MID TRE — and never writes byte 6, so it goes out as `00`.
+The WK's factory amplifier reads the layout the original RAR radio sent, **VOL BASS MID TRE BAL
+FADE FF** (`docs/JEEP-WK-CAN-ID-byte-map.md`, recorded with the RAR on the bus). On stock
+firmware only volume reaches the right control; every tone slider moves a different one.
+
+The fix reorders the CAN frame only, on profile 0 only. What the head unit reads back (`0xA6`,
+the `0x12` tail) and what the parameter page stores stay in selector order, because that is
+what the Hiworld app decodes; volume stays at byte 0, which `can_decode.cpp`'s
+bus-present re-prime of `txFrameAmp[0]` depends on (pinned by a `static_assert`). Profile 1's
+`0x3D9` layout is not known and keeps stock order.
+
+*What is still unproven:* that the amp acts on the reordered frame, and whether it also needs
+other RAR frames to accept it. Settle on the car with a CAN-B sniffer: move VOL, then BASS, and
+check the byte that changes and the sound.
+
+**G — the boot volume is restored.** FR-143. Stock saves the volume `0xAD` sets but never reads it
+back: it primes the amp level with a constant (30 on profile 1, 20 on profile 0), so every
+reboot forgot the volume and the head unit's `0xA6` readback said so. The saved volume is now
+restored and clamped to **[5 .. cap]**, the old constants being the cap (the car never boots
+louder than it always did) and 5 the floor (it never boots silent — a virgin page, volume 0,
+boots at 5). Only the RAM copies are clamped; the page keeps the user's value, because writing
+it back would cost a flash cycle every boot and lose a legitimate 38 that the other profile's
+cap would still honour. `kVolume` (`0x12`), `kAmpLevel` (`0xA6`) are primed together and
+`txFrameAmp[0]` follows at the ACC debounce, so wire and readback agree. Within a drive 0xAD
+still accepts the full 0..0x26; only the boot value is capped.
+
+*What is still unproven:* that 5 / the old caps are comfortable on the car at first start.
+
+**H — the page is saved after the amp settles.** FR-144. Stock calls `save()` on every 1024 ms
+tick, so dragging a slider on the radio erased and programmed the page about once a second, and
+`save()` masks IRQs for the whole erase/program, so head-unit UART bytes (and CAN frames past
+the 3-deep FIFO) were lost mid-drag. The periodic save now waits until no `0xAD` has been applied
+for 6 ticks (≥ 5 s). Costs: a change made in the last ~5 s before the box loses power is not on
+flash (a reboot or `0xFC` reflash in that window forgets it). The sleep path is covered
+instead: the box stops its tick when it enters stop mode and the wake is a reset, so
+`shutdownDeepSleep()` flushes a dirty page first. Nothing else changed: the autobaud toggle
+still saves at once, and the benz image shares all of this code unchanged. A forced watchdog
+reset (`fatal_error_reset`) does not flush — saving inside a fault path would risk the very
+reset loop it is trying to escape.
+
+*What is still unproven:* on the bench, that a slider drag no longer drops UART frames and
+that the page really is written about 5 s after the last step.
 
 ### 6.2 Reproduced stock defects (not to be fixed)
 

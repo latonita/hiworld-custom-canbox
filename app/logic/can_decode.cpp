@@ -585,6 +585,9 @@ void dispatchGate() noexcept
     } else if (r.busPresentDebounce == 0U) {
         r.txFrame18c[0] = static_cast<std::uint8_t>(
             r.txFrame18c[0] & static_cast<std::uint8_t>(~kNoIgnitionMarker));
+        /* ampLevel() is the saved volume restored (and clamped) by
+         * primeTxTemplates() -- FR-143 -- or whatever 0xAD set since, so this
+         * copy keeps the wire and the 0xA6 readback in agreement. */
         r.txFrameAmp[0] = r.vehicle.ampLevel();
     } else {
         r.busPresentDebounce = r.busPresentDebounce - 1U;

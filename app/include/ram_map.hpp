@@ -749,6 +749,10 @@ struct AppRam {
     /* ---- parameter page mirror ---------------------------- stock @0x11D0 */
     volatile std::uint8_t param[32];        /* live config bytes              */
     volatile std::uint8_t paramShadow[32];  /* last saved copy stock @0x1220 */
+    /* NOT a stock field (REQUIREMENTS FR-144): 1024 ms ticks the periodic save
+     * still has to wait out after the last 0xAD amp change. 0 = settled, save
+     * allowed -- which is also the .bss value, so a boot behaves as stock. */
+    volatile std::uint8_t paramSettleTicks;
 
     /* ---- the two CAN rings -------------------------------- stock @0x1284 */
     volatile std::uint8_t canRxRing[kCanRingBytes];

@@ -25,7 +25,7 @@
  * 1 ms TIM2 interrupt:
  *      4 ms     heartbeat edge detect, CAN TX drain, soft-timer scan
  *      8 ms     CAN decode + link state machine, head-unit service, status pins
- *      1024 ms  parameter page save, if dirty
+ *      1024 ms  parameter page save, if dirty AND no 0xAD for ~5 s (FR-144)
  *
  * ---- THE WATCHDOG --------------------------------------------------------
  * Kicked at the top of BOTH loops. It is armed with a ~65.5 ms timeout, so
@@ -197,7 +197,10 @@ void waitForBus() noexcept
         }
 
         if (svc::sched::takeSlow()) {            /* 1024 ms */
-            svc::params::save();                 /* 0x08002D46 */
+            /* Stock: svc::params::save() every tick. Now only once the amp
+             * has been quiet for ~5 s (FR-144); the profile-toggle save in
+             * waitForBus() and the pre-sleep flush stay immediate. */
+            svc::params::saveSettled();          /* 0x08002D46 */
         }
     }
 }

@@ -133,6 +133,32 @@ void load() noexcept;
  * the mask. */
 void save() noexcept;
 
+/* ---------------------------------------------------------------------------
+ * Save-after-settle -- NOT stock (REQUIREMENTS FR-144, §6.1 H).
+ *
+ * Stock calls save() on every 1024 ms tick, so dragging a slider on the radio
+ * (a 0xAD per step) erases and programs the page about once a second, each time
+ * with IRQs masked -- and head-unit UART bytes falling out of the window. The
+ * periodic save is therefore held back until the amp has been quiet for
+ * kSettleTicks ticks.
+ *
+ *   noteChange()  an amp value was just applied (0xAD): restart the quiet window.
+ *   saveSettled() the 1024 ms task: count the window down, then save() if it has
+ *                 run out. save() itself still does nothing on a clean page.
+ *
+ * kSettleTicks is 6, not 5: ticks are free-running, so a change lands anywhere
+ * in a tick period and the Nth tick after it is only (N-1)..N periods later.
+ * 6 ticks is 5.1 .. 6.1 s of quiet, i.e. never less than 5 s.
+ *
+ * Everything that must hit flash NOW calls save() directly and ignores the
+ * window: the autobaud profile toggle (main_loop) and the pre-sleep flush
+ * (power.cpp). A boot with a dirty page (virgin defaults) is not delayed
+ * either, because the counter starts at 0 = settled.
+ * ------------------------------------------------------------------------- */
+inline constexpr std::uint8_t kSettleTicks = 6U;
+void noteChange() noexcept;
+void saveSettled() noexcept;
+
 /* --- 0x08007b6c --- Validate the loaded block, apply defaults to a virgin or
  * corrupt page, then latch the result into ram::AppRam::profileActive.
  *

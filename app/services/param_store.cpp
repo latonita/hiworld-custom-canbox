@@ -136,6 +136,29 @@ void save() noexcept
     irqEnable();
 }
 
+/* Save-after-settle -- see param_store.hpp. Called from the main superloop and
+ * from the 0xAD apply, both on the same (non-interrupt) context, so the plain
+ * read-modify-write needs no lock. */
+void noteChange() noexcept
+{
+    ram::app().paramSettleTicks = kSettleTicks;
+}
+
+void saveSettled() noexcept
+{
+    ram::AppRam& r = ram::app();
+
+    if (r.paramSettleTicks != 0U) {
+        r.paramSettleTicks = static_cast<std::uint8_t>(r.paramSettleTicks - 1U);
+    }
+    /* Not an else: the tick that brings the window to 0 is the one that saves.
+     * A change arriving every few seconds keeps reloading the window and so
+     * defers the save indefinitely -- by design -- until the radio goes quiet. */
+    if (r.paramSettleTicks == 0U) {
+        save();                                  /* 0x08002D46 */
+    }
+}
+
 /* === 0x08007b6c (can_config_load_defaults) ===============================
  * Validate, default, then prime every RAM block derived from the page.
  *

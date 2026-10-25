@@ -6,7 +6,7 @@ head unit far more car data than the stock firmware does.
 
 | | |
 |---|---|
-| Version tag | `H1N4JPF20L-<ddmmyy>` (current build: `H1N4JPF20L-241026`) |
+| Version tag | `H1N4JPF20L-<ddmmyy>` (current build: `H1N4JPF20L-251025`) |
 | `L` | latonita (the author); the stock vendor image is `A` |
 | Stock firmware | `H1N4JPF20A-220524` |
 | Protocol | Hiworld JPF2, protocol id 3009001 (unchanged) |
@@ -100,10 +100,13 @@ Differences to know about:
 
 - Stock apps ignore the custom block, so with a stock radio app you get the same behaviour as before plus gear and RPM.
 - The tyre poll sends one small diagnostic request on the car's body bus every 30 s. The stock `0x500` to `0x516` CAN mirror is switched off in this build, because `0x500` is the tyre module's reply id.
+- The amplifier frame `0x3D0` now uses the byte order the WK's factory amp expects (VOL, BASS, MID, TRE, BAL, FADE, `FF`), the same order the original radio sent. Stock sends the radio app's slider order, so stock BAL/FAD/BASS/MID/TRE land on the wrong amp controls. The radio app still sees its values in its own order.
+- The saved amplifier volume is now restored at boot (held between 5 and 20, or 30 on the 125 kbit/s profile) instead of always starting at 20. A fresh box starts at 5.
+- Volume and tone settings are written to flash about 5 seconds after you stop moving the slider, not every second while you drag, so dragging no longer drops head-unit messages. A change made in the last 5 seconds before power is cut may be lost.
 
 ## Install
 
-1. Get `canupdateH1N4JPF20L-<date>.iap`. **No separator** between `canupdate` and the version: `canupdateH1N4JPF20L-241026.iap` is correct; do not add a dash after `canupdate`.
+1. Get `canupdateH1N4JPF20L-<date>.iap`. **No separator** between `canupdate` and the version: `canupdateH1N4JPF20L-251025.iap` is correct; do not add a dash after `canupdate`.
 2. Copy it to the head unit's **sdcard root** (the updater takes the first `.iap` it finds in a storage root or in `CanBus/box/`, so leave only one `.iap` there).
 3. On the head unit open the canbus settings (debug menu), choose the canbox update (Hiworld) and run it. Keep the unit powered and do not touch it until it reports success. The box resets into its bootloader, takes the file, then restarts.
 4. Check the version shown in the canbus settings: `H1N4JPF20L-<ddmmyy>`.

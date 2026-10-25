@@ -116,6 +116,74 @@ constexpr std::uint8_t kToneMin   = 0x01U;
 constexpr std::uint8_t kToneMax   = 0x13U;   /* 19 */
 constexpr std::uint8_t kToneLimit = 0x14U;   /* first value that clamps high  */
 
+/* ---------------------------------------------------------------------------
+ * The 0x3D0 byte order -- a deliberate divergence from stock (REQUIREMENTS
+ * §6.1 F, FR-142).
+ *
+ * Stock fills the amplifier frame in SELECTOR order -- VOL BAL FAD BASS MID
+ * TRE -- and never writes byte 6, so it goes out as 0. That is not what the
+ * WK's factory amplifier reads. The RAR radio this head unit replaced sends
+ * VOL BASS MID TRE BAL FADE FF (docs/JEEP-WK-CAN-ID-byte-map.md, row 3D0), so
+ * on stock firmware every tone slider lands on the wrong amp control.
+ *
+ * On profile 0 each selector is therefore routed to the byte the amp expects
+ * and byte 6 is primed 0xFF. Profile 1's 0x3D9 layout is unknown (not this
+ * car) and keeps the stock order. Only the CAN frame is reordered: the 0xA6 /
+ * 0x12 readback and the parameter page stay in selector order, because that
+ * is the order the Hiworld app decodes.
+ * ------------------------------------------------------------------------- */
+constexpr std::uint8_t kAmpWireP0[kSelLast] = {
+    0U,   /* sel 1 VOL  -> b0 */
+    4U,   /* sel 2 BAL  -> b4 */
+    5U,   /* sel 3 FAD  -> b5 */
+    1U,   /* sel 4 BASS -> b1 */
+    2U,   /* sel 5 MID  -> b2 */
+    3U,   /* sel 6 TRE  -> b3 */
+};
+constexpr std::size_t  kAmpByte6     = 6U;
+constexpr std::uint8_t kAmpByte6P0   = 0xFFU;
+/* can_decode.cpp re-primes txFrameAmp[0] from the amp level at the end of the
+ * bus-present debounce; that is only right while volume stays at byte 0. */
+static_assert(kAmpWireP0[0] == 0U, "volume must stay at byte 0 of 0x3D0");
+
+/* The txFrameAmp index selector `sel` (1..6) is sent in on `profile`. */
+std::size_t ampWireIndex(std::uint8_t profile, std::uint8_t sel) noexcept
+{
+    const std::size_t offset = static_cast<std::size_t>(sel - kSelVolume);
+    return (profile == cfg::kProfileJeep83k) ? static_cast<std::size_t>(kAmpWireP0[offset])
+                                             : offset;
+}
+
+/* ---------------------------------------------------------------------------
+ * The boot volume -- a deliberate divergence from stock (REQUIREMENTS §6.1 G,
+ * FR-143).
+ *
+ * Stock primes the amp level with a constant (30 on profile 1, 20 on profile 0)
+ * whatever volume 0xAD last saved, so every reboot forgot the volume and the
+ * head unit's 0xA6 readback said so. The saved param[kVolume] is now restored,
+ * held inside [kBootVolumeMin .. cap]: the old constants are the CAP (the level
+ * the car has always booted at, so never louder than stock), and 5 is the FLOOR
+ * so a virgin page (volume 0) or a stray low value never boots the amp silent.
+ *
+ * Only the RAM copies are clamped. param[kVolume] is NOT written back: that
+ * would dirty the page and cost a flash cycle every boot for nothing, and it
+ * would destroy the saved value -- a page holding 38 that boots at 20 on
+ * profile 0 would otherwise lose the 38 it would legitimately restore (as 30)
+ * if the profile ever toggled. The next 0xAD overwrites it with the user's value.
+ * ------------------------------------------------------------------------- */
+constexpr std::uint8_t kBootVolumeMin  = 5U;
+constexpr std::uint8_t kBootVolumeCapP0 = 0x14U;   /* 20: the stock constant */
+constexpr std::uint8_t kBootVolumeCapP1 = 0x1EU;   /* 30: the stock constant */
+
+std::uint8_t bootVolume(std::uint8_t profile, std::uint8_t saved) noexcept
+{
+    const std::uint8_t cap = (profile == 1U) ? kBootVolumeCapP1 : kBootVolumeCapP0;
+    if (saved < kBootVolumeMin) {
+        return kBootVolumeMin;
+    }
+    return (saved > cap) ? cap : saved;
+}
+
 /* The "new data" flag value the UART dispatcher sets and this unit consumes. */
 constexpr std::uint8_t kCmdPending = 1U;
 
@@ -431,14 +499,15 @@ void clampPendingValue() noexcept
 }
 
 /* --- part 4b: apply it ---------------------------------------------------
- * Selector 1..6 maps one-for-one onto three parallel arrays:
- *     txFrameAmp[sel - 1]              what the car is told
+ * Selector 1..6 maps onto three arrays:
+ *     txFrameAmp[ampWireIndex(sel)]    what the car is told
  *     vehicle[kAmpLevel + sel - 1]     what the head unit reads back
  *     param[kVolume + sel - 1]         what survives a power cycle
- * The stock image is a six-arm switch writing the three addresses literally;
- * the arithmetic form below generates the same stores. Selector 0 and 7..255
+ * The stock image is a six-arm switch writing the three addresses literally,
+ * with txFrameAmp[sel - 1] for the first; on profile 0 that index is now
+ * reordered to the amp's layout (see kAmpWireP0). Selector 0 and 7..255
  * write nothing at all -- and still trigger the transmit in the caller, which
- * is also stock. */
+ * is stock. */
 void applyPendingValue(std::uint8_t sel, std::uint8_t value) noexcept
 {
     if ((sel < kSelVolume) || (sel > kSelLast)) {
@@ -448,10 +517,15 @@ void applyPendingValue(std::uint8_t sel, std::uint8_t value) noexcept
     ram::AppRam&      r      = ram::app();
     const std::size_t offset = static_cast<std::size_t>(sel - kSelVolume);
 
-    r.txFrameAmp[offset] = value;
+    r.txFrameAmp[ampWireIndex(r.profileActive, sel)] = value;
     /* offset 0 is ram::VehicleState::kAmpLevel itself, i.e. setAmpLevel(). */
     r.vehicle.at(ram::VehicleState::kAmpLevel + offset) = value;
     r.param[svc::params::kVolume + offset] = value;
+
+    /* The page is now dirty: restart the quiet window the periodic save waits
+     * out (FR-144). Tone selectors count too -- a BASS slider is as chatty as
+     * the volume one. */
+    svc::params::noteChange();
 }
 
 }  // namespace
@@ -492,30 +566,47 @@ void primeTxTemplates() noexcept
      * The stock loop runs i = 1..5 over g_tx_frame_amp[i] and g_vstate_mid[i],
      * reading param[0x10 + i]; g_vstate_mid is the vehicle block + 0x17, so
      * g_vstate_mid[1..5] is VehicleState::kTone..kTone+4 and the source bytes
-     * are param[svc::params::kToneFirst..svc::params::kToneFirst+4] -- BAL FAD BASS MID TRE. */
+     * are param[svc::params::kToneFirst..svc::params::kToneFirst+4] -- BAL FAD BASS MID TRE.
+     * Stock writes g_tx_frame_amp[i]; the amp frame index now goes through
+     * ampWireIndex() (selector i + 1), which is the identity on profile 1. */
     for (std::size_t i = 1U; i <= svc::params::kToneCount; ++i) {
         const std::uint8_t v = live[svc::params::kVolume + i];
-        r.txFrameAmp[i] = v;
+        r.txFrameAmp[ampWireIndex(active, static_cast<std::uint8_t>(i + 1U))] = v;
         r.vehicle.at(ram::VehicleState::kTone + i - 1U) = v;
     }
-    /* g_vstate_mid[0] is VehicleState::kVolume @0x20001b60. */
-    r.vehicle.at(ram::VehicleState::kVolume) = live[svc::params::kVolume];
+    if (active == cfg::kProfileJeep83k) {
+        r.txFrameAmp[kAmpByte6] = kAmpByte6P0;
+    }
+    /* The volume lives in three RAM places and all three must agree, or the
+     * head unit sees one number in UART 0x12 and another in 0xA6:
+     *     kVolume     (g_vstate_mid[0], @0x20001b60)  UART 0x12 byte 0
+     *     kAmpLevel   (g_amp_level,     @0x20001b75)  UART 0xA6 byte 0
+     *     txFrameAmp[0]                               0x3D0/0x3D9 byte 0
+     * The first two are primed here from the clamped saved volume (see
+     * bootVolume()). txFrameAmp[0] is deliberately NOT primed here -- stock
+     * leaves the car's volume byte 0 until the ACC debounce in
+     * can_decode.cpp's dispatchGate() copies ampLevel() into it, and that copy
+     * now carries the restored value, so the wire and the readback agree
+     * from that moment on. */
+    const std::uint8_t volume = bootVolume(active, live[svc::params::kVolume]);
+    r.vehicle.at(ram::VehicleState::kVolume) = volume;
 
     /* The same five values are aliased a second time further into the block,
      * at g_vstate_mid[0x16..0x1A] = VehicleState::kAmpTone..+4 -- this is the
      * documented "0A 0A 0D 0A 0A tail" quirk visible in UART cmd 0x12. Stock
      * re-reads them out of g_tx_frame_amp rather than out of param, which is
      * the same bytes by the loop above; kept in that form so the data flow
-     * still matches the decompile. */
-    r.vehicle.at(ram::VehicleState::kAmpTone + 0U) = r.txFrameAmp[1];
-    r.vehicle.at(ram::VehicleState::kAmpTone + 1U) = r.txFrameAmp[2];
-    r.vehicle.at(ram::VehicleState::kAmpTone + 2U) = r.txFrameAmp[3];
-    r.vehicle.at(ram::VehicleState::kAmpTone + 3U) = r.txFrameAmp[4];
-    r.vehicle.at(ram::VehicleState::kAmpTone + 4U) = r.txFrameAmp[5];
+     * still matches the decompile -- through ampWireIndex(), so the head unit
+     * keeps getting them in selector order whatever order the car gets. */
+    for (std::size_t i = 0U; i < svc::params::kToneCount; ++i) {
+        r.vehicle.at(ram::VehicleState::kAmpTone + i) =
+            r.txFrameAmp[ampWireIndex(active, static_cast<std::uint8_t>(i + 2U))];
+    }
 
     /* g_vstate_mid[0x15] is g_amp_level @0x20001b75, byte 0 of the UART 0xA6
-     * window: 30 on profile 1, 20 on profile 0. */
-    r.vehicle.setAmpLevel(static_cast<std::uint8_t>((active == 1U) ? 0x1EU : 0x14U));
+     * window. Stock: constant 30 (profile 1) / 20 (profile 0). Now the clamped
+     * saved volume (FR-143), so those constants are the upper cap. */
+    r.vehicle.setAmpLevel(volume);
 
     /* --- periodic CAN TX frame templates, profile dependent --------------- */
     r.txFrameF0[0] = 0U;

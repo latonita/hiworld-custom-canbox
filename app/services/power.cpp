@@ -8,6 +8,7 @@
 #include "board_io.hpp"
 #include "can_bus.hpp"
 #include "head_unit.hpp"
+#include "param_store.hpp"
 #include "ram_map.hpp"
 
 extern "C" {
@@ -44,6 +45,14 @@ void disableWatchdogClock() noexcept
 
 void shutdownDeepSleep() noexcept
 {
+    /* Flush a pending parameter page BEFORE anything is powered down (FR-144).
+     * The periodic save now waits ~5 s after the last amp change, and the wake
+     * from this stop mode is a full reset that zeroes RAM, so a volume set in
+     * the last few seconds before the bus died would otherwise be lost. save()
+     * is a no-op on a clean page; IRQs are still enabled here. Done even if CAN
+     * then refuses to sleep -- the page is simply already clean. */
+    svc::params::save();
+
     /* If the controller will not go to sleep, do nothing at all. The caller
      * keeps spinning and the (still clocked) watchdog resolves it. */
     if (!svc::can::enterSleep()) {

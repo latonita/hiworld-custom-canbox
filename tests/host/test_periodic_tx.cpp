@@ -24,6 +24,7 @@
 #include <cstdint>
 
 #include "can_bus.hpp"
+#include "can_decode.hpp"
 #include "fake_hal.hpp"
 #include "param_store.hpp"
 #include "periodic_tx.hpp"
@@ -77,6 +78,14 @@ static_assert(kAccShadow == ram::VehicleState::kAccShadow,
 constexpr std::uint8_t kVolumeMax = 0x26U;
 constexpr std::uint8_t kToneMin   = 0x01U;
 constexpr std::uint8_t kToneMax   = 0x13U;
+
+/* NOT stock: the byte each selector 1..6 occupies in 0x3D0 on profile 0. The
+ * WK's factory amplifier reads VOL BASS MID TRE BAL FADE FF, the layout the
+ * original RAR radio sent (docs/JEEP-WK-CAN-ID-byte-map.md), so BAL/FAD/BASS/
+ * MID/TRE are moved off the stock selector order. Profile 1 is stock: sel - 1.
+ * REQUIREMENTS FR-142. */
+constexpr std::size_t  kAmpWireP0[6] = {0U, 4U, 5U, 1U, 2U, 3U};
+constexpr std::uint8_t kAmpByte6P0   = 0xFFU;
 
 /* g_status_block[0x2B + sel] and g_param_struct[0x0F + sel], sel = 1..6. */
 constexpr std::size_t kStatusAmpBase = 0x2CU;   /* 0x2B + 1 */
@@ -499,7 +508,7 @@ TEST(periodic_tx_tone_command_lands_in_all_three_places_for_every_selector)
         step();
 
         const std::size_t i = static_cast<std::size_t>(sel - 1U);
-        CHECK_EQ(R().txFrameAmp[i], value);
+        CHECK_EQ(R().txFrameAmp[kAmpWireP0[i]], value);
         CHECK_EQ(R().vehicle.at(kStatusAmpBase + i), value);
         CHECK_EQ(R().param[kParamAmpBase + i], value);
 
@@ -557,7 +566,7 @@ TEST(periodic_tx_tone_zero_is_pulled_up_to_one)
 
     step();
 
-    CHECK_EQ(R().txFrameAmp[2], kToneMin);
+    CHECK_EQ(R().txFrameAmp[kAmpWireP0[2]], kToneMin);   /* FAD -> b5 */
     CHECK_EQ(R().vehicle.at(kStatusAmpBase + 2U), kToneMin);
 }
 
@@ -573,8 +582,53 @@ TEST(periodic_tx_tone_at_or_above_0x14_is_pulled_down_to_0x13)
 
     step();
 
-    CHECK_EQ(R().txFrameAmp[3], kToneMax);
+    CHECK_EQ(R().txFrameAmp[kAmpWireP0[3]], kToneMax);   /* BASS -> b1 */
     CHECK_EQ(R().vehicle.at(kStatusAmpBase + 3U), kToneMax);
+}
+
+/* The full wire image after a BASS write on profile 0, so a reorder that
+ * also moved some other byte would show up. */
+TEST(periodic_tx_profile0_bass_lands_in_byte_1_of_0x3d0)
+{
+    fake::reset();
+    accOnSettled();
+    R().profileActive   = 0U;
+    R().periodicTxPhase = 0x40U;
+    fillBuffer(R().txFrameAmp, 7U, 0x50U);  /* 50 51 52 53 54 55 56 */
+
+    R().hostCmd.periodicTxCfg[0] = 4U;      /* BASS */
+    R().hostCmd.periodicTxCfg[1] = 0x0EU;
+    R().hostCmd.periodicNewData  = 1U;
+
+    step();
+
+    const std::uint8_t want[7] = {0x50U, 0x0EU, 0x52U, 0x53U,
+                                  0x54U, 0x55U, 0x56U};
+    for (std::size_t i = 0U; i < 7U; ++i) {
+        CHECK_EQ(R().txFrameAmp[i], want[i]);
+    }
+    /* the head unit still reads BASS at its selector slot */
+    CHECK_EQ(R().vehicle.at(kStatusAmpBase + 3U), 0x0EU);
+    CHECK_EQ(R().param[kParamAmpBase + 3U], 0x0EU);
+}
+
+/* Profile 1's 0x3D9 layout is unknown, so it keeps the stock sel - 1 order. */
+TEST(periodic_tx_profile1_keeps_the_stock_amp_byte_order)
+{
+    for (std::uint8_t sel = 1U; sel <= 6U; ++sel) {
+        fake::reset();
+        accOnSettled();
+        R().profileActive   = 1U;
+        R().periodicTxPhase = 0x40U;
+
+        R().hostCmd.periodicTxCfg[0] = sel;
+        R().hostCmd.periodicTxCfg[1] = 0x0AU;
+        R().hostCmd.periodicNewData  = 1U;
+
+        step();
+
+        CHECK_EQ(R().txFrameAmp[sel - 1U], 0x0AU);
+    }
 }
 
 TEST(periodic_tx_tone_command_uses_the_profile1_amp_id)
@@ -961,6 +1015,30 @@ TEST(prime_tx_templates_primes_volume_tone_and_amp_frame)
     CHECK_EQ(ram::app().txFrameAmp[6], 0);
 }
 
+/* Profile 0 (NOT stock, FR-142): the stored BAL FAD BASS MID TRE go out in the
+ * amp's order, byte 6 is 0xFF, and both head-unit windows keep selector order. */
+TEST(prime_tx_templates_profile0_reorders_the_amp_frame_only)
+{
+    fake::reset();
+    writeRealPage();
+    pageByte(kIdxProfile, 0U);
+    for (std::size_t i = 0U; i < 5U; ++i) {
+        pageByte(kParamAmpBase + 1U + i, static_cast<std::uint8_t>(0x0BU + i));
+    }
+    svc::params::load();
+
+    svc::params::validateDefaults();
+    logic::primeTxTemplates();
+
+    for (std::size_t i = 0U; i < 5U; ++i) {
+        const std::uint8_t v = static_cast<std::uint8_t>(0x0BU + i);
+        CHECK_EQ(ram::app().txFrameAmp[kAmpWireP0[i + 1U]], v);
+        CHECK_EQ(veh(kVehTone0 + i), v);
+        CHECK_EQ(veh(kVehAmpTone + i), v);
+    }
+    CHECK_EQ(ram::app().txFrameAmp[6], kAmpByte6P0);
+}
+
 /* The SAME five values are aliased a second time at g_vstate_mid[0x16..0x1A],
  * i.e. inside the UART 0xA6 window -- the documented "0A 0A 0D 0A 0A tail"
  * quirk. This is stock behaviour, not a transcription slip, and the head unit
@@ -982,8 +1060,10 @@ TEST(prime_tx_templates_duplicates_the_tone_tail)
 }
 
 /* g_vstate_mid[0x15] == g_amp_level @0x20001b75, byte 0 of the UART 0xA6
- * window: 30 (0x1E) on profile 1, 20 (0x14) on profile 0. */
-TEST(prime_tx_templates_amp_level_follows_the_profile)
+ * window. Stock primed it with a constant (30 on profile 1, 20 on profile 0);
+ * FR-143 restores the saved volume instead and keeps those constants as the cap.
+ * The real page's volume is 0x10, inside both caps, so it comes back as is. */
+TEST(prime_tx_templates_amp_level_is_the_saved_volume_on_either_profile)
 {
     fake::reset();
     writeRealPage();
@@ -991,8 +1071,8 @@ TEST(prime_tx_templates_amp_level_follows_the_profile)
     svc::params::load();
     svc::params::validateDefaults();
     logic::primeTxTemplates();
-    CHECK_EQ(veh(kVehAmpLvl), 0x1E);
-    CHECK_EQ(ram::app().vehicle.ampLevel(), 0x1E);
+    CHECK_EQ(veh(kVehAmpLvl), 0x10);
+    CHECK_EQ(ram::app().vehicle.ampLevel(), 0x10);
 
     fake::reset();
     writeRealPage();
@@ -1000,7 +1080,7 @@ TEST(prime_tx_templates_amp_level_follows_the_profile)
     svc::params::load();
     svc::params::validateDefaults();
     logic::primeTxTemplates();
-    CHECK_EQ(veh(kVehAmpLvl), 0x14);
+    CHECK_EQ(veh(kVehAmpLvl), 0x10);
 }
 
 /* The periodic-TX templates. 0x326 is the profile-dependent one: all zero on
@@ -1073,12 +1153,246 @@ TEST(prime_tx_templates_fans_out_the_default_tones)
     svc::params::validateDefaults();
     logic::primeTxTemplates();
 
-    CHECK_EQ(veh(kVehVolume), 0);
+    CHECK_EQ(veh(kVehVolume), 5);      /* volume 0 is floored to 5 (FR-143) */
     for (std::size_t i = 0U; i < 5U; ++i) {
         CHECK_EQ(ram::app().txFrameAmp[i + 1U], 10);
         CHECK_EQ(veh(kVehTone0 + i), 10);
         CHECK_EQ(veh(kVehAmpTone + i), 10);
     }
-    /* Default profile is 1, so the amp level is the profile-1 value. */
-    CHECK_EQ(veh(kVehAmpLvl), 0x1E);
+    /* Volume 0 is floored to 5 on every profile, so a brand-new box boots at 5,
+     * not silent and not at the old constant (FR-143). */
+    CHECK_EQ(veh(kVehAmpLvl), 5);
+}
+
+/* ===========================================================================
+ * Boot volume restore -- NOT stock (REQUIREMENTS FR-143, section 6.1 G).
+ *
+ * The saved volume is param[0x10]. Stock ignored it and primed the amp level
+ * with 30 / 20; now it is restored, clamped to [5 .. 20] on profile 0 and
+ * [5 .. 30] on profile 1.
+ * ========================================================================= */
+
+namespace {
+
+constexpr std::size_t  kParamVolume   = 0x10U;
+constexpr std::uint8_t kBootMin       = 5U;
+constexpr std::uint8_t kBootCapP0     = 20U;
+constexpr std::uint8_t kBootCapP1     = 30U;
+
+/* Cold boot of a box whose page holds `volume`, running on `profile`. */
+void bootWithVolume(std::uint8_t profile, std::uint8_t volume) noexcept
+{
+    fake::reset();
+    writeRealPage();
+    pageByte(kIdxProfile, profile);
+    pageByte(kParamVolume, volume);
+    svc::params::load();
+    svc::params::validateDefaults();
+    logic::primeTxTemplates();
+}
+
+/* Everything the head unit sees of the volume after boot. */
+void checkBootVolume(std::uint8_t want) noexcept
+{
+    CHECK_EQ(ram::app().vehicle.ampLevel(), want);   /* UART 0xA6 byte 0 */
+    CHECK_EQ(veh(kVehAmpLvl), want);
+    CHECK_EQ(veh(kVehVolume), want);                 /* UART 0x12 byte 0 */
+}
+
+/* The frame the amp gets once the ACC debounce has re-primed byte 0. */
+void runDebounceReprime() noexcept
+{
+    ram::app().vehicle.setFlag(ram::VehicleState::kFlagAccOn, true);
+    ram::app().busPresentDebounce = 0U;
+    logic::dispatchGate();
+}
+
+}  // namespace
+
+TEST(boot_volume_in_range_is_restored_on_both_profiles)
+{
+    bootWithVolume(0U, 12U);
+    checkBootVolume(12U);
+    bootWithVolume(1U, 27U);
+    checkBootVolume(27U);
+}
+
+TEST(boot_volume_range_edges_are_kept)
+{
+    bootWithVolume(0U, kBootMin);   checkBootVolume(kBootMin);
+    bootWithVolume(0U, kBootCapP0); checkBootVolume(kBootCapP0);
+    bootWithVolume(1U, kBootMin);   checkBootVolume(kBootMin);
+    bootWithVolume(1U, kBootCapP1); checkBootVolume(kBootCapP1);
+}
+
+TEST(boot_volume_below_five_is_floored_to_five)
+{
+    for (std::uint8_t profile = 0U; profile <= 1U; ++profile) {
+        bootWithVolume(profile, 0U);    /* a virgin page */
+        checkBootVolume(kBootMin);
+        bootWithVolume(profile, 3U);
+        checkBootVolume(kBootMin);
+        bootWithVolume(profile, 4U);
+        checkBootVolume(kBootMin);
+    }
+}
+
+TEST(boot_volume_above_the_cap_is_held_at_the_cap_per_profile)
+{
+    bootWithVolume(0U, 38U);
+    checkBootVolume(kBootCapP0);
+    bootWithVolume(0U, 21U);
+    checkBootVolume(kBootCapP0);
+    bootWithVolume(1U, 38U);
+    checkBootVolume(kBootCapP1);
+    bootWithVolume(1U, 31U);
+    checkBootVolume(kBootCapP1);
+}
+
+/* The clamp is applied to the RAM copies only: the page keeps the user's 38, so
+ * boot does not dirty it (no flash cycle) and nothing is lost. */
+TEST(boot_volume_clamp_does_not_write_the_param_back)
+{
+    bootWithVolume(0U, 38U);
+    CHECK_EQ(ram::app().param[kParamVolume], 38U);
+
+    svc::params::saveSettled();
+    CHECK_EQ(fake::eraseCount(), 0U);
+}
+
+/* After the 800-pass debounce the car is told exactly what the head unit reads
+ * back, including a clamped value -- the two must not disagree. */
+TEST(boot_volume_wire_and_0xa6_readback_agree_after_the_debounce_reprime)
+{
+    const std::uint8_t cases[][2] = {{0U, 38U}, {0U, 0U}, {0U, 12U},
+                                     {1U, 38U}, {1U, 3U},  {1U, 27U}};
+    for (const auto& c : cases) {
+        bootWithVolume(c[0], c[1]);
+        /* stock leaves the car's volume byte unprimed until ACC settles */
+        CHECK_EQ(ram::app().txFrameAmp[0], 0U);
+
+        runDebounceReprime();
+
+        CHECK_EQ(ram::app().txFrameAmp[0], ram::app().vehicle.ampLevel());
+        CHECK_EQ(ram::app().txFrameAmp[0], veh(kVehAmpLvl));
+        CHECK(ram::app().txFrameAmp[0] >= kBootMin);
+        CHECK(ram::app().txFrameAmp[0] <= (c[0] == 1U ? kBootCapP1 : kBootCapP0));
+    }
+}
+
+/* ===========================================================================
+ * Save after the amp settles -- NOT stock (REQUIREMENTS FR-144, section 6.1 H).
+ *
+ * svc::params::saveSettled() is the 1024 ms task; applying a 0xAD restarts its
+ * quiet window of svc::params::kSettleTicks ticks (6 = 5.1..6.1 s).
+ * ========================================================================= */
+
+namespace {
+
+/* One 0xAD volume step, applied through the real scheduler path. */
+void ampStep(std::uint8_t value) noexcept
+{
+    R().periodicTxPhase = 0x40U;
+    R().hostCmd.periodicTxCfg[0] = 1U;
+    R().hostCmd.periodicTxCfg[1] = value;
+    R().hostCmd.periodicNewData  = 1U;
+    step();
+}
+
+}  // namespace
+
+TEST(settle_save_does_not_save_while_amp_changes_keep_arriving)
+{
+    fake::reset();
+    accOnSettled();
+
+    /* A slider drag: a new value every 1.5 ticks, 40 steps (~60 ticks). */
+    for (std::uint8_t i = 0U; i < 40U; ++i) {
+        ampStep(static_cast<std::uint8_t>(5U + (i % 20U)));
+        svc::params::saveSettled();
+        if ((i & 1U) != 0U) {
+            svc::params::saveSettled();
+        }
+    }
+    CHECK_EQ(fake::eraseCount(), 0U);
+}
+
+TEST(settle_save_happens_once_the_amp_has_been_quiet_long_enough)
+{
+    fake::reset();
+    accOnSettled();
+    ampStep(0x11U);
+
+    /* Never before the window is over... */
+    for (std::uint8_t i = 1U; i < svc::params::kSettleTicks; ++i) {
+        svc::params::saveSettled();
+        CHECK_EQ(fake::eraseCount(), 0U);
+    }
+    /* ...and on the tick that completes it. */
+    svc::params::saveSettled();
+    CHECK_EQ(fake::eraseCount(), 1U);
+    /* 6 ticks of 1.024 s: at least 5 s of quiet whatever the tick phase. */
+    CHECK(svc::params::kSettleTicks >= 6U);
+
+    /* The page is clean again: later ticks do nothing. */
+    svc::params::saveSettled();
+    svc::params::saveSettled();
+    CHECK_EQ(fake::eraseCount(), 1U);
+}
+
+/* A change that lands mid-window restarts it. */
+TEST(settle_save_window_restarts_on_every_change)
+{
+    fake::reset();
+    accOnSettled();
+    ampStep(0x11U);
+    for (std::uint8_t i = 0U; i < svc::params::kSettleTicks - 1U; ++i) {
+        svc::params::saveSettled();
+    }
+    ampStep(0x12U);                       /* one tick short of saving */
+    for (std::uint8_t i = 0U; i < svc::params::kSettleTicks - 1U; ++i) {
+        svc::params::saveSettled();
+    }
+    CHECK_EQ(fake::eraseCount(), 0U);
+    svc::params::saveSettled();
+    CHECK_EQ(fake::eraseCount(), 1U);
+}
+
+/* A tone selector counts as an amp change as well. */
+TEST(settle_save_tone_changes_restart_the_window_too)
+{
+    fake::reset();
+    accOnSettled();
+    R().periodicTxPhase = 0x40U;
+    R().hostCmd.periodicTxCfg[0] = 4U;    /* BASS */
+    R().hostCmd.periodicTxCfg[1] = 0x0EU;
+    R().hostCmd.periodicNewData  = 1U;
+    step();
+    CHECK_EQ(R().paramSettleTicks, svc::params::kSettleTicks);
+}
+
+/* A boot with a dirty page (virgin defaults) is not delayed: the window starts
+ * at 0, so the first 1024 ms tick saves as stock does. */
+TEST(settle_save_boot_defaults_are_saved_on_the_first_tick)
+{
+    fake::reset();
+    svc::params::load();                  /* erased -> defaults apply */
+    svc::params::validateDefaults();
+    svc::params::saveSettled();
+    CHECK_EQ(fake::eraseCount(), 1U);
+}
+
+/* The autobaud profile toggle calls save() directly (main_loop phase 1), and
+ * save() ignores the settle window. */
+TEST(settle_save_profile_toggle_save_is_still_immediate)
+{
+    fake::reset();
+    writeRealPage();
+    svc::params::load();
+    svc::params::noteChange();            /* window wide open */
+
+    svc::params::setProfile(0U);
+    svc::params::save();
+
+    CHECK_EQ(fake::eraseCount(), 1U);
 }

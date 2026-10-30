@@ -526,6 +526,38 @@ TEST(head_unit_keepalive_waits_fifteen_idle_sweeps)
     CHECK_EQ(ram::app().uartAuxSlotIdx, 2U);             /* aux index advanced */
 }
 
+/* BUSY-LINK REFRESH. Fast slots (0x72, 0x12, 0x32) change on every cycle, so
+ * the idle keep-alive never runs; every other slot must still be resent within
+ * 16 slots x (kBusyRefreshGap + 2) passes = 48 cycles of 48 ms (~2.3 s). */
+TEST(head_unit_busy_link_still_resends_unchanged_slots)
+{
+    fake::reset();
+    svc::hu::resetState();
+
+    bool seen[256] = {};
+    unsigned fast = 0U;
+    const unsigned bound = 16U * (svc::hu::kBusyRefreshGap + 2U) + 2U;
+
+    for (unsigned cyc = 0U; cyc < 20U + bound; ++cyc) {
+        ram::app().vehicle.at(ram::VehicleState::kWin72Off) = static_cast<std::uint8_t>(cyc + 1U);
+        ram::app().vehicle.at(ram::VehicleState::kWin12Off) = static_cast<std::uint8_t>(cyc + 1U);
+        ram::app().vehicle.at(ram::VehicleState::kWin32Off) = static_cast<std::uint8_t>(cyc + 1U);
+        ram::app().uartFrame[svc::hu::kFbTxBusy] = 0U;
+        const std::size_t before = fake::countOf("usart_tx_start");
+        serviceOneTxCycle();
+        if (fake::countOf("usart_tx_start") != before && cyc >= 20U) {
+            const std::uint8_t cmd = fbByte(3);
+            seen[cmd] = true;
+            if (cmd == 0x72U || cmd == 0x12U || cmd == 0x32U) { ++fast; }
+        }
+    }
+    CHECK(seen[0xF0]);     /* never changes after the first sweep */
+    CHECK(seen[0x73]);
+    CHECK(seen[0xA6]);
+    CHECK(seen[0xBC]);     /* last slot in the table */
+    CHECK(fast * 2U > bound);   /* fast slots still get over half the passes */
+}
+
 /* Nothing at all happens while a frame is still in flight. */
 TEST(head_unit_scheduler_waits_while_tx_busy)
 {

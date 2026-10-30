@@ -86,7 +86,7 @@ work and is not your concern.
 **Do not implement `0xB1`.** The firmware version already goes to the head unit
 in stock Hiworld `0xF0`: a 17-byte periodic TX slot whose live buffer is
 `ram::g_versionString`, filled from `cfg::kVersionString` in `svc::hu::init()`
-(`H1N4JPF20L-251025` on this build). It is on the wire and in the `rxpduses`
+(`H1N4JPF20L-301026` on this build). It is on the wire and in the `rxpduses`
 mirror already. Reserved.
 
 ~~**Do not implement `0xB7`.** TPMS is not broadcast on this car's CAN-B; it
@@ -274,6 +274,20 @@ The 300/500 hysteresis band sits between crank-max 410 and idle-min 577.
 ---
 
 ## 6. Wiring it into the TX scheduler
+
+> **Resend guarantee (every slot, stock and custom).** The scheduler is
+> change-driven, and the stock idle keep-alive (~720 ms of silence) never runs
+> while B0/B3/B4/B7 keep changing, so slow slots (`0xB2`, `0xB5`, `0xBB`, ...)
+> used to be sent once at boot and never again. Now, while frames are going out,
+> the countdown `uartIdleDelay` is capped at `kBusyRefreshGap` (1) and a refresh
+> of the next table entry (changed or not) is inserted every third pass (144 ms).
+> The aux index walks all 16 slots, so every slot is resent at least every
+> ~2.3 s, and fast slots still get two passes in three. On an idle link the
+> behaviour is the stock 720 ms keep-alive.
+
+> **`0xB7` per-tyre no signal.** A tyre whose polled psi is `<= 5` or `0xFF`
+> (no sensor; LF on this car reads 5) is published as `0xFFFF` kPa with flags
+> bit 2 set, for that position only. See `TPMS-POLL-SPEC.md`.
 
 > **AS BUILT, 2026-10-21 — one correction to this section.** The scheduler DID
 > need a change, for `0xB0` only. `kSlotRequest` was **unreachable** as written:

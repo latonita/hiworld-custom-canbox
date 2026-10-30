@@ -1604,14 +1604,46 @@ TEST(tpms_pressure_converts_psi_to_kilopascal_rounded)
     primed();
     armPoll();
     pollPass();
-    tpmsReply(33U, 1U, 0U, 255U);
+    tpmsReply(33U, 6U, 34U, 254U);
     decodeOnce();
 
     const ram::CustomSignals& c = ram::app().customSignals;
     CHECK_EQ(c.tyreKpa[0], 228U);     /* 227.49 -> 228, not 227 */
-    CHECK_EQ(c.tyreKpa[1], 7U);       /* 6.89   -> 7            */
-    CHECK_EQ(c.tyreKpa[2], 0U);
-    CHECK_EQ(c.tyreKpa[3], 1758U);    /* full scale still fits u16 */
+    CHECK_EQ(c.tyreKpa[1], 41U);      /* 6 psi, just above the absent floor */
+    CHECK_EQ(c.tyreKpa[2], 234U);
+    CHECK_EQ(c.tyreKpa[3], 1751U);    /* near full scale still fits u16 */
+}
+
+/* A corner with no sensor reads 5 psi (or 0 / 0xFF): that tyre alone is "no
+ * signal" -- pressure 0xFFFF and flag bit2 on the wire; the rest are normal. */
+TEST(tpms_absent_sensor_is_no_signal_for_that_tyre_only)
+{
+    static const std::uint8_t absent[3] = { 5U, 0U, 0xFFU };
+
+    for (std::uint8_t k = 0U; k < 3U; ++k) {
+        primed();
+        armPoll();
+        pollPass();
+        tpmsReply(absent[k], 0x20U, 0x21U, 0x1EU);
+        decodeOnce();
+
+        const ram::CustomSignals& c = ram::app().customSignals;
+        CHECK_EQ(c.tyreKpa[ram::kTyrePosLeftFront],  0xFFFFU);
+        CHECK_EQ(c.tyreKpa[ram::kTyrePosRightFront], 221U);
+        CHECK_EQ(c.tyreKpa[ram::kTyrePosRightRear],  228U);
+        CHECK_EQ(c.tyreKpa[ram::kTyrePosLeftRear],   207U);
+        CHECK_EQ(validMask() & ram::kValidB7, ram::kValidB7);
+
+        ram::app().customSignals.tpmsPosition = ram::kTyrePosLeftFront;
+        logic::customPublish();
+        CHECK_EQ(b7()[1], 0xFFU);
+        CHECK_EQ(b7()[2], 0xFFU);
+        CHECK_EQ(b7()[4], ram::kTyreFlagNoSignal);
+
+        ram::app().customSignals.tpmsPosition = ram::kTyrePosRightFront;
+        logic::customPublish();
+        CHECK_EQ(b7()[4], 0U);
+    }
 }
 
 /* ===========================================================================

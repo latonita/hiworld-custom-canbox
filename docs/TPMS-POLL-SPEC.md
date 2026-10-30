@@ -198,6 +198,13 @@ the reserved code now exists.
 in identifiers this spec does not read. Send `0x00` while a reading is live, and
 set **bit 2 (no signal)** on every position once the data has gone stale.
 
+**A wheel with no sensor.** The WCM does not fail the poll for a corner that has
+no TPMS sensor; it answers with a placeholder (seen on this car: **LF = 5 psi**,
+i.e. 34 kPa, which looks like a real, very flat tyre). Per tyre, a reply byte of
+**`<= 5` psi (`kTyreAbsentPsi`), or `0xFF`**, therefore means "no sensor": that
+tyre publishes pressure `0xFFFF` and flags **bit 2 (no signal)**, while the other
+tyres are unaffected. `0xB0` bit 4 still tracks the poll as a whole.
+
 ### Rotation — one slot, not five
 
 Five positions must **not** become five TX slots: slot count is what sets every

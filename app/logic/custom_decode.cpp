@@ -187,8 +187,17 @@ constexpr std::uint32_t kKpaNum   = 68948U;
 constexpr std::uint32_t kKpaDen   = 10000U;
 constexpr std::uint32_t kKpaRound = kKpaDen / 2U;
 
+/* A corner with no TPMS sensor is answered with a placeholder, not an error:
+ * the WCM reports 5 psi (also seen: 0 and 0xFF). At or below this floor the
+ * tyre is "absent" -- published as unknown kPa so 0xB7 flags it no-signal. */
+constexpr std::uint8_t kTyreAbsentPsi = 5U;
+constexpr std::uint8_t kTyreInvalidPsi = 0xFFU;
+
 std::uint16_t psiToKpa(std::uint8_t psi) noexcept
 {
+    if ((psi <= kTyreAbsentPsi) || (psi == kTyreInvalidPsi)) {
+        return ram::kCustomUnknown16;
+    }
     return static_cast<std::uint16_t>(
         ((static_cast<std::uint32_t>(psi) * kKpaNum) + kKpaRound) / kKpaDen);
 }

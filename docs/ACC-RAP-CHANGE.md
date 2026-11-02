@@ -1,6 +1,6 @@
 # ACC output → follow Chrysler RAP (change spec)
 
-Status: **implemented**. Behaviour: [ACC-OUTPUT.md](ACC-OUTPUT.md).
+Status: **implemented, verified in the car 2026-11-02** (build `H1N4JPF20L-021126`). Behaviour: [ACC-OUTPUT.md](ACC-OUTPUT.md).
 
 Deviations from the spec as written:
 - Compile switch `cfg::kAccFollowsRap` (default true, `app/include/app_config.hpp`); false restores the stock
@@ -14,7 +14,7 @@ Deviations from the spec as written:
 - `0x7FF` override: accepted as overwritten by the next recompute.
 - Tests added beyond the 9 listed: `acc_ignition_goes_stale_too`, `rap_frame_shorter_than_two_bytes_is_ignored`.
   Existing tests that set the flag by hand and run `dispatchGate()` now also seed `accIgnOn` (helpers
-  `forceAcc` / `setAcc` / `runDebounceReprime`). Not yet verified in the car (see plan below).
+  `forceAcc` / `setAcc` / `runDebounceReprime`). Verified in the car on 2026-11-02 (plan below).
 
 ## Goal
 ACC 12 V (PB5) behaves like the factory radio's power:

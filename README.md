@@ -22,7 +22,7 @@ bus (83.333 kbit/s), written `ID bN` (CAN id, data byte). Full byte-level detail
 
 | Signal | Unit / resolution | CAN source | Command |
 |---|---|---|---|
-| ACC on | flag | `000` b0 | `0x72` |
+| ACC on | flag | `000` b0, `006` b1 (RAP) | `0x72` |
 | Illumination on, dash level | flag; 0–100 % | `210` b1 | `0x72` |
 | Reverse | flag | `003` b2 | `0x72` |
 | Steering-wheel key | key code | `3A0` b0:b1 | `0x72` |
@@ -72,7 +72,8 @@ temperature (always "n/a"). `0xBC` has no validity bit; `FFFF` means "no data".
 
 | Feature | Stock JPF20A | JPF20L |
 |---|---|---|
-| ACC, illumination, reverse | ✓ | ✓ unchanged |
+| ACC | ✓ follows key only | ✓ also held after key-off (Retained Accessory Power) |
+| Illumination, reverse | ✓ | ✓ unchanged |
 | Reverse / illumination hardwired lines to the radio | ✓ | ✓ unchanged |
 | Steering angle | ✓ | ✓ unchanged |
 | Doors | ✓ | ✓ unchanged |
@@ -100,6 +101,7 @@ Differences to know about:
 
 - Stock apps ignore the custom block, so with a stock radio app you get the same behaviour as before plus gear and RPM.
 - The tyre poll sends one small diagnostic request on the car's body bus every 30 s. The stock `0x500` to `0x516` CAN mirror is switched off in this build, because `0x500` is the tyre module's reply id.
+- ACC (the radio's power-on line, PB5) now follows the car's Retained Accessory Power like the factory radio: it stays on through cranking and after key-off, and goes off when a door opens or 10 minutes after key-off. A bus that wakes up alone (no key) no longer switches it on. Stock follows the key position only, so the radio switched off at key-off.
 - The amplifier frame `0x3D0` now uses the byte order the WK's factory amp expects (VOL, BASS, MID, TRE, BAL, FADE, `FF`), the same order the original radio sent. Stock sends the radio app's slider order, so stock BAL/FAD/BASS/MID/TRE land on the wrong amp controls. The radio app still sees its values in its own order.
 - The saved amplifier volume is now restored at boot (held between 5 and 20, or 30 on the 125 kbit/s profile) instead of always starting at 20. A fresh box starts at 5.
 - Volume and tone settings are written to flash about 5 seconds after you stop moving the slider, not every second while you drag, so dragging no longer drops head-unit messages. A change made in the last 5 seconds before power is cut may be lost.

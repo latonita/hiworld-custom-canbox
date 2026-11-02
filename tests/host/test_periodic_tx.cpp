@@ -1202,6 +1202,8 @@ void checkBootVolume(std::uint8_t want) noexcept
 /* The frame the amp gets once the ACC debounce has re-primed byte 0. */
 void runDebounceReprime() noexcept
 {
+    ram::app().accIgnOn     = 1U;   /* the source dispatchGate() recomputes from */
+    ram::app().accIgnSeenMs = ram::app().sched.counter;
     ram::app().vehicle.setFlag(ram::VehicleState::kFlagAccOn, true);
     ram::app().busPresentDebounce = 0U;
     logic::dispatchGate();

@@ -71,6 +71,9 @@ namespace canid {
 
 /* ---- profile 0: Jeep WK family, 83.333 kbit/s -- THIS box --------------- */
 inline constexpr std::uint32_t kJeepIgnition    = 0x000U;  /* ACC / run        */
+/* NOT a stock decode: 0x006 b1 bit 1 is Retained Accessory Power from the
+ * body module. Decoded only when cfg::kAccFollowsRap; docs/ACC-RAP-CHANGE.md. */
+inline constexpr std::uint32_t kJeepRap         = 0x006U;  /* RAP bit          */
 /* NOT a stock decode. 0x002 carries engine RPM on this car and the stock
  * profile-0 decoder ignores it entirely; see docs/REQUIREMENTS.md section
  * 6.1 B / FR-37a. */

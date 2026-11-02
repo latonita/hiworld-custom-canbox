@@ -110,6 +110,25 @@ inline constexpr int kCanBaudJeepKbps = 83;   /* really 83.333; the stock
                                                * bit-timing divisor truncates */
 inline constexpr int kCanBaudFcaKbps  = 125;
 
+/* ACC output follows Chrysler RAP (docs/ACC-RAP-CHANGE.md).
+ *   true  : kFlagAccOn = (ignition ladder && fresh) || (RAP bit && fresh), so
+ *           PB5 stays up through crank and through Retained Accessory Power
+ *           after key-off, and drops when the body module ends RAP (door
+ *           opened, or 600 s after OFF).
+ *   false : the stock rule -- kFlagAccOn follows each 0x000 frame alone, and
+ *           0x006 is not looked at at all. Flip this to get the stock-
+ *           equivalent image back.
+ * Applies to both protocols: the Benz build decodes the same Jeep CAN-B 0x000
+ * through the same decodeProfileJeep(), so it gets the same ACC source. */
+inline constexpr bool kAccFollowsRap = true;
+
+/* A 0x000 / 0x006 frame older than this no longer counts toward ACC. The
+ * frames come every 100 ms, so 1 s is ten missed frames. It must stay well
+ * under the 10 s link-wedged timeout (logic::shared::kBusAliveReloadJeep x
+ * 100 ms): a sleeping bus with a stale ACC flag still set would otherwise
+ * force a WWDG reset. static_assert'd in can_decode_shared.hpp. */
+inline constexpr std::uint32_t kAccStaleMs = 1000U;
+
 /* Bus-presence debounce, in decoder passes, reloaded whenever ACC is off. */
 inline constexpr std::uint32_t kBusPresentDebounce = 800U;
 

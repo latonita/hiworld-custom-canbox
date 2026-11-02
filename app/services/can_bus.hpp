@@ -117,6 +117,9 @@ void onRxInterrupt() noexcept;                              /* 0x08002C0A */
  * for both standard and extended frames. */
 [[nodiscard]] std::uint32_t rxId() noexcept;
 
+/* DLC of the tail entry (entry + ram::kCanEntryDlc). */
+[[nodiscard]] std::uint8_t rxDlc() noexcept;
+
 /* -> data[0] of the tail entry (entry + ram::kCanEntryData). */
 [[nodiscard]] const volatile std::uint8_t* rxData() noexcept;
 

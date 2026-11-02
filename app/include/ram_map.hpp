@@ -729,6 +729,15 @@ struct AppRam {
     volatile std::uint8_t rpmDecimator;     /* 1-in-21 on rpm  stock @0x11CE */
     volatile std::uint8_t d2ClusterState;   /*                 stock @0x10E0 */
 
+    /* ---- ACC sources (NOT stock; cfg::kAccFollowsRap) ----------------------
+     * kFlagAccOn is recomputed from these by logic::shared::recomputeAcc().
+     * accIgnOn: 0x000 b0 ladder says ACC/RUN/CRANK. accRapOn: 0x006 b1 bit 1.
+     * The *SeenMs stamps are sched.counter at the last frame of each id. */
+    volatile std::uint8_t  accIgnOn;
+    volatile std::uint8_t  accRapOn;
+    volatile std::uint32_t accIgnSeenMs;
+    volatile std::uint32_t accRapSeenMs;
+
     /* ---- head-unit link bookkeeping ----------------------- stock @0x11AA */
     volatile std::uint8_t uartRxOverflow;
     volatile std::uint8_t uartSlotState[cfg::kTxSlotCount]; /* one per TX slot  */

@@ -447,6 +447,12 @@ std::uint32_t rxId() noexcept
     return loadId(entryAt(r.canRxRing, r.canRing.rxTail));
 }
 
+std::uint8_t rxDlc() noexcept
+{
+    ram::AppRam& r = ram::app();
+    return entryAt(r.canRxRing, r.canRing.rxTail)[ram::kCanEntryDlc];
+}
+
 const volatile std::uint8_t* rxData() noexcept
 {
     ram::AppRam& r = ram::app();

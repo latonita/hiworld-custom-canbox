@@ -70,8 +70,12 @@ constexpr std::uint32_t kBusPresentDebounce = 800U;
 
 ram::AppRam& R() noexcept { return ram::app(); }
 
+/* Also seeds the ignition source behind the flag: dispatchGate() recomputes
+ * kFlagAccOn from it on every pass (cfg::kAccFollowsRap). */
 void setAcc(bool on) noexcept
 {
+    R().accIgnOn     = on ? 1U : 0U;
+    R().accIgnSeenMs = R().sched.counter;
     R().vehicle.setFlag(ram::VehicleState::kFlagAccOn, on);
 }
 

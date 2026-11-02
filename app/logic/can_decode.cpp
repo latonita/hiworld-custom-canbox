@@ -434,6 +434,13 @@ void decodeProfileJeep() noexcept
                 customIgnition(d[0]);
             }
             break;
+        case canid::kJeepRap:
+            if constexpr (cfg::kAccFollowsRap) {
+                if (svc::can::rxDlc() >= 2U) {
+                    decodeRap(d[1]);                                 /* RAP        */
+                }
+            }
+            break;
         case canid::kJeepEngine:
             jeepEngine(d);                                           /* rpm        */
             if constexpr (cfg::kIsBenz) {
@@ -575,6 +582,10 @@ void dispatchGate() noexcept
     constexpr std::uint8_t kNoIgnitionMarker = 0x10U;
 
     ram::AppRam& r = ram::app();
+
+    if constexpr (cfg::kAccFollowsRap) {
+        recomputeAcc();   /* age ACC out when 0x000 / 0x006 stop arriving */
+    }
 
     if (!r.vehicle.accOn()) {
         r.busPresentDebounce = cfg::kBusPresentDebounce;

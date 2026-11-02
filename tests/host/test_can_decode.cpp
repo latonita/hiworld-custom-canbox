@@ -24,6 +24,7 @@
 #include "test_framework.hpp"
 
 #include "can_bus.hpp"
+#include "app_config.hpp"
 #include "can_decode.hpp"
 #include "fake_hal.hpp"
 #include "ram_map.hpp"
@@ -44,6 +45,7 @@ constexpr std::size_t kData    = 6U;
 
 /* Identifiers, profile 0 (Jeep WK, 83.333 kbit/s). */
 constexpr std::uint32_t kJeepIgn    = 0x000U;
+constexpr std::uint32_t kJeepRap    = 0x006U;
 constexpr std::uint32_t kJeepRev    = 0x003U;
 constexpr std::uint32_t kJeepDoors  = 0x013U;
 constexpr std::uint32_t kJeepSteer  = 0x015U;
@@ -118,6 +120,30 @@ void pushByteAt(std::uint32_t id, std::size_t index, std::uint8_t value) noexcep
 
 std::uint8_t flags() noexcept { return ram::app().vehicle.flags(); }
 
+/* Advance the box's millisecond clock, as the TIM2 tick would. */
+void advanceMs(std::uint32_t ms) noexcept { ram::app().sched.counter += ms; }
+
+/* ACC the way a live 0x000 stream leaves it: the flag AND the ignition source
+ * behind it, so dispatchGate()'s per-pass recompute keeps it. */
+void forceAcc() noexcept
+{
+    ram::app().accIgnOn     = 1U;
+    ram::app().accIgnSeenMs = ram::app().sched.counter;
+    ram::app().vehicle.setFlag(kFlagAcc, true);
+}
+
+/* One 0x000 / 0x006 pair the way the car sends them, then a decode pass. */
+void ignFrame(std::uint8_t b0) noexcept
+{
+    pushByteAt(kJeepIgn, 0U, b0);
+    logic::decodeProfileJeep();
+}
+void rapFrame(std::uint8_t b1) noexcept
+{
+    pushByteAt(kJeepRap, 1U, b1);
+    logic::decodeProfileJeep();
+}
+
 /* Replies are only visible once the TX ring has been pumped into the mailbox. */
 void drainTx() noexcept { svc::can::txDrain(); }
 
@@ -152,6 +178,168 @@ TEST(jeep_ignition_ignores_bit4_of_the_source_byte)
 
     pushByteAt(kJeepIgn, 0U, 0x10U);
     logic::decodeProfileJeep();
+    CHECK_EQ(flags() & kFlagAcc, 0U);
+}
+
+/* ---- ACC follows Chrysler RAP (docs/ACC-RAP-CHANGE.md) ------------------
+ * accOn = (ignOn && fresh) || (rapOn && fresh), 0x006 b1 bit 1 = RAP, fresh =
+ * a frame of that id within cfg::kAccStaleMs. Only meaningful with the switch
+ * on; with it off the stock rule is tested above. */
+
+/* The staleness window must expire long before the 10 s link-wedged timeout
+ * (kBusAliveReloadJeep reloads on every frame, 100 ms per tick). */
+static_assert(cfg::kAccStaleMs < 100U * 100U / 4U,
+              "kAccStaleMs must be well below the 10 s link-wedged timeout");
+TEST(stale_timeout_below_link_wedged)
+{
+    CHECK_EQ(cfg::kAccStaleMs, 1000U);
+}
+
+TEST(acc_on_at_acc_before_rap_bit)
+{
+    if constexpr (!cfg::kAccFollowsRap) { return; }
+    fake::reset();
+
+    ignFrame(0x63U);                               /* ACC, no 0x006 yet */
+    CHECK_EQ(flags() & kFlagAcc, kFlagAcc);
+}
+
+TEST(acc_stays_on_through_crank)
+{
+    if constexpr (!cfg::kAccFollowsRap) { return; }
+    fake::reset();
+
+    rapFrame(0x22U);
+    ignFrame(0x85U);
+    CHECK_EQ(flags() & kFlagAcc, kFlagAcc);
+
+    /* Crank: RAP bit drops, ladder says A9. Either frame order. */
+    rapFrame(0x20U);
+    ignFrame(0xA9U);
+    CHECK_EQ(flags() & kFlagAcc, kFlagAcc);
+
+    fake::reset();
+    ignFrame(0xA9U);
+    rapFrame(0x20U);
+    CHECK_EQ(flags() & kFlagAcc, kFlagAcc);
+}
+
+TEST(acc_held_after_key_off_by_rap)
+{
+    if constexpr (!cfg::kAccFollowsRap) { return; }
+    fake::reset();
+
+    ignFrame(0x85U);
+    rapFrame(0x22U);
+    ignFrame(0x01U);                               /* key off */
+    CHECK_EQ(flags() & kFlagAcc, kFlagAcc);
+    CHECK_EQ(flags() & kFlagIgnRaw, kFlagIgnRaw);  /* raw bit still follows */
+    ignFrame(0x00U);                               /* key out */
+    CHECK_EQ(flags() & kFlagAcc, kFlagAcc);
+}
+
+TEST(acc_off_when_rap_clears)
+{
+    if constexpr (!cfg::kAccFollowsRap) { return; }
+    fake::reset();
+
+    ignFrame(0x00U);
+    rapFrame(0x22U);
+    CHECK_EQ(flags() & kFlagAcc, kFlagAcc);
+    rapFrame(0x00U);                               /* door / 600 s */
+    CHECK_EQ(flags() & kFlagAcc, 0U);
+
+    rapFrame(0x22U);
+    rapFrame(0x20U);                               /* bit 1 clear, bit 5 set */
+    CHECK_EQ(flags() & kFlagAcc, 0U);
+}
+
+TEST(acc_off_when_frames_go_stale)
+{
+    if constexpr (!cfg::kAccFollowsRap) { return; }
+    fake::reset();
+
+    ignFrame(0x00U);
+    rapFrame(0x22U);
+
+    advanceMs(cfg::kAccStaleMs - 1U);
+    logic::dispatchGate();
+    CHECK_EQ(flags() & kFlagAcc, kFlagAcc);        /* 999 ms: still on */
+
+    advanceMs(1U);
+    logic::dispatchGate();
+    CHECK_EQ(flags() & kFlagAcc, 0U);              /* 1000 ms: off */
+}
+
+TEST(acc_ignition_goes_stale_too)
+{
+    if constexpr (!cfg::kAccFollowsRap) { return; }
+    fake::reset();
+
+    ignFrame(0x63U);
+    advanceMs(cfg::kAccStaleMs);
+    logic::dispatchGate();
+    CHECK_EQ(flags() & kFlagAcc, 0U);
+}
+
+TEST(acc_ignores_bit5_alone)
+{
+    if constexpr (!cfg::kAccFollowsRap) { return; }
+    fake::reset();
+
+    rapFrame(0x20U);
+    ignFrame(0x00U);
+    CHECK_EQ(flags() & kFlagAcc, 0U);
+}
+
+TEST(bus_wake_after_timeout_does_not_turn_acc_on)
+{
+    if constexpr (!cfg::kAccFollowsRap) { return; }
+    fake::reset();
+
+    ignFrame(0x01U);
+    rapFrame(0x22U);
+    advanceMs(10000U);                             /* bus asleep */
+    logic::dispatchGate();
+    CHECK_EQ(flags() & kFlagAcc, 0U);
+
+    ignFrame(0x00U);                               /* door opened, bus wakes */
+    rapFrame(0x00U);
+    CHECK_EQ(flags() & kFlagAcc, 0U);
+}
+
+/* 0x006 shorter than 2 bytes carries no b1: ignored. */
+TEST(rap_frame_shorter_than_two_bytes_is_ignored)
+{
+    if constexpr (!cfg::kAccFollowsRap) { return; }
+    fake::reset();
+
+    std::uint8_t d[8] = {0U, 0x22U, 0U, 0U, 0U, 0U, 0U, 0U};
+    pushFrame(kJeepRap, 1U, d);
+    logic::decodeProfileJeep();
+    CHECK_EQ(flags() & kFlagAcc, 0U);
+}
+
+/* FCA never sees 0x006 and its 0x20B is not aged out: exactly as before. */
+TEST(fca_profile_unchanged)
+{
+    fake::reset();
+    ram::app().profileActive = 1U;
+
+    pushByteAt(kJeepRap, 1U, 0x22U);               /* not an FCA id */
+    logic::dispatchGate();
+    CHECK_EQ(flags() & kFlagAcc, 0U);
+
+    pushByteAt(kFcaIgn, 0U, 0xE0U);
+    logic::dispatchGate();
+    CHECK_EQ(flags() & kFlagAcc, kFlagAcc);
+
+    advanceMs(60000U);                             /* no staleness on FCA */
+    logic::dispatchGate();
+    CHECK_EQ(flags() & kFlagAcc, kFlagAcc);
+
+    pushByteAt(kFcaIgn, 0U, 0x01U);
+    logic::dispatchGate();
     CHECK_EQ(flags() & kFlagAcc, 0U);
 }
 
@@ -1157,7 +1345,7 @@ TEST(dispatch_gate_reloads_the_debounce_while_acc_is_off)
 TEST(dispatch_gate_counts_the_debounce_down_while_acc_is_on)
 {
     fake::reset();
-    ram::app().vehicle.setFlag(kFlagAcc, true);
+    forceAcc();
     ram::app().busPresentDebounce = 2U;
     ram::app().txFrame18c[0] = 0x10U;
 
@@ -1174,7 +1362,7 @@ TEST(dispatch_gate_counts_the_debounce_down_while_acc_is_on)
 TEST(dispatch_gate_clears_the_marker_when_the_debounce_expires)
 {
     fake::reset();
-    ram::app().vehicle.setFlag(kFlagAcc, true);
+    forceAcc();
     ram::app().busPresentDebounce = 0U;
     ram::app().txFrame18c[0] = 0x13U;
     ram::app().vehicle.setAmpLevel(0x2BU);

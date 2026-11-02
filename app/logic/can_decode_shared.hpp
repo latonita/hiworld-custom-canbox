@@ -41,6 +41,11 @@ inline constexpr std::uint8_t kDrainPasses = 0x14U;   /* 20 */
  * profiles deliberately disagree: 100 on profile 0, 0x14 on profile 1. */
 inline constexpr std::uint8_t kBusAliveReloadJeep = 100U;
 
+/* The ACC staleness window has to expire long before that watchdog (reloaded
+ * per 100 ms tick, so 100 = 10 s). */
+static_assert(cfg::kAccStaleMs * 4U < kBusAliveReloadJeep * 100U,
+              "kAccStaleMs must be well below the 10 s link-wedged timeout");
+
 /* ---------------------------------------------------------------------------
  * PRNDL characters on Jeep CAN 0x003 d[4].
  *
@@ -72,6 +77,7 @@ inline constexpr std::uint8_t kIllumPercentMax = 100U;
 inline constexpr std::uint8_t kIgnRunMask      = 0xE0U;
 inline constexpr std::uint8_t kIgnRunThreshold = 0x10U;
 inline constexpr std::uint8_t kIgnRawMask      = 0x01U;   /* -> kFlagIgnRaw */
+inline constexpr std::uint8_t kRapMask          = 0x02U;   /* 0x006 b1: RAP  */
 
 /* Door bitfield, SOURCE side. The permutation to the destination bits in
  * ram::VehicleState::kDoors is NOT the identity -- see decodeDoors. */
@@ -224,18 +230,63 @@ inline void decodeIllumLevel(std::uint8_t v) noexcept
     vs.setIllumLevel(percent);
 }
 
+/* kFlagAccOn from its sources. NOT stock (cfg::kAccFollowsRap):
+ *   accOn = (ignOn && ignFresh) || (rapOn && rapFresh)
+ * where "fresh" is a frame of that id seen within cfg::kAccStaleMs. Called from
+ * both decoders below and once per pass from dispatchGate(), so a silent bus
+ * turns ACC off. The FCA profile never sees 0x006, and its ignition is never
+ * aged out (its 0x20B cadence is not known to be < 1 s), so it still follows
+ * each 0x20B frame exactly as before. */
+inline void recomputeAcc() noexcept
+{
+    ram::AppRam& r = ram::app();
+
+    const std::uint32_t now = r.sched.counter;
+    const bool ignFresh = (r.profileActive == cfg::kProfileFca125k) ||
+                          ((now - r.accIgnSeenMs) < cfg::kAccStaleMs);
+    const bool rapFresh = (now - r.accRapSeenMs) < cfg::kAccStaleMs;
+
+    r.vehicle.setFlag(ram::VehicleState::kFlagAccOn,
+                      ((r.accIgnOn != 0U) && ignFresh) ||
+                      ((r.accRapOn != 0U) && rapFresh));
+}
+
 /* Ignition / ACC. Profile 0: 0x000 d[0]; profile 1: 0x20B d[0].
  *   kFlagIgnRaw (bit 4) <- d[0] bit 0   -- unidentified, set in every capture
- *   kFlagAccOn  (bit 0) <- (d[0] & 0xE0) > 0x10, i.e. any of d[0] bits 5..7.
+ *   ignOn               <- (d[0] & 0xE0) > 0x10, i.e. any of d[0] bits 5..7.
+ *   kFlagAccOn  (bit 0) <- ignOn alone when !cfg::kAccFollowsRap (stock),
+ *                          else recomputeAcc().
  * kFlagAccOn gates the whole TX block, drives the ACC GPIO and is what
- * dispatchGate() runs its bus-present debounce off. */
+ * dispatchGate() runs its bus-present debounce off. The 0x7FF vendor frame
+ * can still set it, but the next 0x000 / 0x006 frame (or, with
+ * kAccFollowsRap, the next 8 ms pass) overwrites that. */
 inline void decodeIgnition(std::uint8_t v) noexcept
 {
-    ram::VehicleState& vs = ram::app().vehicle;
+    ram::AppRam& r = ram::app();
+    ram::VehicleState& vs = r.vehicle;
+
+    const bool ignOn = static_cast<std::uint8_t>(v & kIgnRunMask) > kIgnRunThreshold;
 
     vs.setFlag(ram::VehicleState::kFlagIgnRaw, (v & kIgnRawMask) != 0U);
-    vs.setFlag(ram::VehicleState::kFlagAccOn,
-               static_cast<std::uint8_t>(v & kIgnRunMask) > kIgnRunThreshold);
+    if constexpr (cfg::kAccFollowsRap) {
+        r.accIgnOn     = ignOn ? 1U : 0U;
+        r.accIgnSeenMs = r.sched.counter;
+        recomputeAcc();
+    } else {
+        vs.setFlag(ram::VehicleState::kFlagAccOn, ignOn);
+    }
+}
+
+/* Retained Accessory Power, Jeep CAN 0x006 d[1] bit 1 (only with
+ * cfg::kAccFollowsRap): set from ACC on, clear during crank, held after
+ * key-off until a door opens or 600 s pass. */
+inline void decodeRap(std::uint8_t d1) noexcept
+{
+    ram::AppRam& r = ram::app();
+
+    r.accRapOn     = ((d1 & kRapMask) != 0U) ? 1U : 0U;
+    r.accRapSeenMs = r.sched.counter;
+    recomputeAcc();
 }
 
 /* Vendor handshake, CAN 0x7FC: magic 3F F3 F2 01 .. .. 3A A3 -> the received

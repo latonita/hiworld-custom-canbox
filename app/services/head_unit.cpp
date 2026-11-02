@@ -433,13 +433,40 @@ void txSched() noexcept
         buildFrame(r.uartTxSlotIdx);
         st[r.uartTxSlotIdx] = kSlotSent;
     } else {
+        bool refreshed = false;
+
         if (st[r.uartTxSlotIdx] == kSlotIdle) {
-            roundRobin();
+            if (r.uartIdleDelay == kBusyRefreshDue) {
+                /* Busy-link refresh (see below): resend the next table entry
+                 * whether or not it changed. Done BEFORE roundRobin() so a
+                 * changed slot's shadow is not consumed without being sent;
+                 * that slot simply goes out on the next pass. */
+                r.uartIdleDelay  = kIdleDelay;
+                r.uartAuxSlotIdx = nextSlot(r.uartAuxSlotIdx);
+                buildFrame(r.uartAuxSlotIdx);
+                refreshed = true;
+            } else {
+                roundRobin();
+            }
         }
 
-        if (r.uartTxSlotIdx < kTxSlots) {
+        if (refreshed) {
+            /* frame already built */
+        } else if (r.uartTxSlotIdx < kTxSlots) {
             buildFrame(r.uartTxSlotIdx);
             st[r.uartTxSlotIdx] = kSlotSent;
+            /* BUSY LINK. Changed frames keep arriving, so the stock idle
+             * keep-alive (kIdleDelay passes of silence) never runs and a slot
+             * that does not change is never resent. uartIdleDelay values above
+             * kIdleDelay do not occur in stock; use them as a busy countdown:
+             * arm on a changed frame, tick on each further one, and at
+             * kBusyRefreshDue the next pass is a refresh. Every third pass
+             * under constant traffic, i.e. all slots revisited in ~2.3 s. */
+            if (r.uartIdleDelay <= kIdleDelay) {
+                r.uartIdleDelay = kBusyRefreshArm;
+            } else {
+                r.uartIdleDelay = static_cast<std::uint8_t>(r.uartIdleDelay - 1U);
+            }
         } else if (r.uartIdleDelay == 0U) {
             r.uartIdleDelay   = kIdleDelay;
             r.uartAuxSlotIdx  = nextSlot(r.uartAuxSlotIdx);

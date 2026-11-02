@@ -95,6 +95,11 @@ inline constexpr std::uint8_t kTxSlots       = cfg::kTxSlotCount;
 inline constexpr std::uint8_t kRxSlots       = 2U;   /* flash table 0x08009F74 */
 inline constexpr std::uint8_t kTicksPerFrame = 6U;   /* 6 x 8 ms  =  48 ms     */
 inline constexpr std::uint8_t kIdleDelay     = 15U;  /* 15 x 48 ms = ~720 ms   */
+/* Busy-link refresh: uartIdleDelay above kIdleDelay counts changed frames; at
+ * kBusyRefreshDue the next pass resends the next slot whether changed or not. */
+inline constexpr std::uint8_t kBusyRefreshGap = 1U;
+inline constexpr std::uint8_t kBusyRefreshDue = kIdleDelay + 1U;
+inline constexpr std::uint8_t kBusyRefreshArm = kIdleDelay + 1U + kBusyRefreshGap;
 
 /* Slot states held in ram::AppRam::uartSlotState[kTxSlots] (0x200011AB).
  * 2 and 3 are not distinguished anywhere; both mean "already built this

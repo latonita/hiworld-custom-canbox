@@ -617,8 +617,8 @@ Also test, against the host unit tests in `tests/host/`:
 
 - `014` b0:b1:b2 == `FF FF FF` ⇒ `0xBB` carries `FF FF FF`, `0xB0` bit6 is 0,
   **and `0xB5` is unaffected** — ambient has its own gate on the same frame.
-- `014` odometer valid but b4 ≥ `0x80` ⇒ `0xBB` is live with bit6 set while
-  `0xB5` holds and bit3 clears. The converse of the above; both directions
+- `014` odometer valid but b4:b5 == `FF FF` ⇒ `0xBB` is live with bit6 set while
+  `0xB5` holds and bit3 stays set. The converse of the above; both directions
   together prove the two gates are independent.
 - `1B4` b1 == `0xFF` ⇒ heading and sector both hold their previous values and
   `0xB0` bit7 is 0 — **not** `0x01FE` = 510°.

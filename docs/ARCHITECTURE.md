@@ -425,7 +425,7 @@ behind `if constexpr (cfg::kIsBenz)`.
 ```cpp
 void benzSpeed(const volatile std::uint8_t* d) noexcept;    // 0x002 d[2]:d[3]
 void benzRpm(const volatile std::uint8_t* d) noexcept;      // 0x002 d[0]:d[1]
-void benzTrip(const volatile std::uint8_t* d) noexcept;     // 0x014 odometer + ambient
+void benzTrip(const volatile std::uint8_t* d) noexcept;     // 0x014 odometer; benzAmbient() = b4:b5
 void benzCoolant(const volatile std::uint8_t* d) noexcept;  // 0x02C d[1]
 void benzVoltage(const volatile std::uint8_t* d) noexcept;  // 0x015 d[1]
 ```

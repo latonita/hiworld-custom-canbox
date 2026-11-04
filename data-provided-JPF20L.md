@@ -60,7 +60,7 @@ CAN sources are on the WK body bus (83.333 kbit/s), written as `ID bN` (id, data
 | `0xB4 [1]` | intake air temp | °C + 40 | `015` b2 + 40 |
 | `0xB4 [2]` | fuel level | 0…100 % | `159` b5 × 0.6443 |
 | `0xB4 [3:4]` | battery voltage | u16, 0.01 V | `015` b1 × 10 |
-| `0xB5 [0:1]` | outside air temp | s16, 0.1 °C | `014` b4 × 10 |
+| `0xB5 [0:1]` | outside air temp | s16, 0.1 °C | `014` b4:b5, (raw − 4000) / 10, nearest tenth |
 | `0xB7 [0]` | tyre position | 0 LF, 1 RF, 2 RR, 3 LR (rotates every 5 s) | — |
 | `0xB7 [1:2]` | tyre pressure | u16 kPa, `FFFF` = n/a | WCM KWP2000 `21 3B` poll every 30 s, reply on `500` (psi × 6.894759) |
 | `0xB7 [3]` | tyre temperature | always `FF` (no source) | — |

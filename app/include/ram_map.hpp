@@ -594,7 +594,7 @@ struct CustomSignals {
     volatile std::uint8_t  intakeBias40;    /* degC+40             0x015 b2   */
     volatile std::uint8_t  fuelPct;         /* 0..100              0x159 b5   */
     volatile std::uint16_t centiVolts;      /* 0.01 V              0x015 b1   */
-    volatile std::int16_t  outsideDeciC;    /* 0.1 degC, signed    0x014 b4   */
+    volatile std::int16_t  outsideDeciC;    /* 0.1 degC, signed    0x014 b4:b5 */
     volatile std::uint16_t fuelDecilitres;  /* 0.1 L               0x159 b5   */
     volatile std::uint32_t odometerDeciKm;  /* 0.1 km, 24-bit  0x014 b0:b1:b2 */
     volatile std::uint16_t headingDeg;      /* whole deg magnetic  0x1B4 b1*2 */

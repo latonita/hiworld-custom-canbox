@@ -45,7 +45,7 @@ bus (83.333 kbit/s), written `ID bN` (CAN id, data byte). Full byte-level detail
 | Intake air temperature | 1 deg C | `015` b2 | `0xB4` |
 | Fuel level | 0–100 % | `159` b5 | `0xB4` |
 | Battery voltage | 0.1 V steps | `015` b1 | `0xB4` |
-| Outside air temperature | 0.1 deg C | `014` b4 | `0xB5` |
+| Outside air temperature | 0.1 deg C | `014` b4:b5 | `0xB5` |
 | Tyre pressure, 4 corners | 1 kPa, one corner per 5 s | polled from the tyre module (WCM) every 30 s | `0xB7` |
 | Fuel in tank | 0.1 L | `159` b5 | `0xB8` |
 | Odometer | 0.1 km | `014` b0:b2 | `0xBB` |

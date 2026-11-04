@@ -121,8 +121,29 @@ constexpr std::uint8_t kTempBias     = 40U;
 /* 0x015 b1 is 0.1 V/count and the 0xB4 field is centivolts: x10 exactly. */
 constexpr std::uint16_t kCentiVoltsPerCount = 10U;
 
-/* 0x014 b4 is whole degrees C and the 0xB5 field is decidegrees: x10. */
-constexpr std::int16_t kDeciPerDegree = 10;
+/* 0x014 b4:b5 is a big-endian u16 at 0.01 degC/count, offset -40 degC; the
+ * 0xB5 field is decidegrees and the cluster shows whole degrees. */
+constexpr std::int32_t  kAmbientOffsetCenti = 4000;   /* -40.00 degC        */
+constexpr std::int32_t  kCentiPerDegree     = 100;
+constexpr std::int16_t  kDeciPerDegree      = 10;
+constexpr std::uint16_t kAmbientRawNA       = 0xFFFFU; /* bus waking / not ready */
+constexpr std::uint8_t  kAmbientMinDlc      = 6U;
+
+/* THE ROUNDING CHOICE, in one place: FLOOR to whole degrees. The one verified
+ * data point is raw 5950 = 19.50 degC, which the cluster showed as 19, so it
+ * does not round half up. Floor (toward -inf) fits that and is what a
+ * truncating cluster does for positive temperatures; whether the cluster
+ * floors or truncates toward zero below 0 degC is unverified. To change the
+ * rule, change only this function. Result is whole degrees C. */
+constexpr std::int16_t ambientWholeDegrees(std::uint16_t raw) noexcept
+{
+    const std::int32_t centi = static_cast<std::int32_t>(raw) - kAmbientOffsetCenti;
+    std::int32_t deg = centi / kCentiPerDegree;
+    if ((centi % kCentiPerDegree) < 0) {
+        --deg;                                  /* floor, not truncate */
+    }
+    return static_cast<std::int16_t>(deg);
+}
 
 /* 0x002 b2:b3 is km/h x128. Rounded, not truncated -- the +64 is half an LSB
  * of the destination. */
@@ -420,32 +441,34 @@ void customGear(const volatile std::uint8_t* d) noexcept
 }
 
 /* ============================================================================
- * 0x014 b4 -- outside air temperature, whole degrees C.
- * Evidence: id 0x014, ambient probable/high confidence.
+ * 0x014 b4:b5 -- outside air temperature, the value the cluster displays.
+ * Evidence: verified on the car (Jeep WK, CAN-B 83.3k): u16 big-endian,
+ * degC = raw * 0.01 - 40; `17 3E` = 5950 = 19.50 degC, cluster showed 19.
+ * (The old reading of b4 alone as whole degC was wrong: b4 is the HIGH byte.)
  *
- * The 0xB5 field is SIGNED decidegrees, which is the one place this block can
- * show a sub-zero reading at all -- the Benz emulation's ambient field is
- * unsigned and clamps a Finnish winter to 0.0 degC.
+ * 0xFFFF means unavailable (bus waking, module not ready) and a frame shorter
+ * than 6 bytes has no b5: both are skipped outright -- previous value AND
+ * validity bit left as they were, so a wake-up burst of FFFF cannot blank a
+ * good reading. The car already filters the value (follows the sensor while
+ * driving, blocks rises when slow or stopped), so there is no filter here.
  *
- * But the car's negative encoding has never been captured. Every log in the
- * repo is warm weather (b4 17..25). So a byte that looks like a two's
- * complement negative is treated as SUSPECT, not as a negative: the previous
- * value is held and the validity bit cleared. Guessing the sign convention
- * here would produce a confidently wrong -56 degC on a winter morning, which
- * is worse than a blank. Capture a cold start and this becomes a one-line
- * change.
+ * Published in whole degrees (see ambientWholeDegrees) x10 as signed
+ * decidegrees. Max is raw 0xFFFE = 615 degC = 6150, far inside s16 and clear of
+ * the 0x8000 sentinel, so no clamp is needed.
  * ==========================================================================*/
-void customAmbient(const volatile std::uint8_t* d) noexcept
+void customAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
 {
-    ram::CustomSignals& c = ram::app().customSignals;
-    const std::uint8_t  b4 = d[4];
-
-    if (b4 >= kTempNegative) {
-        setValid(ram::kValidB5, false);
-        return;                       /* hold the previous reading */
+    if (dlc < kAmbientMinDlc) {
+        return;
+    }
+    const std::uint16_t raw = static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(d[4]) << 8) | d[5]);
+    if (raw == kAmbientRawNA) {
+        return;
     }
 
-    c.outsideDeciC = static_cast<std::int16_t>(static_cast<std::int16_t>(b4)
+    ram::CustomSignals& c = ram::app().customSignals;
+    c.outsideDeciC = static_cast<std::int16_t>(ambientWholeDegrees(raw)
                                                * kDeciPerDegree);
     setValid(ram::kValidB5, true);
 }

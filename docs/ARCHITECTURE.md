@@ -457,7 +457,7 @@ void customPrimeSignals() noexcept;                              // sentinels, o
 void customIgnition(std::uint8_t b0) noexcept;                   // 0x000 b0
 void customEngine(const volatile std::uint8_t* d) noexcept;      // 0x002 rpm + speed
 void customGear(const volatile std::uint8_t* d) noexcept;        // 0x003 b4 ASCII PRNDL
-void customAmbient(const volatile std::uint8_t* d) noexcept;     // 0x014 b4
+void customAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept; // 0x014 b4:b5
 void customVoltsIntake(const volatile std::uint8_t* d) noexcept; // 0x015 b1, b2
 void customCoolant(const volatile std::uint8_t* d) noexcept;     // 0x02C b1
 void customParkBrake(const volatile std::uint8_t* d) noexcept;   // 0x0D0 b0 bit 7

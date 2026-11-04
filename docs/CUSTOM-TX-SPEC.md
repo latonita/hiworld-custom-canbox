@@ -86,7 +86,7 @@ work and is not your concern.
 **Do not implement `0xB1`.** The firmware version already goes to the head unit
 in stock Hiworld `0xF0`: a 17-byte periodic TX slot whose live buffer is
 `ram::g_versionString`, filled from `cfg::kVersionString` in `svc::hu::init()`
-(`H1N4JPF20L-021126` on this build). It is on the wire and in the `rxpduses`
+(`H1N4JPF20L-041126` on this build). It is on the wire and in the `rxpduses`
 mirror already. Reserved.
 
 ~~**Do not implement `0xB7`.** TPMS is not broadcast on this car's CAN-B; it

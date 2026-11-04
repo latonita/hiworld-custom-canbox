@@ -14,7 +14,7 @@ inline constexpr std::uint16_t kAmbientRawNA       = 0xFFFFU; /* waking / not re
 inline constexpr std::uint8_t  kAmbientMinDlc      = 6U;      /* b5 must exist */
 
 /* The raw u16 from d[4]:d[5]. */
-constexpr std::uint16_t ambientRaw(const volatile std::uint8_t* d) noexcept
+inline std::uint16_t ambientRaw(const volatile std::uint8_t* d) noexcept
 {
     return static_cast<std::uint16_t>((static_cast<std::uint16_t>(d[4]) << 8) | d[5]);
 }

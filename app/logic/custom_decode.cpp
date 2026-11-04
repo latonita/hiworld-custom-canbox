@@ -22,6 +22,7 @@
 #include "can_bus.hpp"
 #include "can_decode.hpp"
 #include "ram_map.hpp"
+#include "ambient_temp.hpp"
 
 namespace logic {
 namespace {
@@ -120,24 +121,6 @@ constexpr std::uint8_t kTempBias     = 40U;
 
 /* 0x015 b1 is 0.1 V/count and the 0xB4 field is centivolts: x10 exactly. */
 constexpr std::uint16_t kCentiVoltsPerCount = 10U;
-
-/* 0x014 b4:b5 is a big-endian u16 at 0.01 degC/count, offset -40 degC; the
- * 0xB5 field is decidegrees. The cluster shows whole degrees; we keep 0.1. */
-constexpr std::int32_t  kAmbientOffsetCenti = 4000;   /* -40.00 degC        */
-constexpr std::int32_t  kCentiPerDeci       = 10;
-constexpr std::uint16_t kAmbientRawNA       = 0xFFFFU; /* bus waking / not ready */
-constexpr std::uint8_t  kAmbientMinDlc      = 6U;
-
-/* centi-degrees -> decidegrees, rounded to nearest with an exact half going
- * AWAY from zero, so negatives round symmetrically with positives
- * (1955 -> 196, -5 -> -1, -1955 -> -196). */
-constexpr std::int16_t ambientDeciC(std::uint16_t raw) noexcept
-{
-    const std::int32_t centi = static_cast<std::int32_t>(raw) - kAmbientOffsetCenti;
-    const std::int32_t mag   = (centi < 0) ? -centi : centi;
-    const std::int32_t deci  = (mag + kCentiPerDeci / 2) / kCentiPerDeci;
-    return static_cast<std::int16_t>((centi < 0) ? -deci : deci);
-}
 
 /* 0x002 b2:b3 is km/h x128. Rounded, not truncated -- the +64 is half an LSB
  * of the destination. */
@@ -452,17 +435,12 @@ void customGear(const volatile std::uint8_t* d) noexcept
  * ==========================================================================*/
 void customAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
 {
-    if (dlc < kAmbientMinDlc) {
-        return;
-    }
-    const std::uint16_t raw = static_cast<std::uint16_t>(
-        (static_cast<std::uint16_t>(d[4]) << 8) | d[5]);
-    if (raw == kAmbientRawNA) {
-        return;
+    const std::uint16_t raw = ambientRaw(d);
+    if (!ambientUsable(raw, dlc)) {
+        return;                       /* keep value and validity */
     }
 
-    ram::CustomSignals& c = ram::app().customSignals;
-    c.outsideDeciC = ambientDeciC(raw);
+    ram::app().customSignals.outsideDeciC = ambientDeciC(raw);
     setValid(ram::kValidB5, true);
 }
 

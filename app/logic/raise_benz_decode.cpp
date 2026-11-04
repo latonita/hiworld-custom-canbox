@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include "ram_map.hpp"
+#include "ambient_temp.hpp"
 
 namespace logic {
 
@@ -66,7 +67,7 @@ void benzRpm(const volatile std::uint8_t* d) noexcept
 }
 
 /* 0x014 -- b0:b1:b2 odometer at 0.1 km/count (0xFFFFFF unavailable),
- * b4 ambient temperature in whole degrees C.
+ * b4:b5 ambient temperature (see benzAmbient).
  * Evidence: JEEP-WK-CAN-ID-byte-map.md id 0x014 -- odometer Confirmed,
  * ambient high confidence.
  *
@@ -88,14 +89,21 @@ void benzTrip(const volatile std::uint8_t* d) noexcept
         t.odometerKm = odoRaw / 10U;
     }
 
-    /* Whole degrees, and the byte is the temperature directly for the
-     * positive range the captures cover. Negative encoding is unconfirmed on
-     * this car, and the destination cannot show it either way, so anything
-     * that looks like a two's-complement negative is clamped to zero. */
-    const std::uint8_t ambient = d[4];
-    t.ambientDeciC = (ambient >= 0x80U)
-                         ? 0U
-                         : static_cast<std::uint16_t>(ambient * 10U);
+}
+
+/* b4:b5 ambient, through the shared decode (ambient_temp.hpp). The Benz field
+ * is UNSIGNED 0.1 C, the same resolution as the decode, so tenths pass
+ * straight through; a sub-zero reading clamps to 0. 0xFFFF and DLC < 6 are
+ * skipped and the previous value stands. */
+void benzAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
+{
+    const std::uint16_t raw = ambientRaw(d);
+    if (!ambientUsable(raw, dlc)) {
+        return;
+    }
+    const std::int16_t deci = ambientDeciC(raw);
+    ram::app().telemetry.ambientDeciC =
+        (deci < 0) ? 0U : static_cast<std::uint16_t>(deci);
 }
 
 /* 0x02C b1 -- coolant temperature, raw - 40 degrees C, all-FF unavailable.

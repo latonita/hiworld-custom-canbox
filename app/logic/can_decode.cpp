@@ -474,6 +474,7 @@ void decodeProfileJeep() noexcept
         case canid::kJeepTrip:
             if constexpr (cfg::kIsBenz) {
                 benzTrip(d);
+                benzAmbient(d, svc::can::rxDlc());
             } else {
                 /* TWO INDEPENDENT READERS of one frame, with separate gates and
                  * separate validity bits: b4:b5 ambient can be unavailable while

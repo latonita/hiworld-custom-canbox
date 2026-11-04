@@ -122,27 +122,21 @@ constexpr std::uint8_t kTempBias     = 40U;
 constexpr std::uint16_t kCentiVoltsPerCount = 10U;
 
 /* 0x014 b4:b5 is a big-endian u16 at 0.01 degC/count, offset -40 degC; the
- * 0xB5 field is decidegrees and the cluster shows whole degrees. */
+ * 0xB5 field is decidegrees. The cluster shows whole degrees; we keep 0.1. */
 constexpr std::int32_t  kAmbientOffsetCenti = 4000;   /* -40.00 degC        */
-constexpr std::int32_t  kCentiPerDegree     = 100;
-constexpr std::int16_t  kDeciPerDegree      = 10;
+constexpr std::int32_t  kCentiPerDeci       = 10;
 constexpr std::uint16_t kAmbientRawNA       = 0xFFFFU; /* bus waking / not ready */
 constexpr std::uint8_t  kAmbientMinDlc      = 6U;
 
-/* THE ROUNDING CHOICE, in one place: FLOOR to whole degrees. The one verified
- * data point is raw 5950 = 19.50 degC, which the cluster showed as 19, so it
- * does not round half up. Floor (toward -inf) fits that and is what a
- * truncating cluster does for positive temperatures; whether the cluster
- * floors or truncates toward zero below 0 degC is unverified. To change the
- * rule, change only this function. Result is whole degrees C. */
-constexpr std::int16_t ambientWholeDegrees(std::uint16_t raw) noexcept
+/* centi-degrees -> decidegrees, rounded to nearest with an exact half going
+ * AWAY from zero, so negatives round symmetrically with positives
+ * (1955 -> 196, -5 -> -1, -1955 -> -196). */
+constexpr std::int16_t ambientDeciC(std::uint16_t raw) noexcept
 {
     const std::int32_t centi = static_cast<std::int32_t>(raw) - kAmbientOffsetCenti;
-    std::int32_t deg = centi / kCentiPerDegree;
-    if ((centi % kCentiPerDegree) < 0) {
-        --deg;                                  /* floor, not truncate */
-    }
-    return static_cast<std::int16_t>(deg);
+    const std::int32_t mag   = (centi < 0) ? -centi : centi;
+    const std::int32_t deci  = (mag + kCentiPerDeci / 2) / kCentiPerDeci;
+    return static_cast<std::int16_t>((centi < 0) ? -deci : deci);
 }
 
 /* 0x002 b2:b3 is km/h x128. Rounded, not truncated -- the +64 is half an LSB
@@ -452,8 +446,8 @@ void customGear(const volatile std::uint8_t* d) noexcept
  * good reading. The car already filters the value (follows the sensor while
  * driving, blocks rises when slow or stopped), so there is no filter here.
  *
- * Published in whole degrees (see ambientWholeDegrees) x10 as signed
- * decidegrees. Max is raw 0xFFFE = 615 degC = 6150, far inside s16 and clear of
+ * Published at 0.1 degC (see ambientDeciC) as signed decidegrees; the cluster
+ * itself shows whole degrees. Max is raw 0xFFFE = 615.34 degC = 6153, far inside s16 and clear of
  * the 0x8000 sentinel, so no clamp is needed.
  * ==========================================================================*/
 void customAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
@@ -468,8 +462,7 @@ void customAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
     }
 
     ram::CustomSignals& c = ram::app().customSignals;
-    c.outsideDeciC = static_cast<std::int16_t>(ambientWholeDegrees(raw)
-                                               * kDeciPerDegree);
+    c.outsideDeciC = ambientDeciC(raw);
     setValid(ram::kValidB5, true);
 }
 

@@ -200,12 +200,12 @@ the image has ever set it.
 
 | off | field | source | arithmetic |
 |---|---|---|---|
-| 0:1 | outside air, decidegrees C, **s16** | `014` b4:b5 | `floor(((b4<<8\|b5) - 4000) / 100) * 10` |
+| 0:1 | outside air, decidegrees C, **s16** | `014` b4:b5 | `round(((b4<<8\|b5) - 4000) / 10)` |
 
 Signed, so −7.5 °C is `0xFFB5`. Source is `014` b4:b5, u16 big-endian,
 `°C = raw × 0.01 − 40` (verified on the car; `17 3E` → 19.50 °C, cluster
-showed 19). Sent in **whole degrees** (floored, as the cluster shows), so the
-low decimal digit is always 0. `FFFF` or DLC < 6: skip the frame, keep the
+showed 19). Sent at **0.1 °C resolution** (nearest tenth, an exact half rounds away
+from zero, so negatives are symmetric); the cluster itself shows whole degrees. `FFFF` or DLC < 6: skip the frame, keep the
 previous value and validity bit. Range −40..+615 °C never reaches the `0x8000`
 sentinel.
 

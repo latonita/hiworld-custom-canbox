@@ -821,39 +821,43 @@ TEST(custom_ambient_unavailable_is_skipped_and_holds)
     CHECK_EQ(validMask() & ram::kValidB5, ram::kValidB5);
 }
 
-TEST(custom_ambient_worked_example_19_50_reads_19)
+/* Check the published s16 decidegrees of one raw value. */
+void checkAmbient(std::uint16_t raw, std::int16_t wantDeci) noexcept
 {
-    primed();
-    ambient(0x173EU);                         /* 5950 = 19.50 degC */
+    ambient(raw);
     decodeOnce();
     logic::customPublish();
-    CHECK_EQ(b5()[0], 0x00U);  CHECK_EQ(b5()[1], 0xBEU);  /* 190 = 19.0 */
+    const std::int16_t got = static_cast<std::int16_t>(
+        (static_cast<std::uint16_t>(b5()[0]) << 8) | b5()[1]);
+    CHECK_EQ(got, wantDeci);
+}
+
+TEST(custom_ambient_worked_example_19_50)
+{
+    primed();
+    checkAmbient(0x173EU, 195);               /* 5950 = 19.50 degC */
     CHECK_EQ(validMask() & ram::kValidB5, ram::kValidB5);
 }
 
 TEST(custom_ambient_negative)
 {
     primed();
-    ambient(3500U);                           /* -5.00 degC */
-    decodeOnce();
-    logic::customPublish();
-    CHECK_EQ(b5()[0], 0xFFU);  CHECK_EQ(b5()[1], 0xCEU);  /* -50 */
+    checkAmbient(3500U, -50);                 /* -5.00 degC */
 }
 
-/* Floor: x.49 and x.50 both read x; -5.01 floors to -6, -4.99 to -5. */
-TEST(custom_ambient_floors_to_whole_degrees)
+/* Nearest tenth, exact half AWAY from zero, symmetric around 0. */
+TEST(custom_ambient_rounds_to_tenths_half_away_from_zero)
 {
     primed();
-    ambient(5949U); decodeOnce(); logic::customPublish();     /* 19.49 */
-    CHECK_EQ(b5()[1], 0xBEU);
-    ambient(5999U); decodeOnce(); logic::customPublish();     /* 19.99 */
-    CHECK_EQ(b5()[1], 0xBEU);
-    ambient(6000U); decodeOnce(); logic::customPublish();     /* 20.00 */
-    CHECK_EQ(b5()[1], 0xC8U);
-    ambient(3499U); decodeOnce(); logic::customPublish();     /* -5.01 */
-    CHECK_EQ(b5()[0], 0xFFU);  CHECK_EQ(b5()[1], 0xC4U);      /* -60 */
-    ambient(3501U); decodeOnce(); logic::customPublish();     /* -4.99 */
-    CHECK_EQ(b5()[0], 0xFFU);  CHECK_EQ(b5()[1], 0xCEU);      /* -50 */
+    checkAmbient(5949U, 195);                 /* 19.49 */
+    checkAmbient(5955U, 196);                 /* 19.55 -> half up */
+    checkAmbient(5954U, 195);                 /* 19.54 */
+    checkAmbient(3995U, -1);                  /* -0.05 -> half away */
+    checkAmbient(3996U, 0);                   /* -0.04 */
+    checkAmbient(4005U, 1);                   /* +0.05 */
+    checkAmbient(4004U, 0);
+    checkAmbient(3505U, -50);                 /* -4.95 -> -5.0 */
+    checkAmbient(3495U, -51);                 /* -5.05 -> -5.1 */
 }
 
 TEST(custom_ambient_short_dlc_is_ignored)
@@ -873,7 +877,7 @@ TEST(custom_ambient_wire_encoding)
     primed();
     const std::uint16_t raws[3] = { rawC(0), rawC(-40), 0xFFFEU };
     const std::uint8_t want[3][2] = { { 0x00U, 0x00U }, { 0xFEU, 0x70U },
-                                      { 0x18U, 0x06U } };       /* 0, -40.0, 615.0 */
+                                      { 0x18U, 0x09U } };       /* 0, -40.0, 615.3 */
     for (std::size_t i = 0U; i < 3U; ++i) {
         ambient(raws[i]); decodeOnce(); logic::customPublish();
         CHECK_EQ(b5()[0], want[i][0]);  CHECK_EQ(b5()[1], want[i][1]);

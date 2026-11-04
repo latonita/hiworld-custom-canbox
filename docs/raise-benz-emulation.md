@@ -23,7 +23,7 @@ round-robin in `svc::hu`.
 | Engine rpm | `0x08` `[0:1]` | `0x002` b0:b1, 1 rpm/count | Confirmed |
 | Road speed, km/h | `0x07` `[0:1]` | `0x002` b2:b3 ÷ 128 | Confirmed |
 | Doors ×4 + tailgate | `0x41` p1 `[1]` bits 0‑4 | `0x013` b2, via the stock decoder | Confirmed |
-| Outside temp, 0.1 °C | `0x41` p2 `[1:2]` | `0x014` b4, whole °C ×10 | high |
+| Outside temp, 0.1 °C | `0x41` p2 `[1:2]` | `0x014` b4:b5 (u16 BE × 0.01 − 40), nearest tenth; unsigned, so below 0 °C it clamps to 0.0; `0xFFFF` / DLC < 6 skipped | verified on car |
 | Odometer, km | `0x41` p2 `[3:5]` | `0x014` b0:b2 ÷ 10 | Confirmed |
 | Coolant temp, °C | `0x41` p3 `[1:2]` | `0x02C` b1 − 40 | high |
 | Battery voltage, 0.1 V | `0x41` p3 `[5:6]` | `0x015` b1 | Confirmed |

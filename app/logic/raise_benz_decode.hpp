@@ -33,8 +33,11 @@ void benzSpeed(const volatile std::uint8_t* d) noexcept;
 /* 0x002 d[0]:d[1] -- engine rpm, as a number rather than two wire bytes. */
 void benzRpm(const volatile std::uint8_t* d) noexcept;
 
-/* 0x014 d[0]:d[1]:d[2] -- odometer 0.1 km/count; d[4] -- ambient temperature. */
+/* 0x014 d[0]:d[1]:d[2] -- odometer 0.1 km/count; (d[4] ambient moved to benzAmbient). */
 void benzTrip(const volatile std::uint8_t* d) noexcept;
+
+/* 0x014 d[4]:d[5] -- ambient, shared decode; skips 0xFFFF and dlc < 6. */
+void benzAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept;
 
 /* 0x02C d[1] -- coolant temperature, raw - 40 degrees C. */
 void benzCoolant(const volatile std::uint8_t* d) noexcept;

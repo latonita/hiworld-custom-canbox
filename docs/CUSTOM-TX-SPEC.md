@@ -200,11 +200,14 @@ the image has ever set it.
 
 | off | field | source | arithmetic |
 |---|---|---|---|
-| 0:1 | outside air, decidegrees C, **s16** | `014` b4 | `b4 * 10` |
+| 0:1 | outside air, decidegrees C, **s16** | `014` b4:b5 | `round(((b4<<8\|b5) - 4000) / 10)` |
 
-Signed, so −7.5 °C is `0xFFB5`. Negative encoding of `014` b4 has never been
-captured — if b4 ≥ `0x80`, hold the previous value and clear the validity bit
-rather than guessing the car's sign convention.
+Signed, so −7.5 °C is `0xFFB5`. Source is `014` b4:b5, u16 big-endian,
+`°C = raw × 0.01 − 40` (verified on the car; `17 3E` → 19.50 °C, cluster
+showed 19). Sent at **0.1 °C resolution** (nearest tenth, an exact half rounds away
+from zero, so negatives are symmetric); the cluster itself shows whole degrees. `FFFF` or DLC < 6: skip the frame, keep the
+previous value and validity bit. Range −40..+615 °C never reaches the `0x8000`
+sentinel.
 
 ### `0xB8` FUEL — 4 bytes
 
@@ -614,8 +617,8 @@ Also test, against the host unit tests in `tests/host/`:
 
 - `014` b0:b1:b2 == `FF FF FF` ⇒ `0xBB` carries `FF FF FF`, `0xB0` bit6 is 0,
   **and `0xB5` is unaffected** — ambient has its own gate on the same frame.
-- `014` odometer valid but b4 ≥ `0x80` ⇒ `0xBB` is live with bit6 set while
-  `0xB5` holds and bit3 clears. The converse of the above; both directions
+- `014` odometer valid but b4:b5 == `FF FF` ⇒ `0xBB` is live with bit6 set while
+  `0xB5` holds and bit3 stays set. The converse of the above; both directions
   together prove the two gates are independent.
 - `1B4` b1 == `0xFF` ⇒ heading and sector both hold their previous values and
   `0xB0` bit7 is 0 — **not** `0x01FE` = 510°.

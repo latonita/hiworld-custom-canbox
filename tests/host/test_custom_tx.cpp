@@ -51,7 +51,8 @@ constexpr std::size_t kStride  = ram::kCanRingStride;
 constexpr std::size_t kEntries = ram::kCanRingEntries;
 constexpr std::size_t kIdHi = 0U, kIdLo = 2U, kIde = 4U, kDlc = 5U, kData = 6U;
 
-void pushFrame(std::uint32_t id, const std::uint8_t* data) noexcept
+void pushFrame(std::uint32_t id, const std::uint8_t* data,
+               std::uint8_t dlc = 8U) noexcept
 {
     ram::AppRam& r = ram::app();
     volatile std::uint8_t* e = r.canRxRing
@@ -61,7 +62,7 @@ void pushFrame(std::uint32_t id, const std::uint8_t* data) noexcept
     e[kIdLo]      = static_cast<std::uint8_t>(id);
     e[kIdLo + 1U] = static_cast<std::uint8_t>(id >> 8);
     e[kIde]       = 0U;
-    e[kDlc]       = 8U;
+    e[kDlc]       = dlc;
     for (std::size_t i = 0U; i < 8U; ++i) {
         e[kData + i] = (data != nullptr) ? data[i] : 0U;
     }
@@ -141,23 +142,34 @@ void parkBrake(std::uint8_t b0) noexcept
     pushFrame(logic::canid::kJeepParkBrake, d);
 }
 
-/* 0x014: b0:b1:b2 odometer at 0.1 km/count, b4 ambient in whole degrees C.
- * ONE FRAME, TWO INDEPENDENT SIGNALS with separate gates -- which is the whole
- * point of several tests below, so the builder takes both. */
-void trip(std::uint32_t odoRaw, std::uint8_t b4) noexcept
+/* 0x014: b0:b1:b2 odometer at 0.1 km/count, b4:b5 ambient (u16 BE, 0.01 degC
+ * /count - 40). ONE FRAME, TWO INDEPENDENT SIGNALS with separate gates --
+ * which is the whole point of several tests below, so the builder takes both. */
+void trip(std::uint32_t odoRaw, std::uint16_t ambRaw, std::uint8_t dlc = 7U) noexcept
 {
     const std::uint8_t d[8] = {
         static_cast<std::uint8_t>((odoRaw >> 16) & 0xFFU),
         static_cast<std::uint8_t>((odoRaw >> 8) & 0xFFU),
         static_cast<std::uint8_t>(odoRaw & 0xFFU),
-        0xFFU, b4, 0U, 0U, 0U
+        0xFFU,
+        static_cast<std::uint8_t>(ambRaw >> 8),
+        static_cast<std::uint8_t>(ambRaw & 0xFFU), 0U, 0U
     };
-    pushFrame(logic::canid::kJeepTrip, d);
+    pushFrame(logic::canid::kJeepTrip, d, dlc);
+}
+
+/* raw for a whole-degree temperature, e.g. 25 -> 6500 */
+constexpr std::uint16_t rawC(int degC) noexcept
+{
+    return static_cast<std::uint16_t>((degC + 40) * 100);
 }
 
 /* Ambient alone, with the odometer held at a known-good value so a test that
  * is about temperature cannot be perturbed by the distance field. */
-void ambient(std::uint8_t b4) noexcept { trip(0x12D687U, b4); }
+void ambient(std::uint16_t raw, std::uint8_t dlc = 7U) noexcept
+{
+    trip(0x12D687U, raw, dlc);
+}
 
 /* 0x1B4: b0 8-way sector enum, b1 magnetic heading at 2 deg/count. b2 is a
  * constant 0x07 in 2 953/2 953 frames and is neither forwarded nor acted on. */
@@ -454,8 +466,8 @@ TEST(custom_climate_matches_the_worked_example)
 }
 
 /* THE SIGN CHECK. The decoder cannot currently produce a negative -- the car's
- * negative encoding has never been captured, so customAmbient() rejects any
- * source byte >= 0x80 -- but the PACKING must already be right, or the day a
+ * negative encoding has never been captured, so customAmbient() now decodes
+ * negatives, see the custom_ambient_* tests -- but the PACKING must already be right, or the day a
  * cold start is captured the field silently reads 6529.6 degC. */
 TEST(custom_climate_packs_a_negative_as_twos_complement)
 {
@@ -586,7 +598,7 @@ TEST(custom_throttle_scales_the_pedal_to_percent)
 TEST(custom_ambient_scales_to_decidegrees)
 {
     primed();
-    ambient(25U);
+    ambient(rawC(25));
     decodeOnce();
     logic::customPublish();
 
@@ -790,24 +802,86 @@ TEST(custom_throttle_mismatched_mirror_holds_the_previous_value)
     CHECK_EQ(b3()[5], 44U);        /* unchanged */
 }
 
-/* The car's negative ambient encoding has never been captured, so a byte that
- * looks like a two's-complement negative is suspect, not cold. Hold and blank
- * rather than guess the sign convention. */
-TEST(custom_ambient_suspect_byte_holds_and_clears_validity)
+/* 0xFFFF = unavailable (bus waking). Skipped: previous value AND validity are
+ * kept, so a wake-up burst cannot blank a good reading. */
+TEST(custom_ambient_unavailable_is_skipped_and_holds)
 {
     primed();
-    ambient(25U);
+    ambient(rawC(25));
     decodeOnce();
     logic::customPublish();
     CHECK_EQ(b5()[1], 0xFAU);
     CHECK((validMask() & ram::kValidB5) != 0U);
 
-    ambient(0x90U);
+    ambient(0xFFFFU);
     decodeOnce();
     logic::customPublish();
 
     CHECK_EQ(b5()[0], 0x00U);  CHECK_EQ(b5()[1], 0xFAU);  /* held */
-    CHECK_EQ(validMask() & ram::kValidB5, 0U);
+    CHECK_EQ(validMask() & ram::kValidB5, ram::kValidB5);
+}
+
+/* Check the published s16 decidegrees of one raw value. */
+void checkAmbient(std::uint16_t raw, std::int16_t wantDeci) noexcept
+{
+    ambient(raw);
+    decodeOnce();
+    logic::customPublish();
+    const std::int16_t got = static_cast<std::int16_t>(
+        (static_cast<std::uint16_t>(b5()[0]) << 8) | b5()[1]);
+    CHECK_EQ(got, wantDeci);
+}
+
+TEST(custom_ambient_worked_example_19_50)
+{
+    primed();
+    checkAmbient(0x173EU, 195);               /* 5950 = 19.50 degC */
+    CHECK_EQ(validMask() & ram::kValidB5, ram::kValidB5);
+}
+
+TEST(custom_ambient_negative)
+{
+    primed();
+    checkAmbient(3500U, -50);                 /* -5.00 degC */
+}
+
+/* Nearest tenth, exact half AWAY from zero, symmetric around 0. */
+TEST(custom_ambient_rounds_to_tenths_half_away_from_zero)
+{
+    primed();
+    checkAmbient(5949U, 195);                 /* 19.49 */
+    checkAmbient(5955U, 196);                 /* 19.55 -> half up */
+    checkAmbient(5954U, 195);                 /* 19.54 */
+    checkAmbient(3995U, -1);                  /* -0.05 -> half away */
+    checkAmbient(3996U, 0);                   /* -0.04 */
+    checkAmbient(4005U, 1);                   /* +0.05 */
+    checkAmbient(4004U, 0);
+    checkAmbient(3505U, -50);                 /* -4.95 -> -5.0 */
+    checkAmbient(3495U, -51);                 /* -5.05 -> -5.1 */
+}
+
+TEST(custom_ambient_short_dlc_is_ignored)
+{
+    primed();
+    ambient(rawC(25));
+    decodeOnce();
+    logic::customPublish();
+    ambient(rawC(10), 5U);                    /* no b5 */
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(b5()[0], 0x00U);  CHECK_EQ(b5()[1], 0xFAU);  /* still 25.0 */
+}
+
+TEST(custom_ambient_wire_encoding)
+{
+    primed();
+    const std::uint16_t raws[3] = { rawC(0), rawC(-40), 0xFFFEU };
+    const std::uint8_t want[3][2] = { { 0x00U, 0x00U }, { 0xFEU, 0x70U },
+                                      { 0x18U, 0x09U } };       /* 0, -40.0, 615.3 */
+    for (std::size_t i = 0U; i < 3U; ++i) {
+        ambient(raws[i]); decodeOnce(); logic::customPublish();
+        CHECK_EQ(b5()[0], want[i][0]);  CHECK_EQ(b5()[1], want[i][1]);
+    }
 }
 
 /* INTAKE IS CLAMPED BEFORE BIASING, never computed blindly: 0xFF + 40 truncates
@@ -1201,13 +1275,13 @@ TEST(custom_heartbeat_with_all_eight_commands_live)
 TEST(custom_odometer_unavailable_does_not_disturb_ambient)
 {
     primed();
-    trip(0x12D687U, 25U);
+    trip(0x12D687U, rawC(25));
     decodeOnce();
     logic::customPublish();
     CHECK((validMask() & ram::kValidBB) != 0U);
     CHECK((validMask() & ram::kValidB5) != 0U);
 
-    trip(0x00FFFFFFU, 25U);        /* odometer unavailable, ambient fine */
+    trip(0x00FFFFFFU, rawC(25));        /* odometer unavailable, ambient fine */
     decodeOnce();
     logic::customPublish();
 
@@ -1219,21 +1293,21 @@ TEST(custom_odometer_unavailable_does_not_disturb_ambient)
     CHECK_EQ(validMask() & ram::kValidB5, ram::kValidB5);
 }
 
-TEST(custom_suspect_ambient_does_not_disturb_the_odometer)
+TEST(custom_unavailable_ambient_does_not_disturb_the_odometer)
 {
     primed();
-    trip(0x12D687U, 25U);
+    trip(0x12D687U, rawC(25));
     decodeOnce();
     logic::customPublish();
 
-    trip(0x12D688U, 0x90U);        /* ambient suspect, odometer still moving */
+    trip(0x12D688U, 0xFFFFU);        /* ambient unavailable, odometer still moving */
     decodeOnce();
     logic::customPublish();
 
     CHECK_EQ(bB()[2], 0x88U);                            /* odometer advanced */
     CHECK_EQ(validMask() & ram::kValidBB, ram::kValidBB);
     CHECK_EQ(b5()[1], 0xFAU);                            /* ambient held      */
-    CHECK_EQ(validMask() & ram::kValidB5, 0U);
+    CHECK_EQ(validMask() & ram::kValidB5, ram::kValidB5);
 }
 
 /* The odometer keeps its tenths. benzTrip() divides by 10 because the Benz
@@ -1242,12 +1316,12 @@ TEST(custom_suspect_ambient_does_not_disturb_the_odometer)
 TEST(custom_odometer_keeps_tenths_of_a_kilometre)
 {
     primed();
-    trip(0x12D687U, 25U);
+    trip(0x12D687U, rawC(25));
     decodeOnce();
     logic::customPublish();
     CHECK_EQ(bB()[2], 0x87U);
 
-    trip(0x12D688U, 25U);          /* +100 m */
+    trip(0x12D688U, rawC(25));          /* +100 m */
     decodeOnce();
     logic::customPublish();
     CHECK_EQ(bB()[2], 0x88U);

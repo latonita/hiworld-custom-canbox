@@ -425,7 +425,7 @@ behind `if constexpr (cfg::kIsBenz)`.
 ```cpp
 void benzSpeed(const volatile std::uint8_t* d) noexcept;    // 0x002 d[2]:d[3]
 void benzRpm(const volatile std::uint8_t* d) noexcept;      // 0x002 d[0]:d[1]
-void benzTrip(const volatile std::uint8_t* d) noexcept;     // 0x014 odometer + ambient
+void benzTrip(const volatile std::uint8_t* d) noexcept;     // 0x014 odometer; benzAmbient() = b4:b5
 void benzCoolant(const volatile std::uint8_t* d) noexcept;  // 0x02C d[1]
 void benzVoltage(const volatile std::uint8_t* d) noexcept;  // 0x015 d[1]
 ```
@@ -457,7 +457,7 @@ void customPrimeSignals() noexcept;                              // sentinels, o
 void customIgnition(std::uint8_t b0) noexcept;                   // 0x000 b0
 void customEngine(const volatile std::uint8_t* d) noexcept;      // 0x002 rpm + speed
 void customGear(const volatile std::uint8_t* d) noexcept;        // 0x003 b4 ASCII PRNDL
-void customAmbient(const volatile std::uint8_t* d) noexcept;     // 0x014 b4
+void customAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept; // 0x014 b4:b5
 void customVoltsIntake(const volatile std::uint8_t* d) noexcept; // 0x015 b1, b2
 void customCoolant(const volatile std::uint8_t* d) noexcept;     // 0x02C b1
 void customParkBrake(const volatile std::uint8_t* d) noexcept;   // 0x0D0 b0 bit 7

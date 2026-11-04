@@ -67,8 +67,9 @@ void customEngine(const volatile std::uint8_t* d) noexcept;
 /* 0x003 b4 -- the ASCII PRNDL character; 'R' is the reverse bit. */
 void customGear(const volatile std::uint8_t* d) noexcept;
 
-/* 0x014 b4 -- outside air temperature, whole degrees C. */
-void customAmbient(const volatile std::uint8_t* d) noexcept;
+/* 0x014 b4:b5 -- outside air, u16 BE, 0.01 degC/count - 40; whole degrees out.
+ * 0xFFFF or dlc < 6: skipped, previous value kept. */
+void customAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept;
 
 /* 0x014 b0:b1:b2 -- odometer, 24-bit, 0.1 km/count.
  *

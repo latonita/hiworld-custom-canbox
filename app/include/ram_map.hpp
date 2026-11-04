@@ -439,7 +439,7 @@ struct Telemetry {
     volatile std::uint16_t rpm;           /* 1 rpm                 0x002 b0:b1 */
     volatile std::uint16_t speedKph;      /* km/h            0x002 b2:b3 / 128 */
     volatile std::uint32_t odometerKm;    /* km, 24-bit    0x014 b0:b2 / 10    */
-    volatile std::uint16_t ambientDeciC;  /* 0.1 degC, >= 0      0x014 b4 * 10 */
+    volatile std::uint16_t ambientDeciC;  /* 0.1 degC, >= 0      0x014 b4:b5, shared */
     volatile std::uint16_t coolantC;      /* degC, >= 0          0x02C b1 - 40 */
     volatile std::uint16_t deciVolts;     /* 0.1 V                    0x015 b1 */
 };
@@ -594,7 +594,7 @@ struct CustomSignals {
     volatile std::uint8_t  intakeBias40;    /* degC+40             0x015 b2   */
     volatile std::uint8_t  fuelPct;         /* 0..100              0x159 b5   */
     volatile std::uint16_t centiVolts;      /* 0.01 V              0x015 b1   */
-    volatile std::int16_t  outsideDeciC;    /* 0.1 degC, signed    0x014 b4   */
+    volatile std::int16_t  outsideDeciC;    /* 0.1 degC, signed    0x014 b4:b5 */
     volatile std::uint16_t fuelDecilitres;  /* 0.1 L               0x159 b5   */
     volatile std::uint32_t odometerDeciKm;  /* 0.1 km, 24-bit  0x014 b0:b1:b2 */
     volatile std::uint16_t headingDeg;      /* whole deg magnetic  0x1B4 b1*2 */

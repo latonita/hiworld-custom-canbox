@@ -41,7 +41,8 @@ constexpr std::size_t kStride  = ram::kCanRingStride;
 constexpr std::size_t kEntries = ram::kCanRingEntries;
 constexpr std::size_t kIdHi = 0U, kIdLo = 2U, kIde = 4U, kDlc = 5U, kData = 6U;
 
-void pushFrame(std::uint32_t id, const std::uint8_t* data) noexcept
+void pushFrame(std::uint32_t id, const std::uint8_t* data,
+               std::uint8_t dlc = 8U) noexcept
 {
     ram::AppRam& r = ram::app();
     volatile std::uint8_t* e = r.canRxRing
@@ -51,7 +52,7 @@ void pushFrame(std::uint32_t id, const std::uint8_t* data) noexcept
     e[kIdLo]      = static_cast<std::uint8_t>(id);
     e[kIdLo + 1U] = static_cast<std::uint8_t>(id >> 8);
     e[kIde]       = 0U;
-    e[kDlc]       = 8U;
+    e[kDlc]       = dlc;
     for (std::size_t i = 0U; i < 8U; ++i) {
         e[kData + i] = (data != nullptr) ? data[i] : 0U;
     }
@@ -287,19 +288,24 @@ TEST(benz_holds_last_value_when_the_car_reports_unavailable)
     CHECK_EQ(ram::app().telemetry.speedKph, 88U);
 }
 
-/* 0x014: b0:b1:b2 odometer at 0.1 km/count, b4 ambient in whole degrees. */
+/* 0x014: b0:b1:b2 odometer at 0.1 km/count, b4:b5 ambient (u16 BE, 0.01 C/count - 40). */
+void trip014(std::uint16_t raw, std::uint8_t dlc = 7U) noexcept
+{
+    const std::uint8_t d[8] = { 0x12U, 0xD6U, 0x87U, 0xFFU,
+                                static_cast<std::uint8_t>(raw >> 8),
+                                static_cast<std::uint8_t>(raw & 0xFFU), 0U, 0U };
+    pushFrame(0x014U, d, dlc);
+    decodeOnce();
+}
+
 TEST(benz_decodes_odometer_and_ambient_from_0x014)
 {
     fake::reset();
     accOn();
-
+    trip014(0x173EU);                                   /* 5950 = 19.50 C */
     /* 1 234 567 tenths = 123 456.7 km -> 123456 km after the /10 */
-    const std::uint8_t d[8] = { 0x12U, 0xD6U, 0x87U, 0xFFU, 23U, 0U, 0U, 0U };
-    pushFrame(0x014U, d);
-    decodeOnce();
-
     CHECK_EQ(ram::app().telemetry.odometerKm, 123456U);
-    CHECK_EQ(ram::app().telemetry.ambientDeciC, 230U);   /* 23.0 C */
+    CHECK_EQ(ram::app().telemetry.ambientDeciC, 195U);
 }
 
 /* The Benz ambient field is UNSIGNED 0.1 C. A sub-zero reading would wrap to
@@ -308,12 +314,21 @@ TEST(benz_clamps_sub_zero_ambient_rather_than_wrapping)
 {
     fake::reset();
     accOn();
-
-    const std::uint8_t d[8] = { 0x00U, 0x00U, 0x00U, 0xFFU, 0xF6U, 0U, 0U, 0U };
-    pushFrame(0x014U, d);
-    decodeOnce();
-
+    trip014(3500U);                                     /* -5.00 C */
     CHECK_EQ(ram::app().telemetry.ambientDeciC, 0U);
+}
+
+TEST(benz_ambient_unavailable_and_short_dlc_hold)
+{
+    fake::reset();
+    accOn();
+    trip014(0x173EU);
+    trip014(0xFFFFU);                                   /* unavailable */
+    CHECK_EQ(ram::app().telemetry.ambientDeciC, 195U);
+    trip014(5000U, 5U);                              /* no b5 */
+    CHECK_EQ(ram::app().telemetry.ambientDeciC, 195U);
+    trip014(5955U);                                     /* half rounds up */
+    CHECK_EQ(ram::app().telemetry.ambientDeciC, 196U);
 }
 
 /* An unavailable odometer must not be published as 1677721 km. */

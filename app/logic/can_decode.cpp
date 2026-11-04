@@ -474,12 +474,13 @@ void decodeProfileJeep() noexcept
         case canid::kJeepTrip:
             if constexpr (cfg::kIsBenz) {
                 benzTrip(d);
+                benzAmbient(d, svc::can::rxDlc());
             } else {
                 /* TWO INDEPENDENT READERS of one frame, with separate gates and
-                 * separate validity bits: b4 ambient can be suspect while
+                 * separate validity bits: b4:b5 ambient can be unavailable while
                  * b0:b1:b2 odometer is live, and the converse. Kept as two
                  * functions for exactly that reason -- see custom_decode.hpp. */
-                customAmbient(d);
+                customAmbient(d, svc::can::rxDlc());
                 customOdometer(d);
             }
             break;

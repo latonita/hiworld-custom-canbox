@@ -60,7 +60,7 @@ constexpr std::uint8_t  kRunStreakNeeded = 3U;
 /* 0x1A7 fuel flow (spec section 10): the averaging window, the longest
  * inter-frame gap still integrated (three missed 100 ms frames), and the top
  * of the published range -- 0xFFFF is the sentinel, so 0xFFFE is the ceiling.
- * It is DEFENSIVE: Q <= 0xFFFE gives at most 4096 deci-L/h (409.6 L/h), so the
+ * It is DEFENSIVE: Q <= 0xFFFE gives at most 5120 deci-L/h (512.0 L/h), so the
  * clamp cannot bind today; it is there so a future change to the divisor can
  * never make a reading collide with the sentinel. */
 constexpr std::uint32_t kFlowWindowMs = 1000U;
@@ -727,13 +727,13 @@ void customCompass(const volatile std::uint8_t* d) noexcept
 
 /* ============================================================================
  * 0x1A7 b0:b1 -- fuel-flow RATE, for 0xBC FLOW. docs/CUSTOM-TX-SPEC.md s10.
- * Evidence: id 0x1A7, rate identity probable; the divisor is anchored at idle
- * (~0.76 L/h), at rated power (40.0 vs 40.3 L/h) and by urban consumption, and
- * a 1449.6 s drive replay integrates to 10.43 L/100 km. NOT yet verified at the
- * pump -- which is why this stays a rate and the litres stay the radio's job.
+ * Evidence: id 0x1A7, rate identity probable; the divisor 128 was fitted
+ * against the PCM's own fuel-rate reading (OBD 212B) on two drives. It is not
+ * verified at the pump -- which is why this stays a rate and the litres stay
+ * the radio's job.
  *
  * Q = (b0 << 8) | b1, unsigned big-endian, and it is ALREADY a rate:
- * L/h = Q / 160, so deci-L/h = Q / 16. Three ways to get this wrong, all of
+ * L/h = Q / 128, so deci-L/h = Q * 10 / 128. Three ways to get this wrong, all of
  * which the byte map warns about:
  *   - NEVER MULTIPLY BY RPM. Q is not per-revolution; that turns a rate into
  *     a number that tracks the tachometer, not the injectors.
@@ -755,7 +755,7 @@ void customCompass(const volatile std::uint8_t* d) noexcept
  * the far side of a hole. customFuelFlowTick() turns the sums into a value.
  *
  * Overflow: Q <= 0xFFFE and each counted dt <= 300 ms; a window collects at
- * most ~1.3 s of dt, so sumQdt <= ~8.6e7 and u32 is 50x clear of 4.29e9.
+ * most ~1.3 s of dt, so sumQdt <= ~8.6e7 and u32 is 50x clear of 4.29e9 (5x clear after the x10).
  *
  * No DLC check: the dispatcher hands over the data pointer only, like every
  * other custom decoder here. The id is unique to this signal on the WK body
@@ -786,11 +786,11 @@ void customFuelFlow(const volatile std::uint8_t* d) noexcept
 }
 
 /* The window close. Every 1000 ms: if any interval was integrated, publish
- * round-half-up(sumQdt / sumDt / 16) deci-L/h clamped to 0xFFFE (0xFFFF is the
+ * round-half-up(sumQdt * 10 / sumDt / 128) deci-L/h clamped to 0xFFFE (0xFFFF is the
  * sentinel and must not be reachable as a reading); otherwise 0xFFFF. Both sums
  * reset either way. Runs from the 8 ms task so a silent bus -- no 0x1A7 at all
  * -- still turns into 0xFFFF after a second instead of holding the last value
- * for ever. Integer half-up: floor((S + 8*T) / (16*T)). The 0.1 L/h
+ * for ever. Integer half-up: floor((10*S + 64*T) / (128*T)). The 0.1 L/h
  * resolution is the deadband, as 0.1 V is for volts. */
 void customFuelFlowTick() noexcept
 {
@@ -803,8 +803,9 @@ void customFuelFlowTick() noexcept
     c.flowWindowMs = now;
 
     if (c.flowSumDt > 0U) {
-        std::uint32_t v = (c.flowSumQdt + 8U * c.flowSumDt)
-                        / (16U * c.flowSumDt);
+        /* 10 * sumQdt <= ~8.6e8, inside 2^32 */
+        std::uint32_t v = (10U * c.flowSumQdt + 64U * c.flowSumDt)
+                        / (128U * c.flowSumDt);
         if (v > kFlowMaxDeci) {
             v = kFlowMaxDeci;
         }

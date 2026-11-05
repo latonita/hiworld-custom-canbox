@@ -599,7 +599,7 @@ struct CustomSignals {
     volatile std::uint32_t odometerDeciKm;  /* 0.1 km, 24-bit  0x014 b0:b1:b2 */
     volatile std::uint16_t headingDeg;      /* whole deg magnetic  0x1B4 b1*2 */
     volatile std::uint8_t  compassSector;   /* 8-way enum, 0=N     0x1B4 b0   */
-    volatile std::uint16_t flowDeciLph;     /* 0.1 L/h, 0xFFFF=n/a 0x1A7 b0:b1/16 */
+    volatile std::uint16_t flowDeciLph;     /* 0.1 L/h, 0xFFFF=n/a 0x1A7 b0:b1*10/128 */
 
     /* ---- fuel-flow averaging window (logic::customFuelFlow / ...Tick) -----
      * A rate, not a level, so it needs the box's own clock. sumQdt is

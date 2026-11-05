@@ -1759,8 +1759,8 @@ TEST(custom_block_leaves_the_six_stock_slots_alone)
  * is a time-weighted average. The window opens at counter 0 after primed() and
  * closes on the first customPublish() at or after 1000 ms.
  *
- * L/h = Q / 160, so deci-L/h = Q / 16: Q = 1600 is 10.0 L/h, Q = 1968 is
- * 12.3 L/h exactly. The expected values below are worked out by hand from that
+ * L/h = Q / 128, so deci-L/h = Q * 10 / 128: Q = 1280 is 10.0 L/h, Q = 1536 is
+ * 12.0 L/h exactly. The expected values below are worked out by hand from that
  * and never read back from the firmware.
  * ========================================================================= */
 
@@ -1799,15 +1799,15 @@ void steadyFlow(std::uint16_t q) noexcept
 
 }  // namespace
 
-/* Spec vector: 12.3 L/h = Q 1968 steady -> 123 deci-L/h = 0x007B. */
+/* Spec vector: 12.0 L/h = Q 1536 steady -> 120 deci-L/h = 0x0078. */
 TEST(flow_normal_value_matches_the_worked_example)
 {
     primed();
-    steadyFlow(1968U);
+    steadyFlow(1536U);
     std::uint8_t wire[8];
     closeWindow(wire);
     const std::uint8_t want[7] = { 0xAAU, 0x55U, 0x02U, 0xBCU,
-                                   0x00U, 0x7BU, 0x38U };
+                                   0x00U, 0x78U, 0x35U };
     CHECK_BYTES(wire, want, 7U);
 }
 
@@ -1849,7 +1849,7 @@ TEST(flow_cold_boot_primes_unavailable_before_the_first_window)
 TEST(flow_bus_going_silent_returns_to_unavailable)
 {
     primed();
-    steadyFlow(1600U);
+    steadyFlow(1280U);
     std::uint8_t wire[8];
     closeWindow(wire);
     CHECK_EQ(bC()[0], 0x00U);
@@ -1861,12 +1861,12 @@ TEST(flow_bus_going_silent_returns_to_unavailable)
     CHECK_EQ(bC()[1], 0xFFU);
 }
 
-/* 600 ms at Q = 1600 (10.0 L/h) then 400 ms at Q = 0 -> 0.6 x 10 = 6.0 L/h,
+/* 600 ms at Q = 1280 (10.0 L/h) then 400 ms at Q = 0 -> 0.6 x 10 = 6.0 L/h,
  * i.e. 60 = 0x3C. A plain frame average would say 6/11 x 10 = 5.45. */
 TEST(flow_mixed_values_are_time_weighted)
 {
     primed();
-    for (std::uint32_t t = 0U; t <= 600U; t += 100U) { flowFrame(t, 1600U); }
+    for (std::uint32_t t = 0U; t <= 600U; t += 100U) { flowFrame(t, 1280U); }
     for (std::uint32_t t = 700U; t <= 1000U; t += 100U) { flowFrame(t, 0U); }
     std::uint8_t wire[8];
     closeWindow(wire);
@@ -1875,14 +1875,14 @@ TEST(flow_mixed_values_are_time_weighted)
     CHECK_BYTES(wire, want, 7U);
 }
 
-/* Unequal spacing is weighted by dt, not by frame count: Q = 3200 over one
- * 250 ms interval and Q = 0 over one 50 ms interval -> 3200*250/300 = 2666.7
- * -> /16 = 166.7 -> 167. */
+/* Unequal spacing is weighted by dt, not by frame count: Q = 2560 over one
+ * 250 ms interval and Q = 0 over one 50 ms interval -> 2560*250/300 = 2133.3
+ * -> *10/128 = 166.7 -> 167. */
 TEST(flow_weights_by_interval_length_not_frame_count)
 {
     primed();
-    flowFrame(0U, 3200U);
-    flowFrame(250U, 3200U);
+    flowFrame(0U, 2560U);
+    flowFrame(250U, 2560U);
     flowFrame(300U, 0U);
     std::uint8_t wire[8];
     closeWindow(wire);
@@ -1891,22 +1891,22 @@ TEST(flow_weights_by_interval_length_not_frame_count)
 }
 
 /* A 0xFFFF frame is rejected whole AND voids the interval after it. Timeline:
- *   t=0   Q 1600   first frame, nothing to integrate
- *   t=100 Q 1600   +100 ms @ 1600
+ *   t=0   Q 1280   first frame, nothing to integrate
+ *   t=100 Q 1280   +100 ms @ 1280
  *   t=200 FFFF     rejected, lastFlowMs invalidated
- *   t=300 Q 3200   NOT counted (its dt would span the hole)
- *   t=400 Q 1600   +100 ms @ 1600
- * -> 1600 exactly = 10.0 L/h = 100. If the interval after the FFFF were
- * counted the answer would be 640000/300 = 2133 = 13.3 L/h, and if the 0xFFFF
+ *   t=300 Q 2560   NOT counted (its dt would span the hole)
+ *   t=400 Q 1280   +100 ms @ 1280
+ * -> 1280 exactly = 10.0 L/h = 100. If the interval after the FFFF were
+ * counted the answer would be 512000/300 = 1707 = 13.3 L/h, and if the 0xFFFF
  * were read as a Q it would be hundreds of L/h. */
 TEST(flow_unavailable_frame_is_rejected_and_skips_the_next_interval)
 {
     primed();
-    flowFrame(0U, 1600U);
-    flowFrame(100U, 1600U);
+    flowFrame(0U, 1280U);
+    flowFrame(100U, 1280U);
     flowFrame(200U, 0xFFFFU);
-    flowFrame(300U, 3200U);
-    flowFrame(400U, 1600U);
+    flowFrame(300U, 2560U);
+    flowFrame(400U, 1280U);
     std::uint8_t wire[8];
     closeWindow(wire);
     CHECK_EQ(bC()[0], 0x00U);
@@ -1930,10 +1930,10 @@ TEST(flow_all_unavailable_frames_publish_unavailable)
 TEST(flow_gap_over_300ms_is_dropped)
 {
     primed();
-    flowFrame(0U, 1600U);
-    flowFrame(100U, 1600U);
+    flowFrame(0U, 1280U);
+    flowFrame(100U, 1280U);
     flowFrame(500U, 16000U);           /* 400 ms gap: stamp only */
-    flowFrame(600U, 1600U);            /* +100 ms @ 1600 */
+    flowFrame(600U, 1280U);            /* +100 ms @ 1280 */
     std::uint8_t wire[8];
     closeWindow(wire);
     CHECK_EQ(bC()[0], 0x00U);
@@ -1944,30 +1944,31 @@ TEST(flow_gap_over_300ms_is_dropped)
 TEST(flow_gap_of_exactly_300ms_is_kept)
 {
     primed();
-    flowFrame(0U, 1600U);
-    flowFrame(300U, 3200U);            /* 300 ms @ 3200 = 20.0 L/h */
+    flowFrame(0U, 1280U);
+    flowFrame(300U, 2560U);            /* 300 ms @ 2560 = 20.0 L/h */
     std::uint8_t wire[8];
     closeWindow(wire);
     CHECK_EQ(bC()[0], 0x00U);
     CHECK_EQ(bC()[1], 0xC8U);          /* 200 */
 }
 
-/* Integer rounding is half-up: Q 1960 = 122.5 -> 123, Q 1959 = 122.4375 -> 122. */
+/* Integer rounding is half-up: Q 1612 = 125.9375 -> 126, Q 1613 = 126.016 ->
+ * 126; the boundary is Q 1606 = 125.47 -> 125 and Q 1607 = 125.55 -> 126. */
 TEST(flow_rounds_half_up)
 {
     primed();
-    steadyFlow(1960U);
+    steadyFlow(1607U);
     std::uint8_t wire[8];
     closeWindow(wire);
-    CHECK_EQ(bC()[1], 123U);
+    CHECK_EQ(bC()[1], 126U);
 
     primed();
-    steadyFlow(1959U);
+    steadyFlow(1606U);
     closeWindow(wire);
-    CHECK_EQ(bC()[1], 122U);
+    CHECK_EQ(bC()[1], 125U);
 }
 
-/* Largest representable reading. Q = 0xFFFE is 409.6 L/h = 4096 = 0x1000, so
+/* Largest representable reading. Q = 0xFFFE is 511.98 L/h = 5120 = 0x1400, so
  * the 0xFFFE clamp is defensive only -- but the result must never be 0xFFFF,
  * which is the sentinel. */
 TEST(flow_maximum_reading_is_not_confused_with_the_sentinel)
@@ -1977,7 +1978,7 @@ TEST(flow_maximum_reading_is_not_confused_with_the_sentinel)
     std::uint8_t wire[8];
     closeWindow(wire);
     const std::uint8_t want[7] = { 0xAAU, 0x55U, 0x02U, 0xBCU,
-                                   0x10U, 0x00U, 0xCDU };
+                                   0x14U, 0x00U, 0xD1U };
     CHECK_BYTES(wire, want, 7U);
     CHECK(ram::app().customSignals.flowDeciLph != 0xFFFFU);
 }
@@ -1987,7 +1988,7 @@ TEST(flow_maximum_reading_is_not_confused_with_the_sentinel)
 TEST(flow_windows_do_not_leak_into_each_other)
 {
     primed();
-    steadyFlow(1600U);
+    steadyFlow(1280U);
     std::uint8_t wire[8];
     closeWindow(wire);
     CHECK_EQ(bC()[1], 0x64U);
@@ -2011,7 +2012,7 @@ TEST(flow_has_no_validity_bit_and_leaves_fuel_level_alone)
     const std::uint8_t litre0 = b8()[0];
     const std::uint8_t litre1 = b8()[1];
 
-    steadyFlow(1968U);
+    steadyFlow(1536U);
     std::uint8_t wire[8];
     closeWindow(wire);
     CHECK_EQ(validMask(), maskBefore);

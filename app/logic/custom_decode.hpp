@@ -84,7 +84,7 @@ void customOdometer(const volatile std::uint8_t* d) noexcept;
 /* 0x1B4 b0 compass sector, b1 magnetic heading at 2 deg/count. */
 void customCompass(const volatile std::uint8_t* d) noexcept;
 
-/* 0x1A7 b0:b1 -- fuel-flow RATE (L/h = Q/160). Accumulates a time-weighted
+/* 0x1A7 b0:b1 -- fuel-flow RATE (L/h = Q/128). Accumulates a time-weighted
  * sum for the 1 s window; publishes nothing itself. One function, one signal:
  * deliberately NOT folded into customFuel() (0x159, the tank LEVEL). */
 void customFuelFlow(const volatile std::uint8_t* d) noexcept;

@@ -676,11 +676,11 @@ BODY2 and `0xBF` stay reserved; do not touch them.**
 
 | off | field | source | arithmetic |
 |---|---|---|---|
-| 0:1 | fuel flow, u16 big-endian, **0.1 L/h** | `1A7` b0:b1 | **1 s time-weighted average**, `round(Σ(Q·dt) / Σ(dt) / 16)` |
+| 0:1 | fuel flow, u16 big-endian, **0.1 L/h** | `1A7` b0:b1 | **1 s time-weighted average**, `round(Σ(Q·dt) * 10 / Σ(dt) / 128)` |
 
 `1A7` is 6 bytes at ~100 ms while the engine runs (~400 ms at key-off).
 `Q = (b0<<8)|b1`, unsigned big-endian, and **it is already a rate**:
-`L/h = Q / 160`, so `deci-L/h = Q / 16`. Three rules, each of which is a way to
+`L/h = Q / 128`, so `deci-L/h = Q * 10 / 128`. Three rules, each of which is a way to
 get a plausible wrong number:
 
 - **Never multiply by rpm.** `Q` is not per-revolution.
@@ -689,16 +689,16 @@ get a plausible wrong number:
 - **`Q == 0` is a real reading.** Fuel cut on overrun injects nothing and must
   be integrated as zero. Only `Q == 0xFFFF` means unavailable.
 
-Evidence for `/160`: idle ~0.76 L/h, rated power 40.0 vs 40.3 L/h, urban
-consumption, and a 1449.6 s drive replay that integrates to 10.43 L/100 km.
-**Not yet verified at the pump.** That is why the box publishes the rate and
+Evidence for `/128`: fitted against the PCM's own fuel rate (OBD `212B`) on two
+drives (byte map, "Derived values"); it replaces an earlier `/160`.
+**Not verified at the pump.** That is why the box publishes the rate and
 nothing derived from it (§10.7). The reference implementation of the same
 integration on another device is `jeep-carputer/core/Trip.h`.
 
 Resolution of 0.1 L/h doubles as the deadband, by the same reasoning as volts at
 0.1 V: the payload cannot change on sub-resolution noise, so it claims a TX slot
 only when a human-visible digit moves. Full scale is `0xFFFE` = 6553.4 L/h; the
-largest reading the divisor can produce is `Q = 0xFFFE` → `0x1000` = 409.6 L/h,
+largest reading the divisor can produce is `Q = 0xFFFE` → `0x1400` = 512.0 L/h,
 so the clamp in §10.3 is defensive and cannot bind.
 
 ### 10.3 The averaging window
@@ -725,20 +725,20 @@ the decoder — so a bus that has gone silent still turns into `0xFFFF` after a
 second instead of holding the last number for ever):
 
 ```
-if sumDt > 0:  publish min( floor((sumQdt + 8*sumDt) / (16*sumDt)), 0xFFFE )
+if sumDt > 0:  publish min( floor((10*sumQdt + 64*sumDt) / (128*sumDt)), 0xFFFE )
 else:          publish 0xFFFF
 sumQdt = sumDt = 0
 ```
 
-`floor((S + 8T) / 16T)` is integer round-half-up of `S / T / 16`.
+`floor((10S + 64T) / 128T)` is integer round-half-up of `S / T * 10 / 128`.
 
 **Overflow bound (u32 is enough).** `Q ≤ 0xFFFE` and each counted `dt ≤ 300 ms`.
 Intervals are attributed to the window in which their frame arrived, so one
 window holds at most ~1000 + 300 ms of `dt` plus the 8 ms task slop, call it
 1.3 s: `sumQdt ≤ 65 534 × 1 310 ≈ 8.6e7`, 50× inside `2^32`. Even with the main
 loop stalled the sums cannot grow without bound, because a counted `dt` is
-capped at 300 ms per frame and the ring holds 50 entries. `8·sumDt` in the
-rounding term adds ~10 000 — nothing.
+capped at 300 ms per frame and the ring holds 50 entries. The x10 in the
+numerator takes it to ~8.6e8, still 5x inside `2^32`.
 
 Zero state: both sums zero, `haveLast` clear, window start = the counter at
 priming. `customFuelFlow()` is **its own function**, one signal; it is
@@ -808,34 +808,34 @@ double-checked against the full byte sum including `AA 55`.
 
 | frame | meaning |
 |---|---|
-| `AA 55 02 BC 00 7B 38` | 12.3 L/h (`Q` = 1968 steady for 1 s → 123 deci-L/h) |
+| `AA 55 02 BC 00 78 35` | 12.0 L/h (`Q` = 1536 steady for 1 s → 120 deci-L/h) |
 | `AA 55 02 BC 00 00 BD` | **0.0 L/h — overrun fuel cut, a real reading, not a blank** |
 | `AA 55 02 BC FF FF BB` | unavailable (boot, silent second, only-rejected frames) |
-| `AA 55 02 BC 00 3C F9` | 6.0 L/h (600 ms at `Q`=1600 + 400 ms at `Q`=0) |
-| `AA 55 02 BC 10 00 CD` | 409.6 L/h, the largest value the divisor can produce |
+| `AA 55 02 BC 00 3C F9` | 6.0 L/h (600 ms at `Q`=1280 + 400 ms at `Q`=0) |
+| `AA 55 02 BC 14 00 D1` | 512.0 L/h, the largest value the divisor can produce |
 
-Worked check on the first: `0x02 + 0xBC + 0x00 + 0x7B − 1 = 0x138` → `0x38`;
-full sum `0xAA + 0x55 + 0x02 + 0xBC + 0x00 + 0x7B = 0x238` → `0x38`. ✓
-`1968 / 16 = 123.0`, and `1968 / 160 = 12.3`. Third: `0x02 + 0xBC + 0xFF + 0xFF −
-1 = 0x2BB` → `0xBB`. Fourth: `960 000 / 1000 / 16 = 60 = 0x3C`; `0x02 + 0xBC +
-0x3C − 1 = 0xF9`. Second: `0x02 + 0xBC − 1 = 0xBD`. Fifth: `0x02 + 0xBC + 0x10 − 1
-= 0xCD`.
+Worked check on the first: `0x02 + 0xBC + 0x00 + 0x78 − 1 = 0x135` → `0x35`;
+full sum `0xAA + 0x55 + 0x02 + 0xBC + 0x00 + 0x78 = 0x235` → `0x35`. ✓
+`1536 * 10 / 128 = 120`. Third: `0x02 + 0xBC + 0xFF + 0xFF −
+1 = 0x2BB` → `0xBB`. Fourth: `768 000 * 10 / 1000 / 128 = 60 = 0x3C`; `0x02 + 0xBC +
+0x3C − 1 = 0xF9`. Second: `0x02 + 0xBC − 1 = 0xBD`. Fifth: `0x02 + 0xBC + 0x14 − 1
+= 0xD1`.
 
 Also tested:
 
 - `Q = 0` frames are integrated as zero: the result is `00 00`, **not** `FF FF`.
 - a `0xFFFF` frame is rejected, and the interval after it is skipped:
-  `Q` 1600, 1600, `FFFF`, 3200, 1600 at 100 ms spacing → exactly 10.0 L/h (if
-  the 3200 interval were counted it would be 13.3).
+  `Q` 1280, 1280, `FFFF`, 2560, 1280 at 100 ms spacing → exactly 10.0 L/h (if
+  the 2560 interval were counted it would be 13.3).
 - a gap over 300 ms is dropped (a 400 ms hole with a `Q` = 16000 frame after it
   does not move the result); a gap of exactly 300 ms is kept.
 - a window with no frames at all → `FF FF`, and a good window followed by a
   silent one → `FF FF` again, not the old value.
-- time-weighting by interval length, not frame count (250 ms at 3200 + 50 ms at
+- time-weighting by interval length, not frame count (250 ms at 2560 + 50 ms at
   0 → 167, not 80).
-- round half-up: `Q` 1960 → 123, `Q` 1959 → 122.
+- round half-up: `Q` 1607 → 126, `Q` 1606 → 125.
 - the sums reset on close: a quiet second after a busy one reads 0.0.
-- `0xFFFE` never collides with the sentinel (maximum reading → `10 00`).
+- `0xFFFE` never collides with the sentinel (maximum reading → `14 00`).
 - accepting flow frames leaves the `0xB0` mask and `0xB8` untouched.
 - cold boot: `0xBC` is `FF FF` before the first window closes.
 - `kTxSlotCount` == 16 ⇒ `uartSlotState` is 16 long, `uartTxSlotIdx` is intact
@@ -851,5 +851,5 @@ Also tested:
   field stays parked at `0xFFFF`.
 - A validity bit for `0xBC` (§10.4) — needs the second mask byte.
 - `0xBA` LIGHTING, `0xBE` BODY2, `0xBF`.
-- Verifying the `/160` divisor at the pump. Until then the rate is published and
+- Verifying the `/128` divisor at the pump. Until then the rate is published and
   nothing derived from it is trusted on this side.

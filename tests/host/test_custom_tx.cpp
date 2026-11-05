@@ -203,7 +203,14 @@ void raw500(std::uint8_t b0, std::uint8_t b1, std::uint8_t b2) noexcept
 void armPoll() noexcept
 {
     ram::app().canBusStatus = cfg::kBusRunning;
-    ram::app().customSignals.tpmsPollDiv = 3749U;   /* kTpmsPollPasses - 1 */
+    ram::app().customSignals.tpmsPollDiv = 1249U;   /* kTpmsPollPasses - 1 */
+}
+
+/* ...and make that request the pressure read (21 3B), the start of the cycle. */
+void armPollA() noexcept
+{
+    ram::app().customSignals.tpmsStep = 0U;
+    armPoll();
 }
 
 /* One 8 ms pass of the poll state machine, plus the 4 ms task's drain --
@@ -1593,7 +1600,7 @@ TEST(tpms_goes_stale_after_four_missed_polls)
     CHECK_EQ(validMask() & ram::kValidB7, ram::kValidB7);
 
     for (int miss = 0; miss < 4; ++miss) {
-        armPoll();
+        armPollA();
         pollPass();                   /* request goes out */
         runOutDeadline();             /* ...and times out */
     }
@@ -1614,7 +1621,7 @@ TEST(tpms_survives_three_missed_polls)
     decodeOnce();
 
     for (int miss = 0; miss < 3; ++miss) {
-        armPoll();
+        armPollA();
         pollPass();
         runOutDeadline();
     }
@@ -1714,6 +1721,365 @@ TEST(tpms_absent_sensor_is_no_signal_for_that_tyre_only)
         logic::customPublish();
         CHECK_EQ(b7()[4], 0U);
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * The per-wheel reads: 21 2n (temperature, battery, trigger) and 21 25+n
+ * (low-pressure warning). One request every 10 s in the cycle
+ *   21 3B, 21 2n, 21 25+n, (next wheel) 21 3B ...
+ * ------------------------------------------------------------------------- */
+static void armStep(std::uint8_t step, std::uint8_t wheel) noexcept
+{
+    ram::app().customSignals.tpmsStep  = step;
+    ram::app().customSignals.tpmsWheel = wheel;
+    armPoll();
+    pollPass();
+}
+
+/* 21 2n answer: 61 2n P T X S M. S = frame no. | battery<<2 | trigger<<4 | state<<6 */
+static void sensorReply(std::uint8_t n, std::uint8_t temp, std::uint8_t batt,
+                        std::uint8_t trig, std::uint8_t state = 0U) noexcept
+{
+    const std::uint8_t s = static_cast<std::uint8_t>(
+        1U | (batt << 2) | (trig << 4) | (state << 6));
+    const std::uint8_t d[8] = { 0x07U, 0x61U, static_cast<std::uint8_t>(0x20U + n),
+                                0x20U, temp, 0x00U, s, 0xD2U };
+    pushFrame(logic::canid::kJeepVendorEcho, d);
+}
+
+/* 21 25+n answer: 61 2n+5 B2 B3. */
+static void diagReply(std::uint8_t n, std::uint8_t b2, std::uint8_t b3) noexcept
+{
+    const std::uint8_t d[8] = { 0x04U, 0x61U, static_cast<std::uint8_t>(0x25U + n),
+                                b2, b3, 0xD2U, 0xD2U, 0xD2U };
+    pushFrame(logic::canid::kJeepVendorEcho, d);
+}
+
+/* All four pressures good (33, 32, 33, 30 psi). */
+static void livePressures() noexcept
+{
+    primed();
+    armPollA();
+    pollPass();
+    tpmsReply(0x21U, 0x20U, 0x21U, 0x1EU);
+    decodeOnce();
+}
+
+static void publishPos(std::uint8_t pos) noexcept
+{
+    ram::app().customSignals.tpmsPosition = pos;
+    logic::customPublish();
+}
+
+/* One failed read of a request type: send it, let it time out. */
+static void failRead(std::uint8_t step, std::uint8_t wheel) noexcept
+{
+    armStep(step, wheel);
+    runOutDeadline();
+}
+
+TEST(tpms_cycle_order_and_ten_second_spacing)
+{
+    primed();
+    ram::app().canBusStatus = cfg::kBusRunning;
+
+    static const std::uint8_t want[14] = {
+        0x3BU, 0x20U, 0x25U, 0x3BU, 0x21U, 0x26U, 0x3BU,
+        0x22U, 0x27U, 0x3BU, 0x23U, 0x28U, 0x3BU, 0x20U };
+    std::uint8_t  got[14];
+    unsigned      at[14];
+    unsigned      n = 0U;
+    unsigned      seen = 0U;
+
+    /* Every request is answered at once, so the 10 s gap is the divider alone. */
+    for (unsigned pass = 0U; pass < 1250U * 15U && n < 14U; ++pass) {
+        pollPass();
+        if (fake::canFrameCount() != seen) {
+            seen = static_cast<unsigned>(fake::canFrameCount());
+            const fake::CanFrame* f = fake::lastCanFrame();
+            CHECK_EQ(f->id, 0x600U);
+            CHECK_EQ(f->dlc, 3U);
+            CHECK_EQ(f->data[0], 0x02U);
+            CHECK_EQ(f->data[1], 0x21U);
+            got[n] = f->data[2];
+            at[n]  = pass;
+            ++n;
+            const std::uint8_t lid = f->data[2];
+            if (lid == 0x3BU)      { tpmsReply(0x21U, 0x20U, 0x21U, 0x1EU); }
+            else if (lid < 0x25U)  { sensorReply(static_cast<std::uint8_t>(lid - 0x20U), 0x5AU, 0U, 0U); }
+            else                   { diagReply(static_cast<std::uint8_t>(lid - 0x25U), 0U, 0U); }
+            decodeOnce();
+        }
+    }
+    CHECK_EQ(n, 14U);
+    for (unsigned i = 0U; i < n && i < 14U; ++i) {
+        CHECK_EQ(got[i], want[i]);
+        if (i > 0U) { CHECK(at[i] - at[i - 1U] >= 1250U); }
+    }
+}
+
+TEST(tpms_requests_stay_ten_seconds_apart_when_nothing_answers)
+{
+    primed();
+    ram::app().canBusStatus = cfg::kBusRunning;
+    unsigned seen = 0U;
+    unsigned last = 0U;
+    for (unsigned pass = 0U; pass < 1250U * 9U; ++pass) {
+        pollPass();
+        if (fake::canFrameCount() != seen) {
+            seen = static_cast<unsigned>(fake::canFrameCount());
+            if (seen > 1U) { CHECK(pass - last >= 1250U); }
+            last = pass;
+        }
+    }
+    CHECK(seen >= 8U);
+}
+
+TEST(tpms_never_requests_the_spare_21_24)
+{
+    primed();
+    ram::app().canBusStatus = cfg::kBusRunning;
+    unsigned seen = 0U;
+    for (unsigned pass = 0U; pass < 1250U * 30U; ++pass) {
+        pollPass();
+        if (fake::canFrameCount() != seen) {
+            seen = static_cast<unsigned>(fake::canFrameCount());
+            CHECK(fake::lastCanFrame()->data[2] != 0x24U);
+            CHECK(fake::lastCanFrame()->data[2] != 0x29U);
+        }
+    }
+}
+
+TEST(tpms_reply_is_matched_by_the_echoed_local_id)
+{
+    livePressures();
+    armStep(1U, 0U);                          /* 21 20 outstanding */
+    CHECK_EQ(ram::app().customSignals.tpmsLid, 0x20U);
+
+    sensorReply(1U, 0x5AU, 1U, 2U);           /* answer for 21 21: not ours */
+    decodeOnce();
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 1U);
+    diagReply(0U, 0U, 1U);                    /* 21 25: not ours */
+    decodeOnce();
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 1U);
+    tpmsReply(0x21U, 0x20U, 0x21U, 0x1EU);    /* 21 3B: not ours */
+    decodeOnce();
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 1U);
+    CHECK_EQ(ram::app().customSignals.tyreTemp[1], 0xFFU);
+    CHECK_EQ(ram::app().customSignals.tyreTemp[0], 0xFFU);
+
+    sensorReply(0U, 0x5AU, 0U, 0U);           /* the right one */
+    decodeOnce();
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 0U);
+    CHECK_EQ(ram::app().customSignals.tyreTemp[0], 0x5AU);
+}
+
+TEST(tpms_pressure_reply_does_not_close_a_sensor_request)
+{
+    livePressures();
+    armStep(1U, 2U);
+    tpmsReply(0x30U, 0x30U, 0x30U, 0x30U);
+    decodeOnce();
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 1U);
+    CHECK_EQ(ram::app().customSignals.tyreKpa[0], 228U);   /* unchanged */
+}
+
+TEST(tpms_temperature_is_raw_byte_and_none_above_120c)
+{
+    livePressures();
+    static const std::uint8_t in[4]  = { 0x5AU, 0x28U, 0xA0U, 0xA1U };
+    static const std::uint8_t out[4] = { 0x5AU, 0x28U, 0xA0U, 0xFFU };
+    for (std::uint8_t k = 0U; k < 4U; ++k) {
+        armStep(1U, 0U);
+        sensorReply(0U, in[k], 0U, 0U);
+        decodeOnce();
+        publishPos(0U);
+        CHECK_EQ(b7()[3], out[k]);
+    }
+    armStep(1U, 0U);
+    sensorReply(0U, 0xFFU, 0U, 0U);
+    decodeOnce();
+    publishPos(0U);
+    CHECK_EQ(b7()[3], 0xFFU);
+}
+
+TEST(tpms_each_flag_bit_has_its_own_source)
+{
+    livePressures();
+
+    armStep(1U, 1U);  sensorReply(1U, 0x5AU, 1U, 0U);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[4], 0x01U);                 /* battery low */
+
+    armStep(1U, 1U);  sensorReply(1U, 0x5AU, 0U, 2U);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[4], 0x02U);                 /* leak: trigger 2 */
+
+    armStep(1U, 1U);  sensorReply(1U, 0x5AU, 2U, 1U);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[4], 0x00U);                 /* other values: no flags */
+
+    armStep(1U, 1U);  sensorReply(1U, 0x5AU, 0U, 0U, 2U);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[3], 0x5AU);                 /* park mode: temp still sent */
+    CHECK_EQ(b7()[4], 0x00U);
+
+    armStep(2U, 1U);  diagReply(1U, 0x1FU, 0x01U);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[4], 0x08U);                 /* low-pressure warning */
+
+    armStep(1U, 1U);  sensorReply(1U, 0x5AU, 1U, 2U);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[4], 0x0BU);                 /* all three; warning kept */
+
+    armStep(2U, 1U);  diagReply(1U, 0x00U, 0xFEU);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[4], 0x03U);                 /* byte3 bit0 = 0 clears the warning */
+}
+
+TEST(tpms_frame_with_temperature_and_flags_matches_the_vector)
+{
+    livePressures();
+    armStep(1U, 0U);  sensorReply(0U, 0x5AU, 1U, 0U);  decodeOnce();
+    armStep(2U, 0U);  diagReply(0U, 0U, 1U);  decodeOnce();
+    publishPos(0U);
+
+    const std::uint8_t want[10] = { 0xAAU, 0x55U, 0x05U, 0xB7U,
+                                    0x00U, 0x00U, 0xE4U, 0x5AU, 0x09U, 0x02U };
+    std::uint8_t wire[16];
+    CHECK_EQ(hiworldFrame(wire, 0xB7U, b7(), 5U), 10U);
+    CHECK_BYTES(wire, want, 10U);
+}
+
+TEST(tpms_no_sensor_wheel_overrides_temperature_and_flags)
+{
+    primed();
+    armPollA();
+    pollPass();
+    tpmsReply(5U, 0x20U, 0x21U, 0x1EU);       /* LF: the placeholder 5 psi */
+    decodeOnce();
+
+    armStep(1U, 0U);  sensorReply(0U, 0x5AU, 1U, 2U);  decodeOnce();
+    armStep(2U, 0U);  diagReply(0U, 0U, 1U);  decodeOnce();
+
+    publishPos(0U);
+    CHECK_EQ(b7()[1], 0xFFU);  CHECK_EQ(b7()[2], 0xFFU);
+    CHECK_EQ(b7()[3], 0xFFU);
+    CHECK_EQ(b7()[4], ram::kTyreFlagNoSignal);
+}
+
+TEST(tpms_sensor_extras_go_after_three_failed_reads_of_that_wheel)
+{
+    livePressures();
+    armStep(1U, 3U);  sensorReply(3U, 0x50U, 1U, 2U);  decodeOnce();
+    armStep(2U, 3U);  diagReply(3U, 0U, 1U);  decodeOnce();
+    publishPos(3U);
+    CHECK_EQ(b7()[4], 0x0BU);
+
+    failRead(1U, 3U);  failRead(1U, 3U);      /* two misses: held */
+    publishPos(3U);
+    CHECK_EQ(b7()[3], 0x50U);
+    CHECK_EQ(b7()[4], 0x0BU);
+
+    failRead(1U, 3U);                         /* third: temp, bits 0/1 go */
+    publishPos(3U);
+    CHECK_EQ(b7()[3], 0xFFU);
+    CHECK_EQ(b7()[4], 0x08U);                 /* bit 3 belongs to the other read */
+
+    failRead(2U, 3U);  failRead(2U, 3U);
+    publishPos(3U);
+    CHECK_EQ(b7()[4], 0x08U);
+    failRead(2U, 3U);
+    publishPos(3U);
+    CHECK_EQ(b7()[4], 0x00U);
+}
+
+TEST(tpms_a_good_read_resets_the_wheel_miss_count)
+{
+    livePressures();
+    armStep(1U, 0U);  sensorReply(0U, 0x50U, 0U, 0U);  decodeOnce();
+    failRead(1U, 0U);  failRead(1U, 0U);
+    armStep(1U, 0U);  sensorReply(0U, 0x51U, 0U, 0U);  decodeOnce();
+    failRead(1U, 0U);  failRead(1U, 0U);
+    publishPos(0U);
+    CHECK_EQ(b7()[3], 0x51U);
+}
+
+TEST(tpms_failures_of_one_wheel_leave_the_others_alone)
+{
+    livePressures();
+    armStep(1U, 0U);  sensorReply(0U, 0x50U, 0U, 0U);  decodeOnce();
+    armStep(1U, 1U);  sensorReply(1U, 0x52U, 0U, 0U);  decodeOnce();
+    failRead(1U, 0U);  failRead(1U, 0U);  failRead(1U, 0U);
+    publishPos(0U);  CHECK_EQ(b7()[3], 0xFFU);
+    publishPos(1U);  CHECK_EQ(b7()[3], 0x52U);
+}
+
+TEST(tpms_negative_response_to_a_wheel_read_counts_as_a_miss)
+{
+    livePressures();
+    armStep(1U, 2U);  sensorReply(2U, 0x50U, 0U, 0U);  decodeOnce();
+    for (int i = 0; i < 3; ++i) {
+        armStep(1U, 2U);
+        raw500(0x03U, 0x7FU, 0x21U);
+        decodeOnce();
+        CHECK_EQ(ram::app().customSignals.tpmsPending, 0U);
+    }
+    publishPos(2U);
+    CHECK_EQ(b7()[3], 0xFFU);
+    CHECK_EQ(validMask() & ram::kValidB7, ram::kValidB7);   /* pressures unaffected */
+}
+
+TEST(tpms_wheel_read_failures_do_not_stale_the_pressures)
+{
+    livePressures();
+    for (int i = 0; i < 6; ++i) { failRead(1U, 0U); }
+    CHECK_EQ(validMask() & ram::kValidB7, ram::kValidB7);
+    CHECK_EQ(ram::app().customSignals.tyreKpa[0], 228U);
+}
+
+TEST(tpms_stale_pressures_drop_every_wheels_extras)
+{
+    livePressures();
+    for (std::uint8_t w = 0U; w < 4U; ++w) {
+        armStep(1U, w);  sensorReply(w, 0x50U, 1U, 2U);  decodeOnce();
+        armStep(2U, w);  diagReply(w, 0U, 1U);  decodeOnce();
+    }
+    for (int miss = 0; miss < 4; ++miss) { failRead(0U, 0U); }
+
+    for (std::uint8_t w = 0U; w < 4U; ++w) {
+        publishPos(w);
+        CHECK_EQ(b7()[1], 0xFFU);  CHECK_EQ(b7()[2], 0xFFU);
+        CHECK_EQ(b7()[3], 0xFFU);
+        CHECK_EQ(b7()[4], ram::kTyreFlagNoSignal);
+        CHECK_EQ(ram::app().customSignals.tyreTemp[w], 0xFFU);
+        CHECK_EQ(ram::app().customSignals.tyreExtra[w], 0U);
+    }
+}
+
+TEST(tpms_boot_state_has_no_extras)
+{
+    primed();
+    for (std::uint8_t w = 0U; w < 4U; ++w) {
+        CHECK_EQ(ram::app().customSignals.tyreTemp[w], 0xFFU);
+        CHECK_EQ(ram::app().customSignals.tyreExtra[w], 0U);
+        publishPos(w);
+        CHECK_EQ(b7()[3], 0xFFU);
+        CHECK_EQ(b7()[4], ram::kTyreFlagNoSignal);
+    }
+    CHECK_EQ(ram::app().customSignals.tpmsStep, 0U);
+    CHECK_EQ(ram::app().customSignals.tpmsWheel, 0U);
+}
+
+TEST(tpms_a_short_pci_length_is_not_read_past)
+{
+    livePressures();
+    armStep(1U, 0U);
+    const std::uint8_t d[8] = { 0x03U, 0x61U, 0x20U, 0x20U, 0x5AU, 0x00U, 0x14U, 0x00U };
+    pushFrame(logic::canid::kJeepVendorEcho, d);
+    decodeOnce();
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 1U);   /* too short: ignored */
+    CHECK_EQ(ram::app().customSignals.tyreTemp[0], 0xFFU);
 }
 
 /* ===========================================================================

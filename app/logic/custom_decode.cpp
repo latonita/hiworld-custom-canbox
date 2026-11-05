@@ -210,6 +210,20 @@ void setValid(std::uint8_t bit, bool live) noexcept
                    : static_cast<std::uint8_t>(cur & static_cast<std::uint8_t>(~bit));
 }
 
+/* 0xB0 bit 2 means "the 0xB4 frame carries at least one valid field". Every
+ * field has its own sentinel (coolant/intake 0xFF, fuel % 0xFF, volts 0xFFFF),
+ * so the bit is derived from the fields, not owned by one source. Call after
+ * any of them changes. */
+void updateB4Valid() noexcept
+{
+    const ram::CustomSignals& c = ram::app().customSignals;
+    const bool any = (c.coolantBias40 != ram::kCustomUnknown8)
+                  || (c.intakeBias40  != ram::kCustomUnknown8)
+                  || (c.fuelPct       != ram::kCustomUnknown8)
+                  || (c.centiVolts    != ram::kCustomUnknown16);
+    setValid(ram::kValidB4, any);
+}
+
 void setIgnBit(std::uint8_t bit, bool on) noexcept
 {
     ram::CustomSignals& c = ram::app().customSignals;
@@ -450,10 +464,9 @@ void customAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
  * 103 cranking); b2 a candidate -- its positive values read plausibly as raw
  * degrees C, identity and negative encoding unconfirmed.
  *
- * Both fields live in 0xB4, whose validity bit belongs to COOLANT alone (see
- * customCoolant). That is deliberate and is what the spec says: one bit per
- * command, owned by one source. An unavailable intake reading is reported by
- * the field's own 0xFF, not by the command's bit.
+ * Both fields live in 0xB4, whose validity bit means "at least one field is
+ * valid" (updateB4Valid); each field also reports its own loss with its own
+ * sentinel.
  *
  * This is a third reader of 0x015 -- jeepSteering() takes b4:b5 and, in a benz
  * build, benzVoltage() takes b1.
@@ -469,6 +482,7 @@ void customVoltsIntake(const volatile std::uint8_t* d) noexcept
      * construction and needs no code. */
     c.centiVolts = static_cast<std::uint16_t>(static_cast<std::uint16_t>(d[1])
                                               * kCentiVoltsPerCount);
+    updateB4Valid();
 
     /* Intake is CLAMPED BEFORE BIASING, never computed blindly: 0xFF + 40
      * truncates to 0x27 and would publish -1 degC. Unavailable or suspect goes
@@ -502,6 +516,10 @@ void customVoltsIntake(const volatile std::uint8_t* d) noexcept
  * sentinel is still TESTED here, but only to drive the validity bit -- 0xB4's
  * bit belongs to this frame alone.
  *
+ * 0xB0 bit 2 is NOT owned by coolant: it says the frame has at least one
+ * valid field (updateB4Valid), so a dead coolant sensor at engine off does not
+ * make the head unit withdraw fuel and volts that are still being sent.
+ *
  * The test is b1 rather than the whole frame. The spec says "02C all-FF", and
  * in the logs the frame does go all-FF together -- but the coolant byte itself
  * is the only one this function reads, so testing it directly is both simpler
@@ -516,7 +534,7 @@ void customCoolant(const volatile std::uint8_t* d) noexcept
     c.coolantBias40 = b1;             /* already degC+40 -- no arithmetic, and
                                        * 0xFF passes through as the reserved
                                        * "not available" code */
-    setValid(ram::kValidB4, b1 != ram::kCustomUnknown8);
+    updateB4Valid();
 }
 
 /* ============================================================================
@@ -553,8 +571,8 @@ void customParkBrake(const volatile std::uint8_t* d) noexcept
  *
  * TWO DESTINATIONS, ONE SOURCE. b5 feeds the litres in 0xB8 and the percentage
  * in 0xB4 byte 2. They share this gate but NOT a validity bit: a gated sample
- * clears 0xB8's bit and leaves 0xB4's alone, because 0xB4's other three fields
- * (coolant, intake, volts) are still good.
+ * clears 0xB8's bit, and 0xB4's bit stays set while any 0xB4 field is valid
+ * (the held fuel % counts, and so does volts).
  *
  * ON THE GATE THE PREVIOUS FIGURE IS HELD, not blanked -- the one field in this
  * block that holds rather than publishing a sentinel. That is deliberate and it
@@ -573,6 +591,7 @@ void customFuel(const volatile std::uint8_t* d) noexcept
 
     if (d[4] == kFuelGateInvalid) {
         setValid(ram::kValidB8, false);
+        updateB4Valid();
         return;                       /* hold both destinations */
     }
 
@@ -587,6 +606,7 @@ void customFuel(const volatile std::uint8_t* d) noexcept
     c.fuelDecilitres = static_cast<std::uint16_t>(
         static_cast<std::uint16_t>(raw) * kFuelDeciPerCount);
     setValid(ram::kValidB8, true);
+    updateB4Valid();
 }
 
 /* ============================================================================

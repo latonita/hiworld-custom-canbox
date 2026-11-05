@@ -2054,3 +2054,69 @@ TEST(flow_block_is_sixteen_slots_and_0xBC_reaches_the_wire)
     CHECK(ram::app().uartTxSlotIdx <= svc::hu::kTxSlots);
     CHECK(found);
 }
+
+
+/* ===========================================================================
+ * 0xB4 validity: bit 2 means "the frame carries at least one valid field".
+ * ========================================================================= */
+
+/* Engine off: coolant goes all-FF but volts (015) and the held fuel % are
+ * still being sent, so the head unit must keep them: bit 2 stays set. */
+TEST(b4_bit_stays_set_when_only_coolant_is_lost)
+{
+    primed();
+    coolant(133U);
+    voltsIntake(126U, 0xFFU);
+    fuel(0U, 143U);
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(validMask() & ram::kValidB4, ram::kValidB4);
+
+    coolantUnavailable();
+    fuel(1U, 0xFFU);
+    decodeOnce();
+    logic::customPublish();
+
+    CHECK_EQ(b4()[0], 0xFFU);                            /* coolant n/a   */
+    CHECK_EQ(b4()[2], 92U);                              /* fuel held     */
+    CHECK_EQ(b4()[3], 0x04U);  CHECK_EQ(b4()[4], 0xECU); /* 12.60 V       */
+    CHECK_EQ(validMask() & ram::kValidB4, ram::kValidB4);
+}
+
+/* Cold boot: nothing seen, every field carries its own sentinel, bit clear. */
+TEST(b4_cold_boot_has_all_sentinels_and_bit_clear)
+{
+    primed();
+    logic::customPublish();
+    CHECK_EQ(b4()[0], 0xFFU);
+    CHECK_EQ(b4()[1], 0xFFU);
+    CHECK_EQ(b4()[2], 0xFFU);
+    CHECK_EQ(b4()[3], 0xFFU);  CHECK_EQ(b4()[4], 0xFFU);
+    CHECK_EQ(validMask() & ram::kValidB4, 0U);
+}
+
+/* Fuel %: 0xFF until the first valid 159, then held across the gate. Volts
+ * are 0xFFFF until the first 015. Either one alone sets the bit. */
+TEST(b4_fuel_and_volts_each_set_the_bit_on_their_own)
+{
+    primed();
+    fuel(1U, 0xFFU);
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(b4()[2], 0xFFU);
+    CHECK_EQ(validMask() & ram::kValidB4, 0U);
+
+    fuel(0U, 143U);
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(b4()[2], 92U);
+    CHECK_EQ(b4()[3], 0xFFU);  CHECK_EQ(b4()[4], 0xFFU); /* no 015 yet   */
+    CHECK_EQ(validMask() & ram::kValidB4, ram::kValidB4);
+
+    primed();
+    voltsIntake(143U, 45U);
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(b4()[2], 0xFFU);
+    CHECK_EQ(validMask() & ram::kValidB4, ram::kValidB4);
+}

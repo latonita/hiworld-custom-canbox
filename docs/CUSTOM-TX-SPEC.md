@@ -175,8 +175,12 @@ the image has ever set it.
   temperature.** Changed 2026-10-21, superseding an earlier rule that said to
   suppress the whole frame — that was wrong, because `0xB4` also carries intake,
   fuel % and **voltage**, and one dead sensor must not cost three good signals.
-  When `02C` is all-`FF`, write `0xFF` into `[0]`, keep sending the frame, and
-  clear the `0xB4` validity bit.
+  When `02C` is all-`FF`, write `0xFF` into `[0]` and keep sending the frame.
+  **`0xB0` bit 2 (`0xB4`) means "the frame carries at least one valid field"**,
+  not "coolant is valid": it clears only when coolant, intake, fuel % and volts
+  are all unavailable. Every field carries its own sentinel: coolant and intake
+  `0xFF`, fuel % `0xFF` until the first valid `159` reading since boot (then
+  held, below), volts `0xFFFF` until the first `015` frame has been seen.
   Without a reserved code there was no way to say "unknown": every byte from
   `0x00` to `0xFF` decodes inside the accepted `-40…215 °C`, so `0xFF` read as a
   perfectly plausible 215 °C and would have tripped the overheat alert.
@@ -188,7 +192,7 @@ the image has ever set it.
   unavailable, so no special case is needed on this field at all.
 - **`159` b4 is a hard gate.** `b4 == 0x01` means `b5 = 0xFF` is not a reading.
   When b4 is set, hold the previous fuel figure and clear the `0xB8` validity
-  bit (not `0xB4`'s — the other three fields are still good).
+  bit (not `0xB4`'s — fuel % keeps its held value and volts are still good).
 - **Intake must be clamped before biasing, not computed blindly.** `b2 + 40`
   overflows: `0xFF + 40` truncates to `0x27` = −1 °C, a plausible-looking lie.
   If `015` b2 ≥ `0xD7` (which would bias past the reserved code) or the source
@@ -372,8 +376,9 @@ Worked check on the first one: `0xAA+0x55+0x02+0xB0+0x01+0x2F = 0x1E1` → `0xE1
 Also test, against the host unit tests in `tests/host/`:
 
 - `002` all-`FF` ⇒ `0xB3` carries `FF FF FF FF` in `[0..3]` and `0xB0` bit1 is 0.
-- `02C` all-`FF` ⇒ `0xB4` **is still emitted**, `[0]` is `0xFF`, `[1..4]` still
-  carry live intake/fuel/volts, and `0xB0` bit2 is 0.
+- `02C` all-`FF` ⇒ `0xB4` **is still emitted**, `[0]` is `0xFF`, `[2..4]` still
+  carry fuel/volts, and `0xB0` bit2 stays 1 while any field is valid (it is 0
+  only when all four are unavailable, e.g. cold boot).
 - `015` b2 == `0xFF` ⇒ `0xB4[1]` is `0xFF`, **not** `0x27`/−1 °C.
 - `159` b4 == 1 ⇒ fuel holds its previous value and `0xB0` bit5 is 0.
 - `2C0` b2 != b6 ⇒ throttle holds its previous value.

@@ -193,11 +193,12 @@ constexpr std::uint8_t kTpmsPduMax       = 7U;      /* single frame holds 7     
 /* 21 2n: 61 2n P T X S M. Bytes counted from the 0x61 as byte 0, so frame
  * offset = byte + 1.
  *   byte2 pressure (raw-1 psi, ignored: pressures come from 21 3B)
- *   byte3 air temperature, degC = raw - 40   <- INFERRED, not confirmed
+ *   byte3 air temperature: raw WCM byte, scale UNCONFIRMED. Sent verbatim in
+ *         0xB7 byte 3; consumers treat it as degF provisionally
  *   byte5 bits0-1 frame number (ignored), bits2-3 battery (1 = low),
  *         bits4-5 transmission trigger (2 = Pressure Loss),
  *         bits6-7 sensor state (2 = park mode; ignored, temp still sent)
- * The temperature offset is the one place to change if the inference is wrong. */
+ * The box does no conversion; the head-unit apps own the scale. */
 constexpr std::size_t  kTpmsSensorTempByte  = 4U;   /* frame offset of byte3 */
 constexpr std::size_t  kTpmsSensorStateByte = 6U;   /* frame offset of byte5 */
 constexpr std::uint8_t kTpmsBattShift        = 2U;
@@ -205,8 +206,6 @@ constexpr std::uint8_t kTpmsBattLow          = 1U;
 constexpr std::uint8_t kTpmsTrigShift        = 4U;
 constexpr std::uint8_t kTpmsTrigPressureLoss = 2U;
 constexpr std::uint8_t kTpmsTwoBits          = 0x03U;
-/* raw temp above this is > 120 degC: not a tyre, publish "none". */
-constexpr std::uint8_t kTpmsTempRawMax       = 160U;
 
 /* 21 25+n: 61 2n+5 B2 B3, from the vendor diagnostic DB ONLY -- NOT VERIFIED
  * ON THE CAR.
@@ -1110,8 +1109,8 @@ void customTpmsReply(const volatile std::uint8_t* d) noexcept
         if (trig == kTpmsTrigPressureLoss) {
             x = static_cast<std::uint8_t>(x | ram::kTyreFlagLeak);
         }
-        /* raw is degC + 40 already, same as the 0xB7 field. */
-        c.tyreTemp[n]     = (t > kTpmsTempRawMax) ? ram::kCustomUnknown8 : t;
+        /* Raw WCM byte, passed through unchanged (0xFF stays "none"). */
+        c.tyreTemp[n]     = t;
         c.tyreExtra[n]    = x;
         c.tyreMissTemp[n] = 0U;
         c.tpmsPending     = 0U;

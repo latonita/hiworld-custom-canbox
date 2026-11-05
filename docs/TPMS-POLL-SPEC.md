@@ -199,7 +199,7 @@ The Dashwheel contract already specifies this; it is not ours to invent.
 |---|---|---|
 | 0 | position | `0`=LF `1`=RF `2`=RR `3`=LR, `4`=spare (**not sent**, deferred) |
 | 1:2 | pressure, u16 **kPa** | `0xFFFF` = no value |
-| 3 | temperature, °C+40 | the raw `21 2n` byte3 (see 4.1); `0xFF` = none |
+| 3 | tyre temperature, raw WCM byte (scale unconfirmed) | the raw `21 2n` byte3, verbatim (see 4.1); `0xFF` = none |
 | 4 | flags | bit0 battery low, bit1 leak, bit2 no signal, bit3 low-pressure warning |
 
 **Units.** The WCM gives psi; the contract wants kPa.
@@ -210,11 +210,11 @@ kPa = round(psi * 6.894759)   implemented as   (psi * 68948 + 5000) / 10000
 33 psi → 228 kPa. The widest intermediate is `255 * 68948 = 17 581 740`,
 comfortably inside 32 bits.
 
-**Temperature** is the raw byte3 of the `21 2n` reply, sent verbatim: the WCM
-value is `raw - 40` degC (this offset is **inferred, not confirmed on the car**)
-and the field is already `degC + 40`. `0xFF` = none, also sent when raw > 160
-(> 120 degC), when the wheel has no pressure, and when the wheel's extras are
-stale.
+**Temperature** is the raw byte3 of the `21 2n` reply, sent verbatim, any value
+`0x00..0xFE`. The scale is **unconfirmed**; the head-unit apps convert and
+provisionally treat the raw byte as degrees Fahrenheit. `0xFF` = none, also
+sent when the WCM itself sends `0xFF`, when the wheel has no pressure, and when
+the wheel's extras are stale.
 
 **Flags** (see 4.1 for the sources):
 
@@ -269,7 +269,7 @@ extension.
 | byte | use |
 |---|---|
 | 2 `P` | pressure, raw - 1 psi. **Ignored**: pressures stay from `21 3B` |
-| 3 `T` | air temperature, degC = raw - 40. **Inferred.** One named constant in the code (`kTpmsSensorTempByte`) so the offset is a one-line change |
+| 3 `T` | air temperature, raw byte, scale unconfirmed (apps treat it as degF provisionally). Sent verbatim; the box does no conversion (`kTpmsSensorTempByte`) |
 | 4 `X` | ignored |
 | 5 `S` | bits0-1 frame number (ignored); bits2-3 battery status (1 = low); bits4-5 transmission trigger (2 = Pressure Loss); bits6-7 sensor state (2 = park mode, ignored, the temperature is still sent) |
 | 6 `M` | ignored |
@@ -282,8 +282,8 @@ extension.
 | 3 `B3` | bit0 = "Tire n Low Pressure Warning" |
 
 > **UNVERIFIED.** The `21 25+n` layout is from the vendor diagnostic database
-> only and has never been seen on the car, and the `21 2n` temperature offset is
-> an inference. Both need a bench/drive log before they are trusted.
+> only and has never been seen on the car, and the `21 2n` temperature scale is
+> unknown. Both need a bench/drive log before they are trusted.
 
 ---
 
@@ -326,9 +326,10 @@ These are the four corners of the real captured reply `06 61 3B 21 20 21 1E`.
 | `AA 55 05 B7 02 00 E4 FF 00 A0` | RR, 228 kPa (33 psi) |
 | `AA 55 05 B7 03 00 CF FF 00 8C` | LR, 207 kPa (30 psi) |
 | `AA 55 05 B7 00 FF FF FF 04 BC` | LF, no reading: sentinel pressure, no-signal flag |
-| `AA 55 05 B7 00 00 E4 5A 09 02` | LF, 228 kPa, temp raw `0x5A` (50 degC), low battery + low-pressure warning |
-| `AA 55 05 B7 02 00 E4 4B 0A F6` | RR, 228 kPa, temp raw `0x4B` (35 degC), leak (bit 1) + low-pressure warning (bit 3) |
+| `AA 55 05 B7 00 00 E4 5A 09 02` | LF, 228 kPa, temp raw `0x5A`, low battery + low-pressure warning |
+| `AA 55 05 B7 02 00 E4 4B 0A F6` | RR, 228 kPa, temp raw `0x4B`, leak (bit 1) + low-pressure warning (bit 3) |
 | `AA 55 05 B7 01 00 DD FF 04 9C` | RF, 221 kPa, no temperature, no-signal flag |
+| `AA 55 05 B7 00 00 E4 A5 00 44` | LF, 228 kPa, temp raw `0xA5` passed through unchanged, no flags |
 
 Worked check on the first: `0x05 + 0xB7 + 0x00 + 0x00 + 0xE4 + 0xFF + 0x00 - 1
 = 0x29E` → `0x9E`. And `33 psi x 6.894759 = 227.5` → `228` = `0x00E4`.
@@ -358,7 +359,7 @@ Also test, against the host unit tests in `tests/host/`:
 - the cycle order is `3B, 20, 25, 3B, 21, 26, 3B, 22, 27, 3B, 23, 28, 3B, 20`, with
   at least 10 s between any two requests, with or without answers; `24` is never sent;
 - a reply is matched by the echoed local id, anything else is ignored;
-- temperature raw byte, `0xFF` above raw 160; each flag bit from its own source;
+- temperature raw byte passed through unchanged (e.g. `0xA1` stays `0xA1`), `0xFF` = none; each flag bit from its own source;
 - a no-sensor wheel publishes temperature `0xFF` and only the no-signal bit;
 - 3 failed reads of a wheel's `21 2n` / `21 25+n` clear that read's fields, 2 do
   not, a good read resets the count, other wheels are unaffected; 4 missed

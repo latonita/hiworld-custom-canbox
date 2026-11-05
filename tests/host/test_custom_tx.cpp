@@ -1884,11 +1884,11 @@ TEST(tpms_pressure_reply_does_not_close_a_sensor_request)
     CHECK_EQ(ram::app().customSignals.tyreKpa[0], 228U);   /* unchanged */
 }
 
-TEST(tpms_temperature_is_raw_byte_and_none_above_120c)
+TEST(tpms_temperature_is_raw_byte_passed_through)
 {
     livePressures();
     static const std::uint8_t in[4]  = { 0x5AU, 0x28U, 0xA0U, 0xA1U };
-    static const std::uint8_t out[4] = { 0x5AU, 0x28U, 0xA0U, 0xFFU };
+    static const std::uint8_t out[4] = { 0x5AU, 0x28U, 0xA0U, 0xA1U };
     for (std::uint8_t k = 0U; k < 4U; ++k) {
         armStep(1U, 0U);
         sensorReply(0U, in[k], 0U, 0U);

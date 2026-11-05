@@ -6,7 +6,7 @@ head unit far more car data than the stock firmware does.
 
 | | |
 |---|---|
-| Version tag | `H1N4JPF20L-<ddmmyy>` (current build: `H1N4JPF20L-041126`) |
+| Version tag | `H1N4JPF20L-<ddmmyy>` (current build: `H1N4JPF20L-051126`) |
 | `L` | latonita (the author); the stock vendor image is `A` |
 | Stock firmware | `H1N4JPF20A-220524` |
 | Protocol | Hiworld JPF2, protocol id 3009001 (unchanged) |
@@ -108,7 +108,7 @@ Differences to know about:
 
 ## Install
 
-1. Get `canupdateH1N4JPF20L-<date>.iap`. **No separator** between `canupdate` and the version: `canupdateH1N4JPF20L-041126.iap` is correct; do not add a dash after `canupdate`.
+1. Get `canupdateH1N4JPF20L-<date>.iap`. **No separator** between `canupdate` and the version: `canupdateH1N4JPF20L-051126.iap` is correct; do not add a dash after `canupdate`.
 2. Copy it to the head unit's **sdcard root** (the updater takes the first `.iap` it finds in a storage root or in `CanBus/box/`, so leave only one `.iap` there).
 3. On the head unit open the canbus settings (debug menu), choose the canbox update (Hiworld) and run it. Keep the unit powered and do not touch it until it reports success. The box resets into its bootloader, takes the file, then restarts.
 4. Check the version shown in the canbus settings: `H1N4JPF20L-<ddmmyy>`.

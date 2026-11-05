@@ -295,7 +295,10 @@ The 300/500 hysteresis band sits between crank-max 410 and idle-min 577.
 
 > **`0xB7` per-tyre no signal.** A tyre whose polled psi is `<= 5` or `0xFF`
 > (no sensor; LF on this car reads 5) is published as `0xFFFF` kPa with flags
-> bit 2 set, for that position only. See `TPMS-POLL-SPEC.md`.
+> bit 2 set, for that position only, with temperature `0xFF` and flags 0, 1, 3
+> cleared. The flags byte is bit0 low battery, bit1 leak, bit2 no signal, bit3
+> low-pressure warning; temperature is `degC + 40` (`0xFF` none). See
+> `TPMS-POLL-SPEC.md`.
 
 > **AS BUILT, 2026-10-21 — one correction to this section.** The scheduler DID
 > need a change, for `0xB0` only. `kSlotRequest` was **unreachable** as written:

@@ -162,31 +162,72 @@ constexpr std::uint16_t kDegPerCount      = 2U;
  * service byte for a service-qualified identifier sends three bytes and EVERY
  * MODULE ANSWERS NOTHING. That cost a sibling project a debugging session.
  * ------------------------------------------------------------------------- */
-constexpr std::uint8_t kTpmsRequest[3] = { 0x02U, 0x21U, 0x3BU };
 constexpr std::uint8_t kTpmsRequestDlc = 3U;
-static_assert(kTpmsRequestDlc == sizeof(kTpmsRequest),
-              "txEnqueue copies min(dlc, 8) bytes from a pointer whose extent it "
-              "cannot know, so a DLC longer than the buffer reads past it and puts "
-              "whatever follows in .rodata onto the vehicle bus");
+constexpr std::uint8_t kTpmsRequestPci = 0x02U;   /* single frame, 2 PDU bytes */
+constexpr std::uint8_t kTpmsService    = 0x21U;   /* readDataByLocalIdentifier */
 
-/* The reply: 06 61 3B p1 p2 p3 p4 [junk]. Trust the PCI nibble, never the DLC
- * -- the byte after the declared length is whatever was in the responder's
- * buffer last, and it is neither data nor zero. */
-constexpr std::uint8_t kTpmsReplyPci     = 0x06U;   /* single frame, 6 PDU bytes */
+/* The three requests, one every 10 s, in a repeating cycle:
+ *   A  21 3B        all four pressures
+ *   B  21 20+n      wheel n: temperature, battery, trigger
+ *   C  21 25+n      wheel n: diagnostic DB (faults, low-pressure warning)
+ * after C the wheel n advances. 21 24 (the spare) is never read. */
+constexpr std::uint8_t kTpmsLidPressures  = 0x3BU;
+constexpr std::uint8_t kTpmsLidSensorBase = 0x20U;
+constexpr std::uint8_t kTpmsLidDiagBase   = 0x25U;
+constexpr std::uint8_t kTpmsStepPressures = 0U;
+constexpr std::uint8_t kTpmsStepSensor    = 1U;
+constexpr std::uint8_t kTpmsStepDiag      = 2U;
+
+/* Replies: [PCI] 61 <lid> ... . Trust the PCI nibble, never the DLC -- the
+ * byte after the declared length is whatever was in the responder's buffer
+ * last, and it is neither data nor zero. Offsets below are frame bytes
+ * (d[0] = PCI, d[1] = 0x61). */
 constexpr std::uint8_t kTpmsReplyService = 0x61U;   /* 0x21 + 0x40 = positive    */
-constexpr std::uint8_t kTpmsReplyLid     = 0x3BU;
 constexpr std::uint8_t kKwpNegative      = 0x7FU;
 constexpr std::size_t  kTpmsFirstPsiByte = 3U;
+constexpr std::uint8_t kTpmsPressuresPdu = 6U;      /* 61 3B p1 p2 p3 p4         */
+constexpr std::uint8_t kTpmsSensorPdu    = 6U;      /* 61 2n P T X S             */
+constexpr std::uint8_t kTpmsDiagPdu      = 4U;      /* 61 2n B2 B3               */
+constexpr std::uint8_t kTpmsPduMax       = 7U;      /* single frame holds 7      */
+
+/* 21 2n: 61 2n P T X S M. Bytes counted from the 0x61 as byte 0, so frame
+ * offset = byte + 1.
+ *   byte2 pressure (raw-1 psi, ignored: pressures come from 21 3B)
+ *   byte3 air temperature, degC = raw - 40   <- INFERRED, not confirmed
+ *   byte5 bits0-1 frame number (ignored), bits2-3 battery (1 = low),
+ *         bits4-5 transmission trigger (2 = Pressure Loss),
+ *         bits6-7 sensor state (2 = park mode; ignored, temp still sent)
+ * The temperature offset is the one place to change if the inference is wrong. */
+constexpr std::size_t  kTpmsSensorTempByte  = 4U;   /* frame offset of byte3 */
+constexpr std::size_t  kTpmsSensorStateByte = 6U;   /* frame offset of byte5 */
+constexpr std::uint8_t kTpmsBattShift        = 2U;
+constexpr std::uint8_t kTpmsBattLow          = 1U;
+constexpr std::uint8_t kTpmsTrigShift        = 4U;
+constexpr std::uint8_t kTpmsTrigPressureLoss = 2U;
+constexpr std::uint8_t kTpmsTwoBits          = 0x03U;
+/* raw temp above this is > 120 degC: not a tyre, publish "none". */
+constexpr std::uint8_t kTpmsTempRawMax       = 160U;
+
+/* 21 25+n: 61 2n+5 B2 B3, from the vendor diagnostic DB ONLY -- NOT VERIFIED
+ * ON THE CAR.
+ *   byte2 bit0 pressure sensor HW fault, bit1 pressure SW over/underflow,
+ *         bit2 temp sensor HW fault, bit3 temp SW over/underflow,
+ *         bit4 accel sensor HW fault   (none of these are decoded for output)
+ *   byte3 bit0 "Tire n Low Pressure Warning"                                */
+constexpr std::size_t  kTpmsDiagWarnByte = 4U;      /* frame offset of byte3 */
+constexpr std::uint8_t kTpmsDiagWarnBit  = 0x01U;
 
 /* Cadences, in 8 ms passes of the periodic-TX task. A uint8_t divider
  * saturates at 2.04 s, which is why the counters are 16-bit. */
-constexpr std::uint16_t kTpmsPollPasses   = 3750U;  /* 30 s between polls       */
+constexpr std::uint16_t kTpmsPollPasses   = 1250U;  /* 10 s between requests    */
 constexpr std::uint16_t kTpmsRotatePasses = 625U;   /*  5 s between corners     */
 constexpr std::uint8_t  kTpmsReplyPasses  = 63U;    /* ~500 ms to answer        */
-/* Four consecutive misses -- two minutes -- before the data is called stale.
- * The exchange was measured at 47/47 on a real drive, so this is a backstop,
- * not an expectation. */
+/* Four consecutive missed pressure polls (A) -- two minutes -- before the data
+ * is called stale. The exchange was measured at 47/47 on a real drive, so this
+ * is a backstop, not an expectation. */
 constexpr std::uint8_t  kTpmsStaleMisses  = 4U;
+/* Failed reads of one wheel's 21 2n (or 21 25+n) before its extras are dropped. */
+constexpr std::uint8_t  kTpmsExtraMisses  = 3U;
 
 /* psi -> kPa. The WCM reports plain psi at 1 psi/count; the head-unit contract
  * wants u16 kPa. x 6.894759, rounded. Widest intermediate 255 * 68948 =
@@ -257,9 +298,53 @@ void tpmsBlank() noexcept
     ram::CustomSignals& c = ram::app().customSignals;
 
     for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
-        c.tyreKpa[i] = ram::kCustomUnknown16;
+        c.tyreKpa[i]      = ram::kCustomUnknown16;
+        c.tyreTemp[i]     = ram::kCustomUnknown8;
+        c.tyreExtra[i]    = 0U;
+        c.tyreMissTemp[i] = kTpmsExtraMisses;
+        c.tyreMissDiag[i] = kTpmsExtraMisses;
     }
     setValid(ram::kValidB7, false);
+}
+
+/* One failed read (timeout or negative) of the request in flight. */
+void tpmsFail() noexcept
+{
+    ram::CustomSignals& c = ram::app().customSignals;
+    const std::uint8_t  lid = c.tpmsLid;
+
+    c.tpmsPending = 0U;
+    if (lid == kTpmsLidPressures) {
+        if (c.tpmsFailures < kTpmsStaleMisses) {
+            c.tpmsFailures = static_cast<std::uint8_t>(c.tpmsFailures + 1U);
+        }
+        if (c.tpmsFailures >= kTpmsStaleMisses) {
+            tpmsBlank();
+        }
+    } else if (lid < kTpmsLidDiagBase) {
+        const std::uint8_t n = static_cast<std::uint8_t>(lid - kTpmsLidSensorBase);
+        if (n < ram::kTyreCount) {
+            if (c.tyreMissTemp[n] < kTpmsExtraMisses) {
+                c.tyreMissTemp[n] = static_cast<std::uint8_t>(c.tyreMissTemp[n] + 1U);
+            }
+            if (c.tyreMissTemp[n] >= kTpmsExtraMisses) {
+                c.tyreTemp[n]  = ram::kCustomUnknown8;
+                c.tyreExtra[n] = static_cast<std::uint8_t>(
+                    c.tyreExtra[n] & ram::kTyreFlagLowPressure);
+            }
+        }
+    } else {
+        const std::uint8_t n = static_cast<std::uint8_t>(lid - kTpmsLidDiagBase);
+        if (n < ram::kTyreCount) {
+            if (c.tyreMissDiag[n] < kTpmsExtraMisses) {
+                c.tyreMissDiag[n] = static_cast<std::uint8_t>(c.tyreMissDiag[n] + 1U);
+            }
+            if (c.tyreMissDiag[n] >= kTpmsExtraMisses) {
+                c.tyreExtra[n] = static_cast<std::uint8_t>(
+                    c.tyreExtra[n] & static_cast<std::uint8_t>(~ram::kTyreFlagLowPressure));
+            }
+        }
+    }
 }
 
 }  // namespace
@@ -318,6 +403,15 @@ void customPrimeSignals() noexcept
     c.tpmsPending   = 0U;
     c.tpmsDeadline  = 0U;
     c.tpmsFailures  = kTpmsStaleMisses;   /* nothing heard yet == stale */
+    c.tpmsLid       = 0U;
+    c.tpmsStep      = kTpmsStepPressures;
+    c.tpmsWheel     = 0U;
+    for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
+        c.tyreTemp[i]     = ram::kCustomUnknown8;
+        c.tyreExtra[i]    = 0U;
+        c.tyreMissTemp[i] = kTpmsExtraMisses;
+        c.tyreMissDiag[i] = kTpmsExtraMisses;
+    }
 
     c.ignBits      = 0U;
     c.valid        = 0U;    /* nothing is live until the car says so */
@@ -898,16 +992,9 @@ void customTpmsPoll() noexcept
             c.tpmsDeadline = static_cast<std::uint8_t>(c.tpmsDeadline - 1U);
         }
         if (c.tpmsDeadline == 0U) {
-            /* Timed out. No immediate retry: the next 30 s tick tries again.
-             * A retry would be solving a problem never observed -- 47 of 47
-             * on a real drive -- at the cost of more bus traffic. */
-            c.tpmsPending = 0U;
-            if (c.tpmsFailures < kTpmsStaleMisses) {
-                c.tpmsFailures = static_cast<std::uint8_t>(c.tpmsFailures + 1U);
-            }
-            if (c.tpmsFailures >= kTpmsStaleMisses) {
-                tpmsBlank();
-            }
+            /* Timed out. No immediate retry: the next request goes out on
+             * the normal 10 s tick, and the cycle moves on. */
+            tpmsFail();
         }
         return;                       /* one request in flight at a time */
     }
@@ -924,7 +1011,26 @@ void customTpmsPoll() noexcept
         return;
     }
 
-    svc::can::txEnqueue(canid::kWcmTpmsRequest, 0U, kTpmsRequestDlc, kTpmsRequest);
+    std::uint8_t lid = kTpmsLidPressures;
+    if (c.tpmsStep == kTpmsStepSensor) {
+        lid = static_cast<std::uint8_t>(kTpmsLidSensorBase + c.tpmsWheel);
+    } else if (c.tpmsStep == kTpmsStepDiag) {
+        lid = static_cast<std::uint8_t>(kTpmsLidDiagBase + c.tpmsWheel);
+    }
+
+    /* Next request in the cycle: A -> B -> C -> (next wheel) A ... */
+    if (c.tpmsStep == kTpmsStepDiag) {
+        c.tpmsStep  = kTpmsStepPressures;
+        c.tpmsWheel = static_cast<std::uint8_t>(
+            (c.tpmsWheel + 1U) % ram::kTyreCount);
+    } else {
+        c.tpmsStep = static_cast<std::uint8_t>(c.tpmsStep + 1U);
+    }
+
+    /* txEnqueue copies the bytes before returning, so a local is fine. */
+    const std::uint8_t req[kTpmsRequestDlc] = { kTpmsRequestPci, kTpmsService, lid };
+    svc::can::txEnqueue(canid::kWcmTpmsRequest, 0U, kTpmsRequestDlc, req);
+    c.tpmsLid      = lid;
     c.tpmsPending  = 1U;
     c.tpmsDeadline = kTpmsReplyPasses;
 }
@@ -957,28 +1063,73 @@ void customTpmsReply(const volatile std::uint8_t* d) noexcept
     /* A negative response -- 7F 21 xx -- is a real answer, so it closes the
      * request, but it carries no data. */
     if (d[1] == kKwpNegative) {
-        c.tpmsPending = 0U;
-        if (c.tpmsFailures < kTpmsStaleMisses) {
-            c.tpmsFailures = static_cast<std::uint8_t>(c.tpmsFailures + 1U);
-        }
-        if (c.tpmsFailures >= kTpmsStaleMisses) {
-            tpmsBlank();
-        }
+        tpmsFail();
         return;
     }
 
-    if ((d[0] != kTpmsReplyPci) || (d[1] != kTpmsReplyService) ||
-        (d[2] != kTpmsReplyLid)) {
-        return;                       /* not our answer; leave the poll open */
+    /* Match by the echoed local id; anything else is not our answer and the
+     * request stays open. The PCI length must cover what we read. */
+    const std::uint8_t lid = c.tpmsLid;
+    if ((d[1] != kTpmsReplyService) || (d[2] != lid) || ((d[0] & 0xF0U) != 0U)) {
+        return;
+    }
+    const std::uint8_t pdu = static_cast<std::uint8_t>(d[0] & 0x0FU);
+    if (pdu > kTpmsPduMax) {
+        return;
     }
 
-    for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
-        c.tyreKpa[i] = psiToKpa(d[kTpmsFirstPsiByte + i]);
+    if (lid == kTpmsLidPressures) {
+        if (pdu < kTpmsPressuresPdu) {
+            return;
+        }
+        for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
+            c.tyreKpa[i] = psiToKpa(d[kTpmsFirstPsiByte + i]);
+        }
+        c.tpmsPending  = 0U;
+        c.tpmsFailures = 0U;
+        setValid(ram::kValidB7, true);
+        return;
     }
 
-    c.tpmsPending  = 0U;
-    c.tpmsFailures = 0U;
-    setValid(ram::kValidB7, true);
+    if (lid < kTpmsLidDiagBase) {
+        if (pdu < kTpmsSensorPdu) {
+            return;
+        }
+        const std::uint8_t n = static_cast<std::uint8_t>(lid - kTpmsLidSensorBase);
+        const std::uint8_t t = d[kTpmsSensorTempByte];
+        const std::uint8_t st = d[kTpmsSensorStateByte];
+        const std::uint8_t batt = static_cast<std::uint8_t>(
+            (st >> kTpmsBattShift) & kTpmsTwoBits);
+        const std::uint8_t trig = static_cast<std::uint8_t>(
+            (st >> kTpmsTrigShift) & kTpmsTwoBits);
+        std::uint8_t x = static_cast<std::uint8_t>(
+            c.tyreExtra[n] & ram::kTyreFlagLowPressure);
+        if (batt == kTpmsBattLow) {
+            x = static_cast<std::uint8_t>(x | ram::kTyreFlagBatteryLow);
+        }
+        if (trig == kTpmsTrigPressureLoss) {
+            x = static_cast<std::uint8_t>(x | ram::kTyreFlagLeak);
+        }
+        /* raw is degC + 40 already, same as the 0xB7 field. */
+        c.tyreTemp[n]     = (t > kTpmsTempRawMax) ? ram::kCustomUnknown8 : t;
+        c.tyreExtra[n]    = x;
+        c.tyreMissTemp[n] = 0U;
+        c.tpmsPending     = 0U;
+        return;
+    }
+
+    if (pdu < kTpmsDiagPdu) {
+        return;
+    }
+    const std::uint8_t n = static_cast<std::uint8_t>(lid - kTpmsLidDiagBase);
+    std::uint8_t x = static_cast<std::uint8_t>(
+        c.tyreExtra[n] & static_cast<std::uint8_t>(~ram::kTyreFlagLowPressure));
+    if ((d[kTpmsDiagWarnByte] & kTpmsDiagWarnBit) != 0U) {
+        x = static_cast<std::uint8_t>(x | ram::kTyreFlagLowPressure);
+    }
+    c.tyreExtra[n]    = x;
+    c.tyreMissDiag[n] = 0U;
+    c.tpmsPending     = 0U;
 }
 
 }  // namespace logic

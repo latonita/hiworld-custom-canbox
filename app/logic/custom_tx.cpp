@@ -149,16 +149,10 @@ void customPublish() noexcept
     put16s(&f.b5[0], c.outsideDeciC);
 
     /* ---- 0xB7 TYRE: ONE corner per frame, rotating -----------------------
-     * The position byte is advanced by customTpmsPoll() every 5 s, so this
-     * packs whichever corner is current. Temperature is ALWAYS the reserved
-     * not-available code: 0x213B carries no temperature at all, and the
-     * per-sensor identifiers that do have one decode it by a hypothesis
-     * (raw - 40) that nobody has confirmed.
-     *
-     * The flags byte reports only "no signal", and only when the data has gone
-     * stale. Battery, leak and sensor state live in per-tyre fault identifiers
-     * this build deliberately does not read, so claiming them would be
-     * inventing data. */
+     * The position byte is advanced by customTpmsPoll() every 5 s. A wheel
+     * with no pressure (no sensor, or the data gone stale) publishes no
+     * temperature and none of the battery/leak/low-pressure bits whatever the
+     * per-wheel reads last said: the WCM still answers for an absent sensor. */
     {
         const std::uint8_t  pos = c.tpmsPosition;
         const std::uint16_t kpa = c.tyreKpa[pos];
@@ -166,8 +160,8 @@ void customPublish() noexcept
 
         f.b7[0] = pos;
         put16(&f.b7[1], kpa);
-        f.b7[3] = ram::kCustomUnknown8;
-        f.b7[4] = live ? 0U : ram::kTyreFlagNoSignal;
+        f.b7[3] = live ? c.tyreTemp[pos] : ram::kCustomUnknown8;
+        f.b7[4] = live ? c.tyreExtra[pos] : ram::kTyreFlagNoSignal;
     }
 
     /* ---- 0xB8 FUEL: decilitres, range ------------------------------------ */

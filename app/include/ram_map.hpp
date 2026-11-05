@@ -570,12 +570,13 @@ inline constexpr std::uint8_t kTyrePosLeftRear   = 3U;
 inline constexpr std::uint8_t kTyrePosSpare      = 4U;   /* deferred, not sent */
 inline constexpr std::uint8_t kTyreCount         = 4U;   /* the spare is extra */
 
-/* Bits of the 0xB7 flags byte. Only "no signal" is ever set by this firmware:
- * 0x213B reports no battery, leak or sensor state at all -- those live in the
- * per-tyre fault identifiers this build deliberately does not read. */
+/* Bits of the 0xB7 flags byte. Battery and leak come from the per-wheel
+ * 21 2n read, low-pressure warning from 21 25+n, no signal from the pressure
+ * poll itself. docs/TPMS-POLL-SPEC.md. */
 inline constexpr std::uint8_t kTyreFlagBatteryLow = 0x01U;
 inline constexpr std::uint8_t kTyreFlagLeak       = 0x02U;
 inline constexpr std::uint8_t kTyreFlagNoSignal   = 0x04U;
+inline constexpr std::uint8_t kTyreFlagLowPressure = 0x08U;
 
 /* Bits of the 0xB2 ignition byte. */
 inline constexpr std::uint8_t kIgnAccOn     = 0x01U;
@@ -632,7 +633,17 @@ struct CustomSignals {
     volatile std::uint8_t  tpmsPosition;    /* which corner 0xB7 is carrying     */
     volatile std::uint8_t  tpmsPending;     /* a request is outstanding          */
     volatile std::uint8_t  tpmsDeadline;    /* 8 ms passes left to answer        */
-    volatile std::uint8_t  tpmsFailures;    /* consecutive failed polls          */
+    volatile std::uint8_t  tpmsFailures;    /* consecutive failed 21 3B polls    */
+    volatile std::uint8_t  tpmsLid;         /* local id of the request in flight */
+    volatile std::uint8_t  tpmsStep;        /* next request: 0=21 3B 1=21 2n 2=21 25+n */
+    volatile std::uint8_t  tpmsWheel;       /* wheel n of the next 21 2n / 21 25+n */
+    /* Per-wheel extras, held between reads. tyreTemp is the raw reply byte
+     * (degC + 40), 0xFF = none. tyreExtra holds 0xB7 flag bits 0, 1 (from
+     * 21 2n) and 3 (from 21 25+n). Miss counters: consecutive failed reads. */
+    volatile std::uint8_t  tyreTemp[4];
+    volatile std::uint8_t  tyreExtra[4];
+    volatile std::uint8_t  tyreMissTemp[4];
+    volatile std::uint8_t  tyreMissDiag[4];
 
     volatile std::uint8_t  ignBits;         /* the whole 0xB2 payload byte    */
     volatile std::uint8_t  valid;           /* the 0xB0 validity mask         */

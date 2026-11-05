@@ -517,7 +517,7 @@ inline constexpr std::uint16_t kCustomUnknown16   = 0xFFFFU;
  * verbatim -- the same happy accident as coolant. */
 inline constexpr std::uint32_t kCustomUnknown24   = 0x00FFFFFFU;
 inline constexpr std::int16_t  kCustomUnknownS16  = static_cast<std::int16_t>(-32768);
-inline constexpr std::uint8_t  kCustomLoadUnknown = 0x00U;
+inline constexpr std::uint8_t  kCustomLoadUnknown = 0xFFU;
 
 /* Bits of the 0xB0 validity mask (payload byte 1). 1 = the data in that command
  * is live RIGHT NOW. Each bit is owned by exactly one CAN source, so no bit
@@ -589,9 +589,11 @@ inline constexpr std::uint8_t kCustomProtoRev = 0x01U;
 struct CustomSignals {
     volatile std::uint16_t speedKph;        /* km/h           0x002 b2:b3/128 */
     volatile std::uint16_t rpm;             /* 1 rpm             0x002 b0:b1  */
-    volatile std::uint8_t  throttlePct;     /* 0..100              0x2C0 b2   */
+    volatile std::uint8_t  throttlePct;     /* 0..100              0x02C b2   */
+    volatile std::uint8_t  loadPct;         /* 0..100, 0xFF n/a  0x1A7 Q, 0x002 rpm */
+    volatile std::uint16_t flowLastQ;       /* last accepted 0x1A7 Q, 0xFFFF n/a */
     volatile std::uint8_t  coolantBias40;   /* degC+40, verbatim   0x02C b1   */
-    volatile std::uint8_t  intakeBias40;    /* degC+40             0x015 b2   */
+    volatile std::uint8_t  intakeBias40;    /* always 0xFF: no intake source on the WK */
     volatile std::uint8_t  fuelPct;         /* 0..100              0x159 b5   */
     volatile std::uint16_t centiVolts;      /* 0.01 V              0x015 b1   */
     volatile std::int16_t  outsideDeciC;    /* 0.1 degC, signed    0x014 b4:b5 */

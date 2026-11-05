@@ -462,7 +462,7 @@ void customVoltsIntake(const volatile std::uint8_t* d) noexcept; // 0x015 b1, b2
 void customCoolant(const volatile std::uint8_t* d) noexcept;     // 0x02C b1
 void customParkBrake(const volatile std::uint8_t* d) noexcept;   // 0x0D0 b0 bit 7
 void customFuel(const volatile std::uint8_t* d) noexcept;        // 0x159 b4 gate, b5
-void customThrottle(const volatile std::uint8_t* d) noexcept;    // 0x2C0 b2 (b6 mirror)
+void customThrottle(const volatile std::uint8_t* d) noexcept;    // 0x02C b2 (pedal, 0.4 %/count)
 void customOdometer(const volatile std::uint8_t* d) noexcept;    // 0x014 b0:b1:b2
 void customCompass(const volatile std::uint8_t* d) noexcept;     // 0x1B4 b0, b1
 void customTpmsPoll() noexcept;                                  // -> 0x600, every 30 s

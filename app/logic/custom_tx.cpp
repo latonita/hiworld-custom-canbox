@@ -34,19 +34,6 @@ namespace {
  * ------------------------------------------------------------------------- */
 constexpr std::uint8_t kHeartbeatPasses = 125U;
 
-/* Engine load: the contract defines 0x00 as unknown, and it stays unknown.
- *
- * 0x02C b2 is the load-shaped channel -- r = +0.988 against pedal position --
- * but its 0..136 range has never been calibrated against a scan tool, so any
- * scale factor would be invented. A field that reads 0 is uninstrumented; a
- * plausible-looking fabricated curve is a number someone eventually believes.
- * Same reasoning as kNoSource in raise_benz_tx.cpp.
- *
- * Note this is the one field in the block whose unknown encoding is NOT
- * all-ones, and the reason is that 0xFF would mean 255 % load. 0 % is at least
- * outside the set of values the field can legitimately report as a surprise. */
-constexpr std::uint8_t kLoadParked = ram::kCustomLoadUnknown;
-
 /* Range to empty: still parked. The box keeps no history (no trip, no
  * persistent store), and range is litres-left over a CONSUMPTION average,
  * which is exactly such a history. 0xBC now publishes the instantaneous flow
@@ -148,12 +135,13 @@ void customPublish() noexcept
     /* ---- 0xB3 DRIVETRAIN: speed, rpm, load, throttle --------------------- */
     put16(&f.b3[0], c.speedKph);
     put16(&f.b3[2], c.rpm);
-    f.b3[4] = kLoadParked;
+    customEngineLoad();
+    f.b3[4] = c.loadPct;
     f.b3[5] = c.throttlePct;
 
     /* ---- 0xB4 ENGINE: coolant, intake, fuel %, volts --------------------- */
     f.b4[0] = c.coolantBias40;
-    f.b4[1] = c.intakeBias40;
+    f.b4[1] = c.intakeBias40;         /* always 0xFF: no WK source */
     f.b4[2] = c.fuelPct;
     put16(&f.b4[3], c.centiVolts);
 

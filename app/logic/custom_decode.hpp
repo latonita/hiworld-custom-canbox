@@ -94,6 +94,10 @@ void customFuelFlow(const volatile std::uint8_t* d) noexcept;
  * silent bus still turns into 0xFFFF one second later. */
 void customFuelFlowTick() noexcept;
 
+/* Engine load % for 0xB3[4], from the last 0x1A7 Q and the current rpm; 0xFF
+ * when either is unavailable. Called from customPublish(). */
+void customEngineLoad() noexcept;
+
 /* ---------------------------------------------------------------------------
  * TPMS -- the one exchange this box INITIATES. docs/TPMS-POLL-SPEC.md.
  *

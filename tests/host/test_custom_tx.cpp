@@ -253,13 +253,11 @@ void fuel(std::uint8_t b4, std::uint8_t b5) noexcept
     pushFrame(logic::canid::kJeepFuel, d);
 }
 
-/* 0x2C0: b2 pedal, b6 its mirror. Pass a different b6 to forge a corrupt
- * frame. */
-void throttle(std::uint8_t b2, std::uint8_t b6) noexcept
+/* 0x02C: b1 coolant (a valid 93 degC), b2 accelerator pedal at 0.4 %/count. */
+void throttle(std::uint8_t b2) noexcept
 {
-    const std::uint8_t d[8] = { 0xFFU, 0xFFU, b2, static_cast<std::uint8_t>(b2 / 2U),
-                                0x7EU, 0xFFU, b6, 0x02U };
-    pushFrame(logic::canid::kJeepThrottle, d);
+    const std::uint8_t d[8] = { 0U, 0x85U, b2, 0x64U, 0U, 0U, 0U, 0U };
+    pushFrame(logic::canid::kJeepCoolant, d);
 }
 
 /* Shorthand: the payload of one custom command, after a publish. */
@@ -343,7 +341,7 @@ TEST(custom_prime_puts_every_field_in_its_no_value_state)
 
     CHECK_EQ(b3()[0], 0xFFU);  CHECK_EQ(b3()[1], 0xFFU);   /* speed  */
     CHECK_EQ(b3()[2], 0xFFU);  CHECK_EQ(b3()[3], 0xFFU);   /* rpm    */
-    CHECK_EQ(b3()[4], 0x00U);                              /* load, parked */
+    CHECK_EQ(b3()[4], 0xFFU);                              /* load n/a */
     CHECK_EQ(b3()[5], 0xFFU);                              /* throttle */
 
     CHECK_EQ(b4()[0], 0xFFU);                              /* coolant */
@@ -406,7 +404,7 @@ TEST(custom_ignition_matches_the_worked_example)
     CHECK_BYTES(wire, want, 6U);
 }
 
-/* 63 km/h, 2701 rpm, load unknown, throttle 44 %. */
+/* 63 km/h, 2701 rpm, no injection data (load unavailable), throttle 44 %. */
 TEST(custom_drivetrain_matches_the_worked_example)
 {
     primed();
@@ -421,9 +419,9 @@ TEST(custom_drivetrain_matches_the_worked_example)
     const std::uint8_t want[11] = { 0xAAU, 0x55U, 0x06U, 0xB3U,
                                     0x00U, 0x3FU,   /* 63 km/h       */
                                     0x0AU, 0x8DU,   /* 2701 rpm      */
-                                    0x00U,          /* load, parked  */
+                                    0xFFU,          /* load n/a      */
                                     0x2CU,          /* throttle 44 % */
-                                    0xBAU };
+                                    0xB9U };
     CHECK_EQ(n, 11U);
     CHECK_BYTES(wire, want, 11U);
 }
@@ -546,7 +544,7 @@ TEST(custom_intake_and_volts_come_from_one_frame)
     decodeOnce();
     logic::customPublish();
 
-    CHECK_EQ(b4()[1], 85U);                              /* 45 + 40     */
+    CHECK_EQ(b4()[1], 0xFFU);                            /* 015 b2 is not intake */
     CHECK_EQ(b4()[3], 0x05U);  CHECK_EQ(b4()[4], 0x96U); /* 1430 cV     */
 }
 
@@ -577,19 +575,27 @@ TEST(custom_fuel_percent_clamps_at_one_hundred)
 TEST(custom_throttle_scales_the_pedal_to_percent)
 {
     primed();
-    throttle(116U, 116U);          /* (116 - 23) * 100 / 211 = 44 % */
+    throttle(110U);                /* 110 * 0.4 = 44 % */
     decodeOnce();
     logic::customPublish();
     CHECK_EQ(b3()[5], 44U);
 
-    /* Rest position is 23 counts, not 0 -- below it the subtraction would
-     * wrap and read 97 %. */
-    throttle(23U, 23U);
+    throttle(0U);
     decodeOnce();
     logic::customPublish();
     CHECK_EQ(b3()[5], 0U);
 
-    throttle(234U, 234U);          /* floored */
+    throttle(250U);                /* 250 counts = 100 % */
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(b3()[5], 100U);
+
+    throttle(1U);                  /* 0.4 % rounds to 0 */
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(b3()[5], 0U);
+
+    throttle(0xFEU);               /* above 250 clamps */
     decodeOnce();
     logic::customPublish();
     CHECK_EQ(b3()[5], 100U);
@@ -786,20 +792,19 @@ TEST(custom_fuel_gate_before_any_reading_leaves_the_sentinels)
     CHECK_EQ(validMask() & ram::kValidB8, 0U);
 }
 
-/* b6 mirrors b2 in all 14 457 frames of drive.log, so a mismatch is a corrupt
- * frame and the sample is discarded rather than published. */
-TEST(custom_throttle_mismatched_mirror_holds_the_previous_value)
+/* 02C all-FF is the module-asleep form: the pedal is unavailable, not 102 %. */
+TEST(custom_throttle_unavailable_publishes_the_sentinel)
 {
     primed();
-    throttle(116U, 116U);
+    throttle(110U);
     decodeOnce();
     logic::customPublish();
     CHECK_EQ(b3()[5], 44U);
 
-    throttle(234U, 0x00U);         /* b6 disagrees */
+    coolantUnavailable();
     decodeOnce();
     logic::customPublish();
-    CHECK_EQ(b3()[5], 44U);        /* unchanged */
+    CHECK_EQ(b3()[5], 0xFFU);
 }
 
 /* 0xFFFF = unavailable (bus waking). Skipped: previous value AND validity are
@@ -892,34 +897,25 @@ TEST(custom_ambient_wire_encoding)
  *
  * Intake shares 0xB4's validity bit with coolant and does not clear it: one
  * dead sensor must not cost the three good signals in this command. */
-TEST(custom_intake_unavailable_publishes_the_reserved_code)
+TEST(custom_intake_is_always_the_reserved_code)
 {
     primed();
     coolant(133U);                 /* keep 0xB4 live */
-    voltsIntake(143U, 45U);
-    decodeOnce();
-    logic::customPublish();
-    CHECK_EQ(b4()[1], 85U);
-
-    voltsIntake(143U, 0xFFU);      /* unavailable */
-    decodeOnce();
-    logic::customPublish();
-    CHECK_EQ(b4()[1], 0xFFU);                            /* NOT 0x27 / -1 degC */
-    CHECK_EQ(validMask() & ram::kValidB4, ram::kValidB4); /* coolant still good */
-
-    /* Anything from 0x80 up is rejected the same way: a two's-complement
-     * negative has never been observed on this car, and from 0xD7 the bias
-     * would run into the reserved code anyway. */
-    voltsIntake(143U, 0x80U);
+    voltsIntake(143U, 45U);        /* 015 b2 is not intake air */
     decodeOnce();
     logic::customPublish();
     CHECK_EQ(b4()[1], 0xFFU);
 
-    /* 0xD6 is the last byte that still biases below the reserved code. */
-    voltsIntake(143U, 45U);
+    voltsIntake(143U, 0xFFU);
     decodeOnce();
     logic::customPublish();
-    CHECK_EQ(b4()[1], 85U);
+    CHECK_EQ(b4()[1], 0xFFU);
+    CHECK_EQ(validMask() & ram::kValidB4, ram::kValidB4); /* coolant still good */
+
+    voltsIntake(143U, 0x80U);
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(b4()[1], 0xFFU);
 }
 
 /* ===========================================================================
@@ -2119,4 +2115,81 @@ TEST(b4_fuel_and_volts_each_set_the_bit_on_their_own)
     logic::customPublish();
     CHECK_EQ(b4()[2], 0xFFU);
     CHECK_EQ(validMask() & ram::kValidB4, ram::kValidB4);
+}
+
+
+/* ===========================================================================
+ * 0xB3[4] engine load: 100 * (43.4 * Q / rpm) / 90, clamped 0..100, 0xFF when
+ * rpm or Q is unavailable or rpm < 300.
+ * ========================================================================= */
+
+namespace {
+
+/* One 0x002 frame carrying rpm (speed 0) and one 0x1A7 frame carrying Q, then
+ * a publish, with the box clock at t. */
+void loadInputs(std::uint16_t rpm, std::uint16_t q, std::uint32_t t) noexcept
+{
+    clockAt(t);
+    const std::uint8_t e[8] = { static_cast<std::uint8_t>(rpm >> 8),
+                                static_cast<std::uint8_t>(rpm), 0U, 0U, 0U, 0U, 0U, 0U };
+    pushFrame(logic::canid::kJeepEngine, e);
+    const std::uint8_t f[8] = { static_cast<std::uint8_t>(q >> 8),
+                                static_cast<std::uint8_t>(q), 0U, 0U, 0U, 0U, 0U, 0U };
+    pushFrame(logic::canid::kJeepFuelFlow, f);
+    decodeOnce();
+    decodeOnce();
+    logic::customPublish();
+}
+
+}  // namespace
+
+/* Idle: ~9 mm3 -> ~10 %. rpm 600, Q 124: 43.4 * 124 / 600 = 8.97 mm3 -> 9.96 %
+ * -> 10. */
+TEST(load_idle_is_about_ten_percent)
+{
+    primed();
+    loadInputs(600U, 124U, 10U);
+    CHECK_EQ(b3()[4], 10U);
+}
+
+/* Peak: 90 mm3 = 100 %. rpm 2000, Q 4147: 43.4 * 4147 / 2000 = 90.0 mm3. */
+TEST(load_full_scale_is_one_hundred_and_clamps)
+{
+    primed();
+    loadInputs(2000U, 4147U, 10U);
+    CHECK_EQ(b3()[4], 100U);
+
+    loadInputs(2000U, 9000U, 20U);        /* 195 mm3 -> clamp */
+    CHECK_EQ(b3()[4], 100U);
+}
+
+/* Overrun fuel cut: Q = 0 is a real reading, 0 % load. */
+TEST(load_overrun_is_zero_not_unavailable)
+{
+    primed();
+    loadInputs(1500U, 0U, 10U);
+    CHECK_EQ(b3()[4], 0U);
+}
+
+TEST(load_unavailable_when_rpm_or_q_missing_or_low_rpm)
+{
+    primed();
+    logic::customPublish();
+    CHECK_EQ(b3()[4], 0xFFU);              /* nothing seen yet */
+
+    loadInputs(0xFFFFU, 1000U, 10U);       /* rpm unavailable */
+    CHECK_EQ(b3()[4], 0xFFU);
+
+    loadInputs(299U, 1000U, 20U);          /* below 300 rpm */
+    CHECK_EQ(b3()[4], 0xFFU);
+
+    loadInputs(1000U, 0xFFFFU, 30U);       /* Q unavailable */
+    CHECK_EQ(b3()[4], 0xFFU);
+
+    loadInputs(1000U, 1000U, 40U);         /* 43.4 mm3 -> 48 % */
+    CHECK_EQ(b3()[4], 48U);
+
+    clockAt(2000U);                        /* 1A7 went silent: stale Q */
+    logic::customPublish();
+    CHECK_EQ(b3()[4], 0xFFU);
 }

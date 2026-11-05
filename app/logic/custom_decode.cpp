@@ -76,10 +76,23 @@ constexpr std::uint8_t kAsciiR = 0x52U;   /* 'R' */
  * testing the whole byte would report the brake permanently engaged. */
 constexpr std::uint8_t kParkBrakeBit = 0x80U;
 
-/* 0x2C0 b2, accelerator pedal: 23 at rest, 234 floored. Evidence: id 0x2C0,
- * pedal probable/high confidence. */
-constexpr std::uint8_t  kPedalRest = 23U;
-constexpr std::uint32_t kPedalSpan = 234U - 23U;   /* 211 counts = 100 %     */
+/* 0x02C b2, accelerator pedal: 0.4 %/count, 250 = 100 %. Evidence: byte map,
+ * confirmed (r = 0.9995 against the TCM pedal reading). So pct = b2 * 2 / 5,
+ * done as (2 * b2 + 2) / 5 for round-half-up. */
+constexpr std::uint32_t kPedalNum   = 2U;
+constexpr std::uint32_t kPedalDen   = 5U;
+constexpr std::uint32_t kPedalRound = 2U;
+
+/* Engine load from the injection quantity (byte map, "Derived values"):
+ *   inj_mm3_stroke = 43.4 * Q / rpm,  load % = 100 * inj / 90
+ *   => load % = 4340 * Q / (90 * rpm), rounded half-up in integers.
+ * Below kLoadMinRpm (cranking / stalling) the quotient is meaningless. Q must
+ * also be fresh: 0x1A7 runs at ~100 ms, so older than kLoadMaxAgeMs means the
+ * stream stopped. 4340 * 65534 = 284 M, inside u32. */
+constexpr std::uint32_t kLoadNum      = 4340U;
+constexpr std::uint32_t kLoadDen      = 90U;
+constexpr std::uint16_t kLoadMinRpm   = 300U;
+constexpr std::uint32_t kLoadMaxAgeMs = 500U;
 
 /* 0x159 b4 is a hard validity gate: b4 == 1 <-> b5 == 0xFF is not a reading.
  * True with zero exceptions across every log in the repo. */
@@ -116,9 +129,6 @@ constexpr std::uint16_t kFuelDeciPerCount = 5U;
  * reserved code rather than held: an unavailable sensor must read "unknown",
  * not "whatever it said last".
  * ------------------------------------------------------------------------- */
-constexpr std::uint8_t kTempNegative = 0x80U;
-constexpr std::uint8_t kTempBias     = 40U;
-
 /* 0x015 b1 is 0.1 V/count and the 0xB4 field is centivolts: x10 exactly. */
 constexpr std::uint16_t kCentiVoltsPerCount = 10U;
 
@@ -271,6 +281,8 @@ void customPrimeSignals() noexcept
     c.speedKph       = ram::kCustomUnknown16;
     c.rpm            = ram::kCustomUnknown16;
     c.throttlePct    = ram::kCustomUnknown8;
+    c.loadPct        = ram::kCustomLoadUnknown;
+    c.flowLastQ      = ram::kCustomUnknown16;
     c.coolantBias40  = ram::kCustomUnknown8;
     c.intakeBias40   = ram::kCustomUnknown8;
     c.fuelPct        = ram::kCustomUnknown8;
@@ -459,14 +471,14 @@ void customAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
 }
 
 /* ============================================================================
- * 0x015 -- b1 battery voltage at 0.1 V/count, b2 intake/charge air temperature.
+ * 0x015 -- b1 battery voltage at 0.1 V/count.
  * Evidence: id 0x015. Voltage Confirmed (125 = 12.5 V key-on, 143-146 running,
- * 103 cranking); b2 a candidate -- its positive values read plausibly as raw
- * degrees C, identity and negative encoding unconfirmed.
+ * 103 cranking). b2 is NOT intake air (the byte map lists it as an unknown
+ * temperature), so the 0xB4 intake field is always the reserved 0xFF and b2
+ * is not decoded here.
  *
- * Both fields live in 0xB4, whose validity bit means "at least one field is
- * valid" (updateB4Valid); each field also reports its own loss with its own
- * sentinel.
+ * 0xB4's validity bit means "at least one field is valid" (updateB4Valid);
+ * each field also reports its own loss with its own sentinel.
  *
  * This is a third reader of 0x015 -- jeepSteering() takes b4:b5 and, in a benz
  * build, benzVoltage() takes b1.
@@ -483,18 +495,6 @@ void customVoltsIntake(const volatile std::uint8_t* d) noexcept
     c.centiVolts = static_cast<std::uint16_t>(static_cast<std::uint16_t>(d[1])
                                               * kCentiVoltsPerCount);
     updateB4Valid();
-
-    /* Intake is CLAMPED BEFORE BIASING, never computed blindly: 0xFF + 40
-     * truncates to 0x27 and would publish -1 degC. Unavailable or suspect goes
-     * out as the reserved 0xFF.
-     *
-     * No validity bit of its own -- 0xB4's bit belongs to coolant alone, and
-     * the spec is explicit that one dead sensor must not cost the three good
-     * signals sharing this command. The field reports its own loss. */
-    const std::uint8_t b2 = d[2];
-    c.intakeBias40 = (b2 >= kTempNegative)
-                         ? ram::kCustomUnknown8
-                         : static_cast<std::uint8_t>(b2 + kTempBias);
 }
 
 /* ============================================================================
@@ -610,40 +610,26 @@ void customFuel(const volatile std::uint8_t* d) noexcept
 }
 
 /* ============================================================================
- * 0x2C0 b2 -- accelerator pedal position, scaled to 0..100 %.
- * Evidence: id 0x2C0, pedal probable/high confidence: 23 at rest, up to 234
- * floored.
+ * 0x02C b2 -- accelerator pedal position, 0.4 %/count (250 = 100 %).
+ * Evidence: byte map, confirmed (r = 0.9995 against the TCM pedal reading).
+ * 0x02C is all-FF when unavailable, so b2 == 0xFF publishes the reserved
+ * 0xFF rather than 102 %. Values above 250 clamp to 100.
  *
- * b6 IS A REDUNDANCY CHECK, not a second signal. It mirrors b2 exactly in all
- * 14 457 frames of drive.log, so a mismatch means a corrupt frame and the
- * sample is DISCARDED -- the previous throttle value stands. This is the only
- * field in the block with an in-frame integrity check and it costs one
- * comparison, so it is used.
- *
- * Below the 23-count rest position the subtraction would wrap, so it floors at
- * zero rather than reading 97 %.
- *
- * NOT ENGINE LOAD. 0x02C b2 is the load-shaped channel (r = +0.988 with the
- * pedal) but its 0..136 range has never been calibrated against a scan tool,
- * so the load field of 0xB3 goes out as the contract's unknown value and no
- * guess is scaled. See custom_tx.cpp.
+ * Replaces the earlier 0x2C0 b2 voltage-span guess; 0x2C0 is no longer read.
+ * Not engine load -- see customEngineLoad().
  * ==========================================================================*/
 void customThrottle(const volatile std::uint8_t* d) noexcept
 {
     ram::CustomSignals& c = ram::app().customSignals;
     const std::uint8_t  b2 = d[2];
 
-    if (b2 != d[6]) {
-        return;                       /* corrupt frame: hold */
-    }
-
-    if (b2 <= kPedalRest) {
-        c.throttlePct = 0U;
+    if (b2 == ram::kCustomUnknown8) {
+        c.throttlePct = ram::kCustomUnknown8;
         return;
     }
 
-    std::uint32_t pct = (static_cast<std::uint32_t>(b2 - kPedalRest)
-                         * kPercentMax) / kPedalSpan;
+    std::uint32_t pct = (static_cast<std::uint32_t>(b2) * kPedalNum + kPedalRound)
+                        / kPedalDen;
     if (pct > kPercentMax) {
         pct = kPercentMax;
     }
@@ -791,8 +777,10 @@ void customFuelFlow(const volatile std::uint8_t* d) noexcept
 
     if (q == ram::kCustomUnknown16) {
         c.flowHaveLast = 0U;          /* reject, and void the next interval */
+        c.flowLastQ    = ram::kCustomUnknown16;
         return;
     }
+    c.flowLastQ = static_cast<std::uint16_t>(q);
 
     if (c.flowHaveLast != 0U) {
         const std::uint32_t dt = now - c.flowLastMs;   /* wraps correctly */
@@ -803,6 +791,31 @@ void customFuelFlow(const volatile std::uint8_t* d) noexcept
     }
     c.flowLastMs   = now;
     c.flowHaveLast = 1U;
+}
+
+/* Engine load 0..100 %, derived from the injection quantity (see kLoadNum).
+ * Unavailable (0xFF, which the decoder rejects as > 100) when rpm is absent or
+ * below kLoadMinRpm, or Q is absent or stale. Called from customPublish(). */
+void customEngineLoad() noexcept
+{
+    ram::CustomSignals& c = ram::app().customSignals;
+    const std::uint32_t now = ram::app().sched.counter;
+    const std::uint16_t rpm = c.rpm;
+    const std::uint16_t q   = c.flowLastQ;
+
+    if ((rpm == ram::kCustomUnknown16) || (rpm < kLoadMinRpm)
+        || (q == ram::kCustomUnknown16) || (c.flowHaveLast == 0U)
+        || ((now - c.flowLastMs) > kLoadMaxAgeMs)) {
+        c.loadPct = ram::kCustomLoadUnknown;
+        return;
+    }
+
+    const std::uint32_t den = kLoadDen * static_cast<std::uint32_t>(rpm);
+    std::uint32_t pct = (kLoadNum * static_cast<std::uint32_t>(q) + (den / 2U)) / den;
+    if (pct > kPercentMax) {
+        pct = kPercentMax;
+    }
+    c.loadPct = static_cast<std::uint8_t>(pct);
 }
 
 /* The window close. Every 1000 ms: if any interval was integrated, publish

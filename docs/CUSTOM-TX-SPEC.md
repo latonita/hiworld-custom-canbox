@@ -28,7 +28,7 @@
 > Scope decided 2026-10-21: **no contract changes.** `0xB3` keeps rpm even
 > though stock `0x32` also carries it; `0xB2` keeps all four bits even though
 > ACC and reverse are also in stock `0x72`. Fuel flow was **not** added to
-> `0xB8`; it went into its own `0xBC` slot on 2026-10-24 (§10). Engine load is **parked**. `0xB1` and `0xB6` are dropped as pure
+> `0xB8`; it went into its own `0xBC` slot on 2026-10-24 (§10). Engine load is derived from fuel flow (amended 2026-11-05). `0xB1` and `0xB6` are dropped as pure
 > duplicates of stock `0xF0` and `0x12` — they add no signal, only slots.
 
 ---
@@ -149,25 +149,29 @@ the image has ever set it.
 |---|---|---|---|
 | 0:1 | speed, km/h, u16 | `002` b2:b3 | `(b2<<8 \| b3) / 128`, rounded |
 | 2:3 | rpm, u16 | `002` b0:b1 | **verbatim two-byte copy** |
-| 4 | engine load % | — | **always `0x00`** — parked, see below |
-| 5 | throttle % | `2C0` b2 | `(b2 - 23) * 100 / 211`, clamp 0…100 |
+| 4 | engine load % | `1A7` b0:b1, `002` b0:b1 | `100 * (43.4 * Q / rpm) / 90`, clamp 0…100; `0xFF` unavailable, see below |
+| 5 | throttle % | `02C` b2 | `b2 * 0.4` (250 = 100 %), clamp 0…100; `0xFF` unavailable |
 
 - **`002` all-`FF` means unavailable.** When `b0:b1 == 0xFFFF`, speed and rpm are
   both invalid: send `0xFFFF` in **both** fields and clear the `0xB3` validity
   bit. Do **not** compute `0xFFFF / 128` — that is 512 km/h.
-- **Throttle has a redundancy check.** `2C0` b6 mirrors b2 exactly in all 14 457
-  frames of `drive.log`. If `b2 != b6`, discard the sample and keep the previous
-  throttle value.
-- **Engine load is parked.** `02C` b2 is the load-shaped channel (r=+0.988 with
-  pedal) but its 0…136 range has never been calibrated against a scan tool.
-  Send `0x00`, which the contract defines as unknown. Do not scale a guess.
+- **Throttle is the accelerator pedal from `02C` b2**, 0.4 %/count (confirmed
+  against the TCM pedal reading). `02C` all-`FF` (b2 == `0xFF`) is unavailable:
+  send `0xFF`, not 102 %. The earlier `2C0` b2 voltage-span guess is gone.
+- **Engine load is derived, not read.** `Q = 1A7 b0:b1`, `rpm = 002 b0:b1`:
+  injection per stroke `= 43.4 * Q / rpm` mm3 (byte map, "Derived values"),
+  `load % = 100 * inj / 90`, integer math, rounded, clamped 0…100. The
+  unavailable value is **`0xFF`** (amended from `0x00`: 0 % is a real reading,
+  e.g. overrun, and shown as such by the head unit; the consumer rejects
+  anything above 100). Send `0xFF` when rpm is `0xFFFF` or below 300, when `Q`
+  is `0xFFFF`, or when no `1A7` frame has arrived for 500 ms.
 
 ### `0xB4` ENGINE — 5 bytes
 
 | off | field | source | arithmetic |
 |---|---|---|---|
 | 0 | coolant, °C+40 | `02C` b1 | **verbatim byte** — the car already sends °C+40 |
-| 1 | intake, °C+40 | `015` b2 | `b2 + 40` |
+| 1 | intake, °C+40 | — | **always `0xFF`** — no source on the WK |
 | 2 | fuel level % | `159` b5 | `round(b5 * 0.6443)`, clamp 0…100 |
 | 3:4 | volts, centivolts, u16 | `015` b1 | `b1 * 10` |
 
@@ -193,12 +197,9 @@ the image has ever set it.
 - **`159` b4 is a hard gate.** `b4 == 0x01` means `b5 = 0xFF` is not a reading.
   When b4 is set, hold the previous fuel figure and clear the `0xB8` validity
   bit (not `0xB4`'s — fuel % keeps its held value and volts are still good).
-- **Intake must be clamped before biasing, not computed blindly.** `b2 + 40`
-  overflows: `0xFF + 40` truncates to `0x27` = −1 °C, a plausible-looking lie.
-  If `015` b2 ≥ `0xD7` (which would bias past the reserved code) or the source
-  is unavailable, write `0xFF` explicitly.
-- Intake negative encoding has never been observed on this car. If `015` b2
-  ≥ `0x80`, treat the sample as suspect and send `0xFF`.
+- **Intake is always `0xFF`.** `015` b2 is not intake air (the byte map lists
+  it as an unknown temperature), so it is not decoded. The field stays in the
+  frame for the layout's sake.
 
 ### `0xB5` CLIMATE — 2 bytes
 
@@ -364,7 +365,7 @@ Every one of these is computed from the §1 rule. Use them as unit tests.
 |---|---|
 | `AA 55 02 B0 01 2F E1` | heartbeat, rev 1: B2/B3/B4/B5/B8 valid, B7 (bit 4) always 0 in this build |
 | `AA 55 01 B2 03 B5` | ACC on, engine running, not reverse, brake off |
-| `AA 55 06 B3 00 3F 0A 8D 00 2C BA` | 63 km/h, 2701 rpm, load unknown, throttle 44 % |
+| `AA 55 06 B3 00 3F 0A 8D FF 2C B9` | 63 km/h, 2701 rpm, load unavailable, throttle 44 % |
 | `AA 55 05 B4 85 55 5C 05 96 89` | coolant 93 °C, intake 45 °C, fuel 92 %, 14.30 V |
 | `AA 55 05 B4 FF 55 5C 05 96 03` | **coolant not available**, everything else still live |
 | `AA 55 02 B5 00 FA B0` | outside +25.0 °C |
@@ -379,9 +380,10 @@ Also test, against the host unit tests in `tests/host/`:
 - `02C` all-`FF` ⇒ `0xB4` **is still emitted**, `[0]` is `0xFF`, `[2..4]` still
   carry fuel/volts, and `0xB0` bit2 stays 1 while any field is valid (it is 0
   only when all four are unavailable, e.g. cold boot).
-- `015` b2 == `0xFF` ⇒ `0xB4[1]` is `0xFF`, **not** `0x27`/−1 °C.
+- `015` b2 of any value ⇒ `0xB4[1]` is `0xFF`.
 - `159` b4 == 1 ⇒ fuel holds its previous value and `0xB0` bit5 is 0.
-- `2C0` b2 != b6 ⇒ throttle holds its previous value.
+- `02C` b2 == `0xFF` ⇒ throttle `0xFF`; b2 == 250 ⇒ 100 %.
+- load: rpm 2000 / Q 4147 ⇒ 100; Q 0 ⇒ 0; rpm < 300 or Q `FFFF` or stale ⇒ `0xFF`.
 - crank: `000` b0 == `0xA9` with rpm 410 ⇒ `0xB2` bit1 stays 0.
 - run-up: rpm 600 for 3 consecutive frames ⇒ bit1 sets on the third, not the first.
 - shutdown: rpm → `FFFF` ⇒ bit1 clears on the first frame.

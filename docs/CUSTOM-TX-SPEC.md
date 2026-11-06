@@ -86,7 +86,7 @@ work and is not your concern.
 **Do not implement `0xB1`.** The firmware version already goes to the head unit
 in stock Hiworld `0xF0`: a 17-byte periodic TX slot whose live buffer is
 `ram::g_versionString`, filled from `cfg::kVersionString` in `svc::hu::init()`
-(`H1N4JPF20L-051126` on this build). It is on the wire and in the `rxpduses`
+(`H1N4JPF20L-061126` on this build). It is on the wire and in the `rxpduses`
 mirror already. Reserved.
 
 ~~**Do not implement `0xB7`.** TPMS is not broadcast on this car's CAN-B; it
@@ -297,7 +297,7 @@ The 300/500 hysteresis band sits between crank-max 410 and idle-min 577.
 > (no sensor; LF on this car reads 5) is published as `0xFFFF` kPa with flags
 > bit 2 set, for that position only, with temperature `0xFF` and flags 0, 1, 3
 > cleared. The flags byte is bit0 low battery, bit1 leak, bit2 no signal, bit3
-> low-pressure warning; temperature is the raw WCM byte, scale unconfirmed (apps treat it as degF provisionally; `0xFF` none). See
+> low-pressure warning; temperature is the raw WCM byte, degC + 50 (degC = raw - 50; `0xFF` none). See
 > `TPMS-POLL-SPEC.md`.
 
 > **AS BUILT, 2026-10-21 — one correction to this section.** The scheduler DID

@@ -199,7 +199,7 @@ The Dashwheel contract already specifies this; it is not ours to invent.
 |---|---|---|
 | 0 | position | `0`=LF `1`=RF `2`=RR `3`=LR, `4`=spare (**not sent**, deferred) |
 | 1:2 | pressure, u16 **kPa** | `0xFFFF` = no value |
-| 3 | tyre temperature, raw WCM byte (scale unconfirmed) | the raw `21 2n` byte3, verbatim (see 4.1); `0xFF` = none |
+| 3 | tyre temperature, raw WCM byte (degC + 50) | the raw `21 2n` byte3, verbatim (see 4.1); `0xFF` = none |
 | 4 | flags | bit0 battery low, bit1 leak, bit2 no signal, bit3 low-pressure warning |
 
 **Units.** The WCM gives psi; the contract wants kPa.
@@ -211,8 +211,8 @@ kPa = round(psi * 6.894759)   implemented as   (psi * 68948 + 5000) / 10000
 comfortably inside 32 bits.
 
 **Temperature** is the raw byte3 of the `21 2n` reply, sent verbatim, any value
-`0x00..0xFE`. The scale is **unconfirmed**; the head-unit apps convert and
-provisionally treat the raw byte as degrees Fahrenheit. `0xFF` = none, also
+`0x00..0xFE`. The scale is degC + 50 (degC = raw - 50, confirmed on the car by
+cold-soak tests); the head-unit apps convert. `0xFF` = none, also
 sent when the WCM itself sends `0xFF`, when the wheel has no pressure, and when
 the wheel's extras are stale.
 
@@ -269,7 +269,7 @@ extension.
 | byte | use |
 |---|---|
 | 2 `P` | pressure, raw - 1 psi. **Ignored**: pressures stay from `21 3B` |
-| 3 `T` | air temperature, raw byte, scale unconfirmed (apps treat it as degF provisionally). Sent verbatim; the box does no conversion (`kTpmsSensorTempByte`) |
+| 3 `T` | air temperature, raw byte, degC + 50. Sent verbatim; the box does no conversion (`kTpmsSensorTempByte`) |
 | 4 `X` | ignored |
 | 5 `S` | bits0-1 frame number (ignored); bits2-3 battery status (1 = low); bits4-5 transmission trigger (2 = Pressure Loss); bits6-7 sensor state (2 = park mode, ignored, the temperature is still sent) |
 | 6 `M` | ignored |

@@ -1,7 +1,8 @@
 # Custom telemetry block `0xB0`–`0xBF` — new layout
 
-> **Status: BUILT 2026-11-07** on branch `feature/telemetry-v2` (firmware `H1N4JPF20L-071126`,
-> host-tested, not yet flashed). Written 2026-11-05 on `spec/telemetry-v2`. Corrections made while
+> **Status: BUILT, on the car since 2026-11-07 (071126)** — branch `feature/telemetry-v2`, firmware
+> `H1N4JPF20L-071126`, flashed by the owner from a USB stick together with the v2 Dashwheel build ("works
+> okay from first glance"). Rollback: `H1N4JPF20L-061126` (v1 block + tpms-temp) with the v1 Dashwheel. Written 2026-11-05 on `spec/telemetry-v2`. Corrections made while
 > building are listed in §15; **§14 is the exact wire summary** a decoder is written from.
 >
 > **This layout REPLACES the current custom block (`docs/CUSTOM-TX-SPEC.md`) entirely.** There is
@@ -658,6 +659,18 @@ starvation when STATE changes every tick, `uartTxSlotIdx` intact after 10⁶ pas
 constant still wants a measured blink period. 4 — confirmed (§7.2). 9 — kept as "both bits in one frame".
 11 — the constant is 2, not 3 (§7.2); bench check still open. 12 — superseded: there is no ACC gate on the
 UART (§2 ground rules). 1, 3, 5, 6, 7, 8, 10, 13 stay open for the owner.
+
+**Owner observations on the car (2026-11-07, first drive with 071126):**
+
+14. **Indicator lag is visible** (acceptable for now). Cause not yet split between the box and the head unit:
+    the box adds up to ~100 ms before the first set (next 100 ms tick, then the priority lane) and holds the
+    bit 700–800 ms after the last blink (§3.2.1); on the Dashwheel side the tile flashes on its **own 1.5 Hz
+    phase with a 0.9 s latch**, so it cannot be in phase with the real flasher and adds its own release delay.
+    To split it: log `0xB2` S2 arrival times on the head unit against a CAN-B capture of `006` b0 while
+    blinking, then decide whether to shorten the 700 ms hold (needs the measured flasher period) or change
+    the tile.
+15. **Latency of the other signals is not measured yet** (STATE edges, FAST at 10 Hz, slow rows ≤ ~1.6 s).
+    Bench/car check per §12.2/§12.3.
 
 ---
 

@@ -1,7 +1,9 @@
 # Custom TX block `0xB0`–`0xBF` — firmware implementation spec
 
-> **SUPERSEDED by [`TELEMETRY-V2-SPEC.md`](TELEMETRY-V2-SPEC.md)** (built 2026-11-07, firmware
-> `H1N4JPF20L-071126`). Kept only as history: nothing below describes the current wire format.
+> **SUPERSEDED / HISTORICAL.** The current protocol is [`TELEMETRY-V2-SPEC.md`](TELEMETRY-V2-SPEC.md),
+> on the car since 2026-11-07 (firmware `H1N4JPF20L-071126`). This file describes layout v1 (`0xB0`–`0xBD`,
+> validity mask, `0xBB`/`0xBC`/`0xBD`), last shipped in `-061126`, which is the rollback image. Nothing
+> below describes the current wire format.
 
 > **This is a work order, not an analysis.** Everything here is decided. Build
 > exactly this. Where something is deliberately NOT built, it says so and why.

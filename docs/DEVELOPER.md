@@ -55,16 +55,16 @@ Build history on the wire: `-171026` stock six slots only, `-211026` adds the te
 `-241026` adds `0xBC` fuel flow, `-251025` reorders `0x3D0` for the WK amp, restores the
 saved volume at boot and saves settings only once they settle,
 `-301026` resends unchanged slots under constant traffic (busy-link refresh) and reports a missing TPMS sensor as no signal,
-`-061126` adds per-wheel tyre temperature/battery/leak/low-pressure flags, `-071126` replaces the custom block with
-telemetry v2 (`TELEMETRY-V2-SPEC.md`; needs the matching Dashwheel decoder).
+`-061126` adds per-wheel tyre temperature/battery/leak/low-pressure flags (the rollback image), `-071126` replaces the
+custom block with telemetry v2 (`TELEMETRY-V2-SPEC.md`; on the car since 2026-11-07 with the matching Dashwheel decoder).
 
 ## Signal reference
 
 | Document | What |
 |---|---|
 | [`../data-provided-JPF20L.md`](../data-provided-JPF20L.md) | Every data element the jeep build sends, by command and byte, with CAN source |
-| [`TELEMETRY-V2-SPEC.md`](TELEMETRY-V2-SPEC.md) | The custom block, layout v2 (current): frames, sentinels, staleness, scheduler lanes; §14 wire summary |
-| [`CUSTOM-TX-SPEC.md`](CUSTOM-TX-SPEC.md) | Layout v1 (superseded, history only) |
+| [`TELEMETRY-V2-SPEC.md`](TELEMETRY-V2-SPEC.md) | **Current** custom protocol (layout v2, on the car since 2026-11-07): frames, sentinels, staleness, scheduler lanes; §14 wire summary |
+| [`CUSTOM-TX-SPEC.md`](CUSTOM-TX-SPEC.md) | Layout v1 — superseded, historical (last in `-061126`) |
 | [`TPMS-POLL-SPEC.md`](TPMS-POLL-SPEC.md) | `0xB7` tyre pressure: KWP2000 `21 3B` poll of the WCM every 30 s |
 | [`REQUIREMENTS.md`](REQUIREMENTS.md) | Numbered requirements (FR-xx) for stock and custom behaviour |
 | [`JEEP-WK-CAN-ID-byte-map.md`](JEEP-WK-CAN-ID-byte-map.md) | WK CAN ids/bytes and confidence levels |

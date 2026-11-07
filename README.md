@@ -34,6 +34,9 @@ bus (83.333 kbit/s), written `ID bN` (CAN id, data byte). Full byte-level detail
 
 ### Custom telemetry block (layout v2, `docs/TELEMETRY-V2-SPEC.md`)
 
+The current custom protocol, on the car since 2026-11-07 (`H1N4JPF20L-071126`). Layout v1
+(`docs/CUSTOM-TX-SPEC.md`) is superseded and kept as history; `-061126` is the rollback image.
+
 | Signal | Unit / resolution | CAN source | Command |
 |---|---|---|---|
 | Heartbeat: layout version, capability bitmap, counter | 1 Hz | box | `0xB0` |

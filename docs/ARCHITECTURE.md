@@ -497,7 +497,8 @@ void customPublish() noexcept;      // 8 ms entry: drift-free 100 ms tick (+ 1 s
 void customTick100() noexcept;      // age sources, pack 0xB3/0xB2, queue them on the priority lane
 void customTick1000() noexcept;     // pack 0xB4 0xB5 0xB7 0xB8 + heartbeat, request 0xB0
 ```
-Its spec is `docs/TELEMETRY-V2-SPEC.md` (§14 is the wire summary). `0xB1`, `0xB6` and `0xB9`–`0xBF`
+Its spec is `docs/TELEMETRY-V2-SPEC.md` (§14 is the wire summary; the current protocol, on the car
+since 2026-11-07; `docs/CUSTOM-TX-SPEC.md` is the superseded v1). `0xB1`, `0xB6` and `0xB9`–`0xBF`
 are never emitted. Unlike `benzPublish()` it also QUEUES: `svc::hu::requestPriority()` for `0xB3`
 (every tick) and `0xB2` (on change / 1 s), `svc::hu::requestSend()` for `0xB0`; the slow rows go
 through the ordinary change-driven round-robin with a 144 ms keep-alive step.

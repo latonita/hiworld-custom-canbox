@@ -242,21 +242,17 @@ inline constexpr std::uint8_t kUartMaxPayload = 0x37U;
 /* How many messages the box transmits. SIXTEEN for Hiworld (see the budget
  * below; the history of the count is 12 -> 14 with 0xBB/0xBD, 15 with 0xB7
  * TYRE, 16 with 0xBC FLOW). Originally: FOURTEEN for Hiworld -- the six stock
- * slots (0x72 0xA6 0x73 0xF0 0x12 0x32) plus the eight of the custom telemetry
- * block (0xB0 0xB2 0xB3 0xB4 0xB5 0xB8 0xBB 0xBD, docs/CUSTOM-TX-SPEC.md),
- * 0xB7 TYRE and 0xBC FLOW;
- * five for Benz (0x08 0x07 and three pages of 0x41). The round-robin, the
- * slot-state array and the shadow block are all sized from this.
+ * slots (0x72 0xA6 0x73 0xF0 0x12 0x32) plus the seven of the custom
+ * telemetry block v2 (0xB0 0xB2 0xB3 0xB4 0xB5 0xB7 0xB8,
+ * docs/TELEMETRY-V2-SPEC.md); five for Benz (0x08 0x07 and three pages of
+ * 0x41). The round-robin, the slot-state array and the shadow block are all
+ * sized from this.
  *
- * FIFTEEN with 0xB7 TYRE (docs/TPMS-POLL-SPEC.md), SIXTEEN with 0xBC FLOW
- * (docs/CUSTOM-TX-SPEC.md section 10).
- *
- * THE BUDGET IS NOT FREE. One frame leaves every 48 ms, so N slots mean
- * N x 48 ms worst case between two sends of the same signal and an idle
- * keep-alive of N x 720 ms. At 16: 768 ms and 11.52 s, still inside the
- * consumer's 15 s staleness check with four slots of headroom. Do not add slots
- * without redoing that arithmetic -- 20 slots is 14.4 s and 21 crosses. */
-inline constexpr std::uint8_t kTxSlotCount = kIsBenz ? 5U : 16U;
+ * THE BUDGET. Since v2 the jeep table has LANES (hu_dialect.hpp): 0xB2 and
+ * 0xB3 go out on the 100 ms priority lane, 0xB0 on its 1 s request, and only
+ * the ten slow rows share the 48 ms round-robin, whose keep-alive step is
+ * 144 ms in a jeep build -- every slow row at least every 1.44 s. */
+inline constexpr std::uint8_t kTxSlotCount = kIsBenz ? 5U : 13U;
 
 /* A Raise LEN is read by the head unit into a SIGNED byte and counted down to
  * zero, so LEN = 0 (and anything >= 0x80) makes its parser consume bytes
@@ -346,12 +342,13 @@ inline constexpr std::uint32_t kUartTxDrainSpins = 50000U;
   * images apart: -171026 speaks the six stock slots only, -211026 adds the
   * telemetry block, -241026 adds 0xBC fuel flow, and -251025 reorders the
   * 0x3D0 amplifier frame for the WK amp, restores the saved volume at boot
-  * and saves the parameter page only once changes settle. */
+  * and saves the parameter page only once changes settle. -071126 replaces
+  * the telemetry block with layout v2 (docs/TELEMETRY-V2-SPEC.md). */
  //                                      "H1N4JPF20A-220524"
 #if defined(CANBOX_PROTOCOL_BENZ)
 inline constexpr char kVersionString[] = "H1N4BNZ10L-171026";
 #else
-inline constexpr char kVersionString[] = "H1N4JPF20L-061126";
+inline constexpr char kVersionString[] = "H1N4JPF20L-071126";
 #endif
 inline constexpr std::uint8_t kVersionLength = 17U;
 static_assert(sizeof(kVersionString) == kVersionLength + 1U,

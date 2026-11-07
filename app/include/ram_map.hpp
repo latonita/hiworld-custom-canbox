@@ -397,22 +397,20 @@ struct UartShadows {
     volatile std::uint8_t msg73[8];
     volatile std::uint8_t msgF0[17];
 
-    /* The custom 0xB0-0xB8 telemetry block (docs/CUSTOM-TX-SPEC.md). NOT
+    /* The custom 0xB0-0xB8 telemetry block (docs/TELEMETRY-V2-SPEC.md). NOT
      * stock -- there is no `stock @` address for these because the stock
      * firmware has no such slots. They are APPENDED rather than interleaved so
      * the six above keep the stock RAM order a reader can diff against Ghidra.
      * Written only in a jeep build; present in every build so the structure
-     * has one shape. */
-    volatile std::uint8_t msgB0[2];
-    volatile std::uint8_t msgB2[1];
-    volatile std::uint8_t msgB3[6];
+     * has one shape. msgB3 is kept although 0xB3 is sent every 100 ms
+     * whatever it holds: the row machinery stays uniform. */
+    volatile std::uint8_t msgB0[4];
+    volatile std::uint8_t msgB2[7];
+    volatile std::uint8_t msgB3[11];
     volatile std::uint8_t msgB4[5];
-    volatile std::uint8_t msgB5[2];
+    volatile std::uint8_t msgB5[3];
     volatile std::uint8_t msgB7[5];
-    volatile std::uint8_t msgB8[4];
-    volatile std::uint8_t msgBB[3];
-    volatile std::uint8_t msgBD[3];
-    volatile std::uint8_t msgBC[2];   /* 0xBC FLOW, appended last (spec s10) */
+    volatile std::uint8_t msgB8[6];
 };
 
 /* ===========================================================================
@@ -467,46 +465,33 @@ struct BenzFrames {
 /* ===========================================================================
  * THE CUSTOM 0xB0-0xB8 TELEMETRY BLOCK -- NOT a stock structure.
  *
- * The Hiworld protocol has no field for coolant, intake air, outside air,
- * battery volts, throttle, fuel, road speed or the parking brake. The WK puts
- * all of them on CAN-B. So a jeep build adds six head-unit commands of its own
- * in the free 0xB0-0xBF range -- the contract is docs/CUSTOM-TX-SPEC.md and the
- * evidence for every byte is docs/JEEP-WK-CAN-ID-byte-map.md.
+ * Layout v2: docs/TELEMETRY-V2-SPEC.md is the contract (section 14 of it is
+ * the wire summary a decoder is written from). The evidence for every CAN
+ * byte is docs/JEEP-WK-CAN-ID-byte-map.md.
  *
  * TWO STRUCTS, FOR THE SAME REASON THE BENZ PATH HAS TWO. CustomSignals is what
- * the CAN decoders write -- already in the units the wire uses, but as numbers.
- * CustomFrames is the packed big-endian payload the TX descriptor table points
- * at. Keeping them apart is what lets logic::customPublish() do the endian
- * packing in exactly one place and the decoders do none.
+ * the CAN decoders write: the LATEST RAW READING of each source plus the
+ * timestamp of its last accepted frame. CustomFrames is the packed big-endian
+ * payload the TX descriptor table points at. logic::customTick100() and
+ * customTick1000() turn the first into the second, and that is the one place
+ * a dead source becomes a sentinel.
  *
  * ---------------------------------------------------------------------------
  * THE SENTINEL RULE -- read this before touching a default.
  *
- * Every field carries an explicit "no value" encoding, and a field holds that
- * encoding until the car has actually reported it. This is what makes the
- * block safe to consume:
- *
- *   - unsigned fields: ALL ONES (0xFF / 0xFFFF).
+ * Every field has its own "no value" code (spec section 8) and there is no
+ * group validity mask any more:
+ *   - unsigned fields: ALL ONES (0xFF / 0xFFFF / 0xFFFFFF).
  *   - the one signed field, outside air: 0x8000, the most negative s16.
- *     All-ones is NOT usable there -- 0xFFFF decodes as -0.1 degC, a perfectly
- *     plausible reading the consumer could not tell from a real one.
- *   - engine load: 0x00. The odd one out, deliberately: the contract defines 0
- *     as "unknown" for that field (CUSTOM-TX-SPEC.md section 3) and it has no
- *     source on this car at all.
+ *   - the ignition enum: 7. The 4WD enum: 0.
+ *   - single bits cannot hold a sentinel, so 0xB2 carries a source-alive byte
+ *     (S6) and a bit whose source is dead is written 0.
  *
- * The trap this closes is COOLANT. 0x02C sends all-FF for "unavailable" and the
- * field is degC+40, so without a reserved code every byte from 0x00 to 0xFF
- * decoded inside the accepted -40..215 degC and a verbatim copy read as a
- * perfectly plausible 215 degC -- tripping the consumer's overheat alert.
- * 0xFF is therefore the RESERVED "not available" code for every +40-biased
- * temperature here, which the consumer decodes as
- * XyautoProtocol.TEMP_NOT_AVAILABLE. The cost is that exactly 215 degC is
- * unrepresentable; the usable top is 0xFE = 214 degC, which no coolant or
- * intake on this car reaches.
- *
- * Sentinels alone are not enough, because a consumer holding a last-good value
- * cannot tell a stale reading from a fresh one. That is what the 0xB0 validity
- * mask is for; the two are a pair, not alternatives.
+ * STALENESS LIVES HERE NOW. Each CAN source has one u32 stamp (sched.counter,
+ * 1 kHz, wrap-safe subtraction) written by its decoder on every ACCEPTED
+ * frame, and a "seen since boot" bit. A source is alive while
+ *     seen && (now - lastMs) <= limit          (3 x nominal period)
+ * and a dead source's fields go to their sentinels at the next 100 ms tick.
  * ========================================================================= */
 
 /* The "no value" encodings. */
@@ -514,49 +499,30 @@ inline constexpr std::uint8_t  kCustomUnknown8    = 0xFFU;
 inline constexpr std::uint16_t kCustomUnknown16   = 0xFFFFU;
 /* The 24-bit odometer. The car's own "unavailable" code for 0x014 b0:b1:b2 is
  * also 0xFFFFFF, so source and wire encoding coincide and the copy is
- * verbatim -- the same happy accident as coolant. */
+ * verbatim. */
 inline constexpr std::uint32_t kCustomUnknown24   = 0x00FFFFFFU;
 inline constexpr std::int16_t  kCustomUnknownS16  = static_cast<std::int16_t>(-32768);
-inline constexpr std::uint8_t  kCustomLoadUnknown = 0xFFU;
+inline constexpr std::uint8_t  kIgnEnumUnknown    = 7U;
+inline constexpr std::uint8_t  kTransferUnknown   = 0U;
 
-/* Bits of the 0xB0 validity mask (payload byte 1). 1 = the data in that command
- * is live RIGHT NOW. Each bit is owned by exactly one CAN source, so no bit
- * ever needs two writers:
- *     bit0  0xB2  <- 0x000 seen at least once
- *     bit1  0xB3  <- 0x002 not all-FF
- *     bit2  0xB4  <- 0x02C not all-FF
- *     bit3  0xB5  <- 0x014 b4 is a usable ambient reading
- *     bit4  0xB7  <- a WCM poll answered within the staleness window
- *     bit5  0xB8  <- 0x159 b4 validity gate clear
- *     bit6  0xBB  <- 0x014 b0:b1:b2 != FFFFFF
- *     bit7  0xBD  <- a 0x1B4 sample passed the plausibility gate
- *
- * THE MASK IS NOW FULL. Bits 6 and 7 were reserved; the odometer and compass
- * commands spend both. The next command added to the block hits a wall that is
- * not visible from the code, so it is written out here:
- *
- *   The growth path is a SECOND MASK BYTE, appended as 0xB0 payload byte 2,
- *   with 0xBA / 0xBC / 0xBE / 0xBF taking its bits 0-3. That is a LENGTH
- *   CHANGE TO A SHIPPED COMMAND, so the firmware and the consumer's
- *   XyautoProtocol.kt have to move together in one release. Do not do it
- *   speculatively, and do not renumber bits 0-7 when you do -- they are wire
- *   format.
- *
- * Note the bits are allocated in ALLOCATION ORDER, not command order: bit 6 is
- * 0xBB and bit 7 is 0xBD even though 0xBA, 0xBC and 0xBE sit between them
- * numerically. That was already true of bit 5, which is 0xB8 and skips the
- * unbuilt 0xB6. */
-inline constexpr std::uint8_t kValidB2 = 0x01U;
-inline constexpr std::uint8_t kValidB3 = 0x02U;
-inline constexpr std::uint8_t kValidB4 = 0x04U;
-inline constexpr std::uint8_t kValidB5 = 0x08U;
-inline constexpr std::uint8_t kValidB7 = 0x10U;
-inline constexpr std::uint8_t kValidB8 = 0x20U;
-inline constexpr std::uint8_t kValidBB = 0x40U;
-inline constexpr std::uint8_t kValidBD = 0x80U;
-/* 0xBC FLOW has NO validity bit -- the mask above is full and a second mask
- * byte is a length change to a shipped command (spec section 10.4). Its own
- * 0xFFFF sentinel is the only "absent" signal, and the consumer must honour it. */
+/* The CAN sources the block ages, as indexes into CustomSignals::lastMs. The
+ * limits (3 x nominal period, spec section 6) are in custom_decode.cpp. */
+inline constexpr std::uint8_t kSrc000   = 0U;   /* ignition ladder          */
+inline constexpr std::uint8_t kSrc002   = 1U;   /* rpm, speed               */
+inline constexpr std::uint8_t kSrc003   = 2U;   /* telltales, gear, brake   */
+inline constexpr std::uint8_t kSrc006   = 3U;   /* lights, RAP              */
+inline constexpr std::uint8_t kSrc012   = 4U;   /* key in                   */
+inline constexpr std::uint8_t kSrc013   = 5U;   /* doors, belt              */
+inline constexpr std::uint8_t kSrc014   = 6U;   /* odometer, outside air    */
+inline constexpr std::uint8_t kSrc015   = 7U;   /* battery volts            */
+inline constexpr std::uint8_t kSrc02C   = 8U;   /* coolant, oil pressure    */
+inline constexpr std::uint8_t kSrc0D0   = 9U;   /* parking brake            */
+inline constexpr std::uint8_t kSrc159   = 10U;  /* fuel, minutes since RUN  */
+inline constexpr std::uint8_t kSrc1A7   = 11U;  /* fuel flow                */
+inline constexpr std::uint8_t kSrc1B2   = 12U;  /* transfer case            */
+inline constexpr std::uint8_t kSrc1B4   = 13U;  /* compass                  */
+inline constexpr std::uint8_t kSrc2C0   = 14U;  /* boost / MAP              */
+inline constexpr std::uint8_t kSrcCount = 15U;
 
 /* 0xB7 tyre positions, as the WCM orders them in its 0x213B reply:
  * b3=LF b4=RF b5=RR b6=LR. TRIANGULATED, NOT PROVEN -- three independent
@@ -578,55 +544,83 @@ inline constexpr std::uint8_t kTyreFlagLeak       = 0x02U;
 inline constexpr std::uint8_t kTyreFlagNoSignal   = 0x04U;
 inline constexpr std::uint8_t kTyreFlagLowPressure = 0x08U;
 
-/* Bits of the 0xB2 ignition byte. */
-inline constexpr std::uint8_t kIgnAccOn     = 0x01U;
-inline constexpr std::uint8_t kIgnEngineRun = 0x02U;
-inline constexpr std::uint8_t kIgnReverse   = 0x04U;
-inline constexpr std::uint8_t kIgnParkBrake = 0x08U;
+/* 0xB0 byte 0. Diagnostics only: no consumer branches on it (one protocol
+ * version, firmware and decoder change together). */
+inline constexpr std::uint8_t kCustomLayoutVersion = 0x02U;
 
-/* The protocol revision in 0xB0 payload byte 0. */
-inline constexpr std::uint8_t kCustomProtoRev = 0x01U;
+/* Indicator debounce state bits (CustomSignals::indActive) and the matching
+ * indexes into CustomSignals::indUntil. */
+inline constexpr std::uint8_t kIndLeft   = 0x01U;
+inline constexpr std::uint8_t kIndRight  = 0x02U;
+inline constexpr std::uint8_t kIndHazard = 0x04U;
+inline constexpr std::uint8_t kIndTimers = 3U;
 
 struct CustomSignals {
-    volatile std::uint16_t speedKph;        /* km/h           0x002 b2:b3/128 */
-    volatile std::uint16_t rpm;             /* 1 rpm             0x002 b0:b1  */
-    volatile std::uint8_t  throttlePct;     /* 0..100              0x02C b2   */
-    volatile std::uint8_t  loadPct;         /* 0..100, 0xFF n/a  0x1A7 Q, 0x002 rpm */
-    volatile std::uint16_t flowLastQ;       /* last accepted 0x1A7 Q, 0xFFFF n/a */
-    volatile std::uint8_t  coolantBias40;   /* degC+40, verbatim   0x02C b1   */
-    volatile std::uint8_t  intakeBias40;    /* always 0xFF: no intake source on the WK */
-    volatile std::uint8_t  fuelPct;         /* 0..100              0x159 b5   */
-    volatile std::uint16_t centiVolts;      /* 0.01 V              0x015 b1   */
-    volatile std::int16_t  outsideDeciC;    /* 0.1 degC, signed    0x014 b4:b5 */
-    volatile std::uint16_t fuelDecilitres;  /* 0.1 L               0x159 b5   */
-    volatile std::uint32_t odometerDeciKm;  /* 0.1 km, 24-bit  0x014 b0:b1:b2 */
-    volatile std::uint16_t headingDeg;      /* whole deg magnetic  0x1B4 b1*2 */
-    volatile std::uint8_t  compassSector;   /* 8-way enum, 0=N     0x1B4 b0   */
-    volatile std::uint16_t flowDeciLph;     /* 0.1 L/h, 0xFFFF=n/a 0x1A7 b0:b1*10/128 */
+    /* ---- source ages (spec section 6) ----------------------------------- */
+    volatile std::uint32_t lastMs[kSrcCount];  /* sched.counter at last accept */
+    volatile std::uint16_t srcSeen;            /* bit n: source n seen since boot */
+    volatile std::uint16_t srcAlive;           /* bit n: alive at the last tick */
 
-    /* ---- fuel-flow averaging window (logic::customFuelFlow / ...Tick) -----
-     * A rate, not a level, so it needs the box's own clock. sumQdt is
-     * sum(Q * dt_ms) and sumDt is sum(dt_ms) over the current 1000 ms window,
-     * both u32: Q <= 0xFFFE and every counted dt is <= 300 ms, so one window
-     * holds at most ~1.3 s of dt and ~8.6e7 of Q*dt, 50x inside 2^32 (the
-     * u32 only overflows after 65 s of integrated dt in ONE window). lastMs is
-     * the sched.counter stamp of the previous accepted 0x1A7 frame and
-     * haveLast says whether that stamp may be used at all. */
+    /* ---- latest raw readings, as the car sent them ---------------------- */
+    volatile std::uint8_t  ign;             /* 0x000 b0                       */
+    volatile std::uint16_t rpm;             /* 0x002 b0:b1, 0xFFFF n/a        */
+    volatile std::uint16_t speedRaw;        /* 0x002 b2:b3, km/h x128         */
+    volatile std::uint8_t  lamps0;          /* 0x003 b0                       */
+    volatile std::uint8_t  lamps1;          /* 0x003 b1                       */
+    volatile std::uint8_t  lever;           /* 0x003 b2                       */
+    volatile std::uint8_t  brake;           /* 0x003 b3                       */
+    volatile std::uint8_t  prndl;           /* 0x003 b4, ASCII                */
+    volatile std::uint8_t  lights;          /* 0x006 b0                       */
+    volatile std::uint8_t  rapByte;         /* 0x006 b1                       */
+    volatile std::uint8_t  keyByte;         /* 0x012 b2                       */
+    volatile std::uint8_t  beltByte;        /* 0x013 b0                       */
+    volatile std::uint8_t  doorByte;        /* 0x013 b2                       */
+    volatile std::uint32_t odometerDeciKm;  /* 0x014 b0:b2, verbatim          */
+    volatile std::int16_t  outsideDeciC;    /* 0x014 b4:b5, HELD over FFFF    */
+    volatile std::uint8_t  volts;           /* 0x015 b1, 0.1 V                */
+    volatile std::uint8_t  oil;             /* 0x02C b0                       */
+    volatile std::uint8_t  coolant;         /* 0x02C b1, degC+40              */
+    volatile std::uint8_t  pedal;           /* 0x02C b2, 0.4 %/count          */
+    volatile std::uint8_t  parkByte;        /* 0x0D0 b0                       */
+    volatile std::uint8_t  minutesOff;      /* 0x159 b0                       */
+    volatile std::uint8_t  fuelPct;         /* 0x159 b5, HELD on the gate     */
+    volatile std::uint16_t fuelDecilitres;  /* 0x159 b5 x5, HELD on the gate  */
+    volatile std::uint8_t  transfer;        /* 0x1B2 b1                       */
+    volatile std::uint8_t  compassSector;   /* 0x1B4 b0, last accepted        */
+    volatile std::uint16_t headingDeg;      /* 0x1B4 b1 x2, last accepted     */
+    volatile std::uint8_t  boost;           /* 0x2C0 b4, 8 hPa/count          */
+
+    /* ---- engine-running state machine (spec section 5) ------------------ */
+    volatile std::uint8_t  runStreak;
+    volatile std::uint8_t  engineRun;
+
+    /* ---- 0x1A7 fuel flow: a sample-and-hold integral over each 100 ms
+     * window. flowQ is the held Q (0xFFFF = none), flowMarkMs the time up to
+     * which it has been integrated. Each counted interval is <= 1200 ms and a
+     * window spans ~100 ms, so sumQdt stays far inside u32 (the packer also
+     * halves both sums if a stalled loop ever lets them grow). ------------ */
+    volatile std::uint16_t flowQ;
+    volatile std::uint32_t flowMarkMs;
     volatile std::uint32_t flowSumQdt;
     volatile std::uint32_t flowSumDt;
-    volatile std::uint32_t flowLastMs;
-    volatile std::uint32_t flowWindowMs;    /* sched.counter at window start */
-    volatile std::uint8_t  flowHaveLast;
+    volatile std::uint16_t flowCentiLph;    /* last window, 0.01 L/h          */
+    volatile std::uint8_t  loadPct;         /* last window, 0xFF n/a          */
+
+    /* ---- indicator debounce (spec section 3.2.1) ----------------------- */
+    volatile std::uint32_t indUntil[kIndTimers]; /* left, right, hazard      */
+    volatile std::uint8_t  indActive;       /* kInd* bits                     */
+
+    /* ---- the 100 ms producer --------------------------------------------- */
+    volatile std::uint32_t nextTickMs;      /* drift-free: += 100             */
+    volatile std::uint8_t  tickCount;       /* 0..9, the 1 s task on 0        */
+    volatile std::uint8_t  stateAge;        /* ticks since 0xB2 was queued    */
+    volatile std::uint8_t  stateLast[7];    /* 0xB2 payload last queued       */
+    volatile std::uint8_t  heartbeat;       /* 0xB0 rolling counter           */
 
     /* ---- TPMS, polled from the WCM. docs/TPMS-POLL-SPEC.md ---------------
      * NOT broadcast on this car: these come from a KWP request/response
      * exchange the box initiates, which is the only place this firmware
-     * transmits a frame nobody asked it for.
-     *
-     * Order is LF, RF, RR, LR -- the rears are NOT in the order most sources
-     * assume, and this order is triangulated from three independent sources
-     * but has never been confirmed by a deflation test. kTyrePos* below name
-     * it in one place so one test fixes it in one line. */
+     * transmits a frame nobody asked it for. Order LF, RF, RR, LR. */
     volatile std::uint16_t tyreKpa[4];      /* kPa, 0xFFFF unknown  0x500 b3..b6 */
     volatile std::uint16_t tpmsPollDiv;     /* 8 ms passes since the last poll   */
     volatile std::uint16_t tpmsRotateDiv;   /* 8 ms passes since the last rotate */
@@ -638,24 +632,12 @@ struct CustomSignals {
     volatile std::uint8_t  tpmsStep;        /* next request: 0=21 3B 1=21 2n 2=21 25+n */
     volatile std::uint8_t  tpmsWheel;       /* wheel n of the next 21 2n / 21 25+n */
     /* Per-wheel extras, held between reads. tyreTemp is the raw reply byte
-     * (degC + 40), 0xFF = none. tyreExtra holds 0xB7 flag bits 0, 1 (from
+     * (degC + 50), 0xFF = none. tyreExtra holds 0xB7 flag bits 0, 1 (from
      * 21 2n) and 3 (from 21 25+n). Miss counters: consecutive failed reads. */
     volatile std::uint8_t  tyreTemp[4];
     volatile std::uint8_t  tyreExtra[4];
     volatile std::uint8_t  tyreMissTemp[4];
     volatile std::uint8_t  tyreMissDiag[4];
-
-    volatile std::uint8_t  ignBits;         /* the whole 0xB2 payload byte    */
-    volatile std::uint8_t  valid;           /* the 0xB0 validity mask         */
-
-    /* Engine-running debounce: how many consecutive 0x002 frames have met the
-     * "running" test. Asymmetric on purpose -- see logic::customEngine(). */
-    volatile std::uint8_t  runStreak;
-    /* Latched from 0x000 b0: the car is CRANKING. Cranking reaches 410 rpm on
-     * this 3.0 CRD, which is why rpm alone cannot say "running". */
-    volatile std::uint8_t  cranking;
-    /* 8 ms publish passes since the last 0xB0 send request. */
-    volatile std::uint8_t  heartbeatDiv;
 };
 
 /* The packed payloads the TX descriptor table points at; their change-detection
@@ -663,16 +645,13 @@ struct CustomSignals {
  * of here with no bounds check, and hu_hiworld.cpp static_asserts every one of
  * these against both its table row and its shadow. */
 struct CustomFrames {
-    volatile std::uint8_t b0[2];   /* rev, validity mask                      */
-    volatile std::uint8_t b2[1];   /* ignition bits                           */
-    volatile std::uint8_t b3[6];   /* speed, rpm, load, throttle              */
-    volatile std::uint8_t b4[5];   /* coolant, intake, fuel %, volts          */
-    volatile std::uint8_t b5[2];   /* outside air, signed decidegrees         */
+    volatile std::uint8_t b0[4];   /* layout version, capability u16, counter  */
+    volatile std::uint8_t b2[7];   /* STATE S0..S6                             */
+    volatile std::uint8_t b3[11];  /* speed, rpm, load, flow, oil, boost, pedal */
+    volatile std::uint8_t b4[5];   /* coolant, volts, fuel %, fuel litres      */
+    volatile std::uint8_t b5[3];   /* outside air s16, minutes since RUN       */
     volatile std::uint8_t b7[5];   /* ONE tyre: position, kPa, temp, flags     */
-    volatile std::uint8_t b8[4];   /* litres, range                           */
-    volatile std::uint8_t bB[3];   /* odometer, 24-bit 0.1 km                 */
-    volatile std::uint8_t bD[3];   /* compass sector, magnetic heading        */
-    volatile std::uint8_t bC[2];   /* fuel flow, u16 0.1 L/h, 0xFFFF = n/a    */
+    volatile std::uint8_t b8[6];   /* odometer u24, sector, heading            */
 };
 
 /* ===========================================================================
@@ -802,7 +781,7 @@ struct AppRam {
     BenzFrames            benzFrames;
     BenzFrames            benzShadows;
 
-    /* ---- the custom 0xB0-0xB8 telemetry block's own state ----------------
+    /* ---- the custom 0xB0-0xB8 telemetry block's own state (v2) -----------
      * The mirror image of the Benz pair above: present in every build so the
      * structure has one shape, written only when !cfg::kIsBenz. The shadows
      * live in uartShadows beside the stock six, because the TX scheduler

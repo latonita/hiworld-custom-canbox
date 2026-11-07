@@ -94,7 +94,11 @@ inline constexpr std::size_t kAckQueueTail    = 0x0BU;
 inline constexpr std::uint8_t kTxSlots       = cfg::kTxSlotCount;
 inline constexpr std::uint8_t kRxSlots       = 2U;   /* flash table 0x08009F74 */
 inline constexpr std::uint8_t kTicksPerFrame = 6U;   /* 6 x 8 ms  =  48 ms     */
-inline constexpr std::uint8_t kIdleDelay     = 15U;  /* 15 x 48 ms = ~720 ms   */
+/* Stock 15: a keep-alive every 16th 48 ms boundary when nothing changed.
+ * Jeep (telemetry v2, docs/TELEMETRY-V2-SPEC.md section 7.2): 2, i.e. one
+ * keep-alive every 3rd boundary = 144 ms, so the ten slow rows are each
+ * resent at least every 1.44 s. The Benz image keeps the stock value. */
+inline constexpr std::uint8_t kIdleDelay     = cfg::kIsBenz ? 15U : 2U;
 /* Busy-link refresh: uartIdleDelay above kIdleDelay counts changed frames; at
  * kBusyRefreshDue the next pass resends the next slot whether changed or not. */
 inline constexpr std::uint8_t kBusyRefreshGap = 1U;
@@ -149,6 +153,15 @@ void disable() noexcept;
  * ignores the request.
  * ------------------------------------------------------------------------- */
 void requestSend(std::uint8_t cmd) noexcept;
+
+/* ---------------------------------------------------------------------------
+ * Queue one PRIORITY-lane row (telemetry v2: 0xB3 FAST, 0xB2 STATE) for the
+ * next free 8 ms pass, ahead of the 48 ms round-robin. NOT a stock entry
+ * point. No-op unless `cmd` is a kLanePrio row of the active table, so a benz
+ * image (no such rows) ignores it. Queuing a row twice before it is sent
+ * sends it once, with the payload as it is at send time.
+ * ------------------------------------------------------------------------- */
+void requestPriority(std::uint8_t cmd) noexcept;
 
 /* 0x08008CCE -- the fixed 6-byte frame  AA 55 01 <cmd> <arg> <cks>, where
  * cks = cmd + arg (which is the general rule, since LEN = 1 and 1 - 1 = 0).

@@ -12,9 +12,14 @@
 > by a sibling project — so the only reason for the reservation is gone.
 >
 > Scope decided 2026-10-21, by the owner: non-stock bus traffic is acceptable
-> **provided it stays minimal**; the poll runs **every 30 s**; the corner order
+> **provided it stays minimal**; one request goes out **every 10 s**, never two in a
+> burst; the corner order
 > ships as documented and is rearranged head-unit-side if a deflation test ever
 > contradicts it; the **spare is deferred**.
+>
+> Revised 2026-11-05 (owner-approved): the poll is a 3-step cycle that also reads
+> each wheel's temperature, battery, trigger and low-pressure warning (sections
+> 3.1, 4, 4.1). Everything not mentioned there is as before.
 
 ---
 
@@ -153,16 +158,36 @@ would send unprompted, so it has to check for itself.
 
 | | | |
 |---|---|---|
-| poll period | **30 s** | 3750 passes of the 8 ms task |
+| request period | **10 s** | 1250 passes of the 8 ms task; ONE request per tick, never two in a burst |
 | reply deadline | **500 ms** | 63 passes; then give up, no immediate retry |
-| failures before the data goes stale | **4** (120 s) | then clear validity and blank the fields |
+| failures before the pressures go stale | **4** consecutive failed `21 3B` reads | then clear validity and blank every wheel |
+| failures before a wheel's extras go | **3** consecutive failed reads of that wheel's `21 2n` (or `21 25+n`) | independently per read type |
 
 A `uint8_t` divider saturates at 2.04 s on the 8 ms pass. **Use `uint16_t`.**
 
-No retry inside a poll: a timeout simply waits for the next 30 s tick. The
-sibling project's measured success rate was 47/47, so a retry would be solving a
-problem nobody has observed, at the cost of more bus traffic — which the owner's
-"minimal" constraint rules out.
+No retry inside a request: a timeout simply waits for the next 10 s tick and the
+cycle moves on. The divider only runs while no request is outstanding, so two
+requests are always at least 10 s apart. The same gates apply as before: ACC
+hold, bus running, the `0x500` echo stays off.
+
+### 3.1 The cycle
+
+A repeating three-step cycle, one request per tick, wheel `n` = 0..3 in the
+order LF, RF, RR, LR:
+
+| step | request (PDU) | answers with | decoded |
+|---|---|---|---|
+| A | `02 21 3B` | `61 3B p1 p2 p3 p4` | the four pressures (raw psi, unchanged) |
+| B | `02 21 2n` (`21 20`..`21 23`) | `61 2n P T X S M` | wheel n temperature, battery, trigger |
+| C | `02 21 (25+n)` (`21 25`..`21 28`) | `61 (25+n) B2 B3` | wheel n low-pressure warning |
+
+After C, `n` advances to the next wheel. So the pressures refresh every 30 s and
+each wheel's extras every 2 minutes. `21 24` (the spare) is never read.
+
+Replies all arrive on `0x500`. A reply is matched to the outstanding request by
+the **echoed local id** (the byte after `0x61`); anything that does not match
+leaves the request open and is ignored. A `7F` is a failed read. Trust the PCI
+length: a reply shorter than the fields we read is ignored.
 
 ---
 
@@ -174,8 +199,8 @@ The Dashwheel contract already specifies this; it is not ours to invent.
 |---|---|---|
 | 0 | position | `0`=LF `1`=RF `2`=RR `3`=LR, `4`=spare (**not sent**, deferred) |
 | 1:2 | pressure, u16 **kPa** | `0xFFFF` = no value |
-| 3 | temperature, °C+40 | **always `0xFF`** — see below |
-| 4 | flags | bit0 battery low, bit1 leak, bit2 no signal |
+| 3 | tyre temperature, raw WCM byte (degC + 50) | the raw `21 2n` byte3, verbatim (see 4.1); `0xFF` = none |
+| 4 | flags | bit0 battery low, bit1 leak, bit2 no signal, bit3 low-pressure warning |
 
 **Units.** The WCM gives psi; the contract wants kPa.
 
@@ -185,25 +210,35 @@ kPa = round(psi * 6.894759)   implemented as   (psi * 68948 + 5000) / 10000
 33 psi → 228 kPa. The widest intermediate is `255 * 68948 = 17 581 740`,
 comfortably inside 32 bits.
 
-**Temperature is always `0xFF`.** `21 3B` carries no temperature at all. The
-per-sensor identifiers `21 20`..`21 24` do have a temperature-shaped byte, but
-its `raw − 40` decode is explicitly a *hypothesis* and reading them costs five
-more requests. `0xFF` is already this block's reserved
-`TEMP_NOT_AVAILABLE` code, so the field says "unknown" honestly and costs
-nothing. This also retires the concern in `../canbus-to-canbox-signal-map.md` §7
-that a temperature sentinel would be needed in the flags byte: it is not, because
-the reserved code now exists.
+**Temperature** is the raw byte3 of the `21 2n` reply, sent verbatim, any value
+`0x00..0xFE`. The scale is degC + 50 (degC = raw - 50, confirmed on the car by
+cold-soak tests); the head-unit apps convert. `0xFF` = none, also
+sent when the WCM itself sends `0xFF`, when the wheel has no pressure, and when
+the wheel's extras are stale.
 
-**Flags.** Nothing in `21 3B` reports battery, leak or signal state — those live
-in identifiers this spec does not read. Send `0x00` while a reading is live, and
-set **bit 2 (no signal)** on every position once the data has gone stale.
+**Flags** (see 4.1 for the sources):
+
+| bit | meaning | source |
+|---|---|---|
+| 0 | low battery | `21 2n` battery status == 1 |
+| 1 | leak | `21 2n` transmission trigger == 2 ("Pressure Loss") in the latest reading |
+| 2 | no signal | stale pressures, or no sensor (below) |
+| 3 | low-pressure warning | `21 25+n` byte3 bit0 |
+
+Bits 0, 1, 3 are held at their last values between reads. They clear (and the
+temperature goes `0xFF`) after 3 consecutive failed reads of the request that
+feeds them (timeout, `7F`), bits 0/1 and the temperature from `21 2n`, bit 3
+from `21 25+n`. When the pressure poll goes stale (4 misses) everything for all
+wheels goes to "none". Boot state: everything "none".
 
 **A wheel with no sensor.** The WCM does not fail the poll for a corner that has
 no TPMS sensor; it answers with a placeholder (seen on this car: **LF = 5 psi**,
 i.e. 34 kPa, which looks like a real, very flat tyre). Per tyre, a reply byte of
 **`<= 5` psi (`kTyreAbsentPsi`), or `0xFF`**, therefore means "no sensor": that
-tyre publishes pressure `0xFFFF` and flags **bit 2 (no signal)**, while the other
-tyres are unaffected. `0xB0` bit 4 still tracks the poll as a whole.
+tyre publishes pressure `0xFFFF`, temperature `0xFF`, and flags **bit 2 (no
+signal) only** (bits 0, 1, 3 cleared whatever `21 2n` / `21 25+n` say; the WCM
+still answers for an absent sensor, LF here), while the other tyres are
+unaffected. `0xB0` bit 4 still tracks the poll as a whole.
 
 ### Rotation — one slot, not five
 
@@ -213,7 +248,7 @@ other signal's update interval. One slot carries one position at a time and
 
 The round-robin notices the changed payload and sends it; no explicit request is
 needed. 5 s between sends keeps the *command* comfortably inside Dashwheel's 15 s
-TPMS staleness check even though the *poll* is six times slower.
+TPMS staleness check even though the pressures refresh only every 30 s.
 
 ### Before the first successful poll, and after it goes stale
 
@@ -224,6 +259,31 @@ says "no value" and the validity bit says so too.
 
 `0xB0` bit 4 (`kValidB7`) was reserved for exactly this and needs no mask
 extension.
+
+---
+
+### 4.1 Reply layouts (bit offsets count from byte0 = `0x61`, LSB first)
+
+**`21 2n`** — `61 2n P T X S M` (PCI `07`):
+
+| byte | use |
+|---|---|
+| 2 `P` | pressure, raw - 1 psi. **Ignored**: pressures stay from `21 3B` |
+| 3 `T` | air temperature, raw byte, degC + 50. Sent verbatim; the box does no conversion (`kTpmsSensorTempByte`) |
+| 4 `X` | ignored |
+| 5 `S` | bits0-1 frame number (ignored); bits2-3 battery status (1 = low); bits4-5 transmission trigger (2 = Pressure Loss); bits6-7 sensor state (2 = park mode, ignored, the temperature is still sent) |
+| 6 `M` | ignored |
+
+**`21 25`..`21 28`** (diagnostic DB) — `61 (25+n) B2 B3`:
+
+| byte | use |
+|---|---|
+| 2 `B2` | bit0 pressure sensor HW fault, bit1 pressure SW over/underflow, bit2 temp sensor HW fault, bit3 temp SW over/underflow, bit4 accel sensor HW fault. **Not decoded for output**; kept as a comment |
+| 3 `B3` | bit0 = "Tire n Low Pressure Warning" |
+
+> **UNVERIFIED.** The `21 25+n` layout is from the vendor diagnostic database
+> only and has never been seen on the car, and the `21 2n` temperature scale is
+> unknown. Both need a bench/drive log before they are trusted.
 
 ---
 
@@ -266,9 +326,21 @@ These are the four corners of the real captured reply `06 61 3B 21 20 21 1E`.
 | `AA 55 05 B7 02 00 E4 FF 00 A0` | RR, 228 kPa (33 psi) |
 | `AA 55 05 B7 03 00 CF FF 00 8C` | LR, 207 kPa (30 psi) |
 | `AA 55 05 B7 00 FF FF FF 04 BC` | LF, no reading: sentinel pressure, no-signal flag |
+| `AA 55 05 B7 00 00 E4 5A 09 02` | LF, 228 kPa, temp raw `0x5A`, low battery + low-pressure warning |
+| `AA 55 05 B7 02 00 E4 4B 0A F6` | RR, 228 kPa, temp raw `0x4B`, leak (bit 1) + low-pressure warning (bit 3) |
+| `AA 55 05 B7 01 00 DD FF 04 9C` | RF, 221 kPa, no temperature, no-signal flag |
+| `AA 55 05 B7 00 00 E4 A5 00 44` | LF, 228 kPa, temp raw `0xA5` passed through unchanged, no flags |
 
 Worked check on the first: `0x05 + 0xB7 + 0x00 + 0x00 + 0xE4 + 0xFF + 0x00 - 1
 = 0x29E` → `0x9E`. And `33 psi x 6.894759 = 227.5` → `228` = `0x00E4`.
+
+`CKS = (L + CMD + sum(payload) - 1) & 0xFF`, `L` = payload length only. Example 5:
+`5 + 0xB7 + 0 + 0 + 0xE4 + 0x5A + 0x09 - 1 = 0x202` -> `0x02`.
+
+Example requests/replies for the cycle (frame bytes incl. PCI): request A
+`600: 02 21 3B`, B for LF `600: 02 21 20`, C for LF `600: 02 21 25`; answers
+`500: 07 61 20 20 5A 00 14 00` (temp raw `0x5A`, battery bits = 1, trigger 1) and
+`500: 04 61 25 00 01` (low-pressure warning).
 
 Also test, against the host unit tests in `tests/host/`:
 
@@ -283,7 +355,15 @@ Also test, against the host unit tests in `tests/host/`:
   `0xB0` bit 4 clears;
 - `canBusStatus != kBusRunning` ⇒ **no request is transmitted at all**;
 - ACC off for 3.2 s ⇒ no request is transmitted;
-- the position byte advances 0→1→2→3→0 and does not reach 4.
+- the position byte advances 0→1→2→3→0 and does not reach 4;
+- the cycle order is `3B, 20, 25, 3B, 21, 26, 3B, 22, 27, 3B, 23, 28, 3B, 20`, with
+  at least 10 s between any two requests, with or without answers; `24` is never sent;
+- a reply is matched by the echoed local id, anything else is ignored;
+- temperature raw byte passed through unchanged (e.g. `0xA1` stays `0xA1`), `0xFF` = none; each flag bit from its own source;
+- a no-sensor wheel publishes temperature `0xFF` and only the no-signal bit;
+- 3 failed reads of a wheel's `21 2n` / `21 25+n` clear that read's fields, 2 do
+  not, a good read resets the count, other wheels are unaffected; 4 missed
+  pressure polls blank every wheel; boot state is all "none".
 
 ---
 
@@ -291,13 +371,9 @@ Also test, against the host unit tests in `tests/host/`:
 
 - **The spare** (`21 24`, position 4). A second request with a different
   response shape. Deferred by the owner; the position value stays allocated.
-- **Per-sensor identifiers** `21 20`..`21 23`. They add a temperature whose
-  decode is unproven and status bits this spec does not need, for four extra
-  requests per cycle — which the "keep it minimal" constraint rules out.
-- **Per-tyre fault identifiers** `21 25`..`21 29`. They carry real sensor-fault
-  and low-pressure bits that would fill the flags byte properly. Worth revisiting
-  once the pressure path is proven on the bench; not now.
+- **Sensor fault bits** of `21 25+n` byte2 (HW/SW faults, accelerometer) are
+  not published; only the low-pressure warning is. `21 29` is not read.
 - **DTC reads**, security-gated identifiers, and anything needing a diagnostic
   session. Reads that need `27 01`/`27 02` are out; so is `10 92`, which the
   vendor database suggests as a fallback and which this car has never needed.
-- **Retrying inside a poll.** See §3.
+- **Retrying inside a request.** See §3.

@@ -351,7 +351,7 @@ inline constexpr std::uint32_t kUartTxDrainSpins = 50000U;
 #if defined(CANBOX_PROTOCOL_BENZ)
 inline constexpr char kVersionString[] = "H1N4BNZ10L-171026";
 #else
-inline constexpr char kVersionString[] = "H1N4JPF20L-041126";
+inline constexpr char kVersionString[] = "H1N4JPF20L-061126";
 #endif
 inline constexpr std::uint8_t kVersionLength = 17U;
 static_assert(sizeof(kVersionString) == kVersionLength + 1U,

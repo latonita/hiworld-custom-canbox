@@ -6,7 +6,7 @@ head unit far more car data than the stock firmware does.
 
 | | |
 |---|---|
-| Version tag | `H1N4JPF20L-<ddmmyy>` (current build: `H1N4JPF20L-041126`) |
+| Version tag | `H1N4JPF20L-<ddmmyy>` (current build: `H1N4JPF20L-061126`) |
 | `L` | latonita (the author); the stock vendor image is `A` |
 | Stock firmware | `H1N4JPF20A-220524` |
 | Protocol | Hiworld JPF2, protocol id 3009001 (unchanged) |
@@ -40,9 +40,9 @@ bus (83.333 kbit/s), written `ID bN` (CAN id, data byte). Full byte-level detail
 | Ignition (ACC), engine running, reverse, parking brake | flags | `000`, `002`, `003`, `0D0` | `0xB2` |
 | Vehicle speed | 1 km/h | `002` b2:b3 / 128 | `0xB3` |
 | Engine RPM | 1 rpm | `002` b0:b1 | `0xB3` |
-| Throttle | 0–100 % | `2C0` b2 | `0xB3` |
+| Throttle | 0–100 % | `02C` b2 | `0xB3` |
+| Engine load | 0–100 % | derived from `1A7` and `002` | `0xB3` |
 | Coolant temperature | 1 deg C | `02C` b1 | `0xB4` |
-| Intake air temperature | 1 deg C | `015` b2 | `0xB4` |
 | Fuel level | 0–100 % | `159` b5 | `0xB4` |
 | Battery voltage | 0.1 V steps | `015` b1 | `0xB4` |
 | Outside air temperature | 0.1 deg C | `014` b4:b5 | `0xB5` |
@@ -52,7 +52,7 @@ bus (83.333 kbit/s), written `ID bN` (CAN id, data byte). Full byte-level detail
 | Compass (8-way sector + heading) | 2 deg heading, magnetic | `1B4` b0:b1 | `0xBD` |
 | Fuel flow | 0.1 L/h, 1 s average | `1A7` b0:b1 | `0xBC` |
 
-Not sent (no source on this car's bus): engine load (always 0), range (always "n/a"), tyre
+Not sent (no source on this car's bus): intake air temperature and range (always "n/a"), tyre
 temperature (always "n/a"). `0xBC` has no validity bit; `FFFF` means "no data".
 
 ### Confirmed vs not
@@ -84,14 +84,14 @@ temperature (always "n/a"). `0xBC` has no validity bit; `FFFF` means "no data".
 | Parking brake | — | ✓ |
 | Engine running flag | — | ✓ |
 | Throttle | — | ✓ |
-| Coolant, intake, outside temperature | — | ✓ |
+| Coolant, outside temperature | — | ✓ |
 | Fuel level, litres | — | ✓ |
 | Battery voltage | — | ✓ |
 | Odometer | — | ✓ |
 | Compass | — | ✓ |
 | Fuel flow L/h | — | ✓ (scale unverified) |
 | Tyre pressures (TPMS) | — | ✓ polled every 30 s |
-| Engine load, range, tyre temperature | — | — (fields exist, always "n/a") |
+| Intake temperature, range, tyre temperature | — | — (fields exist, always "n/a") |
 | Data validity reporting | — | ✓ per-signal bits in `0xB0` |
 | Stock protocol 3009001 | ✓ | ✓ still works; stock frames unchanged except `0x32` (gear and RPM now filled) |
 | Custom block `0xB0`–`0xBD` | — | additive; needs an app that reads it (for example Dashwheel) |
@@ -108,7 +108,7 @@ Differences to know about:
 
 ## Install
 
-1. Get `canupdateH1N4JPF20L-<date>.iap`. **No separator** between `canupdate` and the version: `canupdateH1N4JPF20L-041126.iap` is correct; do not add a dash after `canupdate`.
+1. Get `canupdateH1N4JPF20L-<date>.iap`. **No separator** between `canupdate` and the version: `canupdateH1N4JPF20L-061126.iap` is correct; do not add a dash after `canupdate`.
 2. Copy it to the head unit's **sdcard root** (the updater takes the first `.iap` it finds in a storage root or in `CanBus/box/`, so leave only one `.iap` there).
 3. On the head unit open the canbus settings (debug menu), choose the canbox update (Hiworld) and run it. Keep the unit powered and do not touch it until it reports success. The box resets into its bootloader, takes the file, then restarts.
 4. Check the version shown in the canbus settings: `H1N4JPF20L-<ddmmyy>`.
@@ -120,7 +120,7 @@ Differences to know about:
 ## Status and limitations
 
 - WIP; used daily on one car: Jeep Grand Cherokee WH, 3.0 CRD, 2005.
-- Unverified items are listed above. Range, engine load and tyre temperature have no source.
+- Unverified items are listed above. Intake temperature, range and tyre temperature have no source.
 - Other WK-family years and engines are untested.
 - For reading the data in an app: Dashwheel (the launcher, repo `dashwheel`) reads the custom block.
 

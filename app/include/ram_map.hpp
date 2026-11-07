@@ -517,7 +517,7 @@ inline constexpr std::uint16_t kCustomUnknown16   = 0xFFFFU;
  * verbatim -- the same happy accident as coolant. */
 inline constexpr std::uint32_t kCustomUnknown24   = 0x00FFFFFFU;
 inline constexpr std::int16_t  kCustomUnknownS16  = static_cast<std::int16_t>(-32768);
-inline constexpr std::uint8_t  kCustomLoadUnknown = 0x00U;
+inline constexpr std::uint8_t  kCustomLoadUnknown = 0xFFU;
 
 /* Bits of the 0xB0 validity mask (payload byte 1). 1 = the data in that command
  * is live RIGHT NOW. Each bit is owned by exactly one CAN source, so no bit
@@ -570,12 +570,13 @@ inline constexpr std::uint8_t kTyrePosLeftRear   = 3U;
 inline constexpr std::uint8_t kTyrePosSpare      = 4U;   /* deferred, not sent */
 inline constexpr std::uint8_t kTyreCount         = 4U;   /* the spare is extra */
 
-/* Bits of the 0xB7 flags byte. Only "no signal" is ever set by this firmware:
- * 0x213B reports no battery, leak or sensor state at all -- those live in the
- * per-tyre fault identifiers this build deliberately does not read. */
+/* Bits of the 0xB7 flags byte. Battery and leak come from the per-wheel
+ * 21 2n read, low-pressure warning from 21 25+n, no signal from the pressure
+ * poll itself. docs/TPMS-POLL-SPEC.md. */
 inline constexpr std::uint8_t kTyreFlagBatteryLow = 0x01U;
 inline constexpr std::uint8_t kTyreFlagLeak       = 0x02U;
 inline constexpr std::uint8_t kTyreFlagNoSignal   = 0x04U;
+inline constexpr std::uint8_t kTyreFlagLowPressure = 0x08U;
 
 /* Bits of the 0xB2 ignition byte. */
 inline constexpr std::uint8_t kIgnAccOn     = 0x01U;
@@ -589,9 +590,11 @@ inline constexpr std::uint8_t kCustomProtoRev = 0x01U;
 struct CustomSignals {
     volatile std::uint16_t speedKph;        /* km/h           0x002 b2:b3/128 */
     volatile std::uint16_t rpm;             /* 1 rpm             0x002 b0:b1  */
-    volatile std::uint8_t  throttlePct;     /* 0..100              0x2C0 b2   */
+    volatile std::uint8_t  throttlePct;     /* 0..100              0x02C b2   */
+    volatile std::uint8_t  loadPct;         /* 0..100, 0xFF n/a  0x1A7 Q, 0x002 rpm */
+    volatile std::uint16_t flowLastQ;       /* last accepted 0x1A7 Q, 0xFFFF n/a */
     volatile std::uint8_t  coolantBias40;   /* degC+40, verbatim   0x02C b1   */
-    volatile std::uint8_t  intakeBias40;    /* degC+40             0x015 b2   */
+    volatile std::uint8_t  intakeBias40;    /* always 0xFF: no intake source on the WK */
     volatile std::uint8_t  fuelPct;         /* 0..100              0x159 b5   */
     volatile std::uint16_t centiVolts;      /* 0.01 V              0x015 b1   */
     volatile std::int16_t  outsideDeciC;    /* 0.1 degC, signed    0x014 b4:b5 */
@@ -599,7 +602,7 @@ struct CustomSignals {
     volatile std::uint32_t odometerDeciKm;  /* 0.1 km, 24-bit  0x014 b0:b1:b2 */
     volatile std::uint16_t headingDeg;      /* whole deg magnetic  0x1B4 b1*2 */
     volatile std::uint8_t  compassSector;   /* 8-way enum, 0=N     0x1B4 b0   */
-    volatile std::uint16_t flowDeciLph;     /* 0.1 L/h, 0xFFFF=n/a 0x1A7 b0:b1/16 */
+    volatile std::uint16_t flowDeciLph;     /* 0.1 L/h, 0xFFFF=n/a 0x1A7 b0:b1*10/128 */
 
     /* ---- fuel-flow averaging window (logic::customFuelFlow / ...Tick) -----
      * A rate, not a level, so it needs the box's own clock. sumQdt is
@@ -630,7 +633,17 @@ struct CustomSignals {
     volatile std::uint8_t  tpmsPosition;    /* which corner 0xB7 is carrying     */
     volatile std::uint8_t  tpmsPending;     /* a request is outstanding          */
     volatile std::uint8_t  tpmsDeadline;    /* 8 ms passes left to answer        */
-    volatile std::uint8_t  tpmsFailures;    /* consecutive failed polls          */
+    volatile std::uint8_t  tpmsFailures;    /* consecutive failed 21 3B polls    */
+    volatile std::uint8_t  tpmsLid;         /* local id of the request in flight */
+    volatile std::uint8_t  tpmsStep;        /* next request: 0=21 3B 1=21 2n 2=21 25+n */
+    volatile std::uint8_t  tpmsWheel;       /* wheel n of the next 21 2n / 21 25+n */
+    /* Per-wheel extras, held between reads. tyreTemp is the raw reply byte
+     * (degC + 40), 0xFF = none. tyreExtra holds 0xB7 flag bits 0, 1 (from
+     * 21 2n) and 3 (from 21 25+n). Miss counters: consecutive failed reads. */
+    volatile std::uint8_t  tyreTemp[4];
+    volatile std::uint8_t  tyreExtra[4];
+    volatile std::uint8_t  tyreMissTemp[4];
+    volatile std::uint8_t  tyreMissDiag[4];
 
     volatile std::uint8_t  ignBits;         /* the whole 0xB2 payload byte    */
     volatile std::uint8_t  valid;           /* the 0xB0 validity mask         */

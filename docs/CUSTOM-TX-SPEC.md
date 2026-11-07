@@ -28,7 +28,7 @@
 > Scope decided 2026-10-21: **no contract changes.** `0xB3` keeps rpm even
 > though stock `0x32` also carries it; `0xB2` keeps all four bits even though
 > ACC and reverse are also in stock `0x72`. Fuel flow was **not** added to
-> `0xB8`; it went into its own `0xBC` slot on 2026-10-24 (§10). Engine load is **parked**. `0xB1` and `0xB6` are dropped as pure
+> `0xB8`; it went into its own `0xBC` slot on 2026-10-24 (§10). Engine load is derived from fuel flow (amended 2026-11-05). `0xB1` and `0xB6` are dropped as pure
 > duplicates of stock `0xF0` and `0x12` — they add no signal, only slots.
 
 ---
@@ -86,7 +86,7 @@ work and is not your concern.
 **Do not implement `0xB1`.** The firmware version already goes to the head unit
 in stock Hiworld `0xF0`: a 17-byte periodic TX slot whose live buffer is
 `ram::g_versionString`, filled from `cfg::kVersionString` in `svc::hu::init()`
-(`H1N4JPF20L-041126` on this build). It is on the wire and in the `rxpduses`
+(`H1N4JPF20L-061126` on this build). It is on the wire and in the `rxpduses`
 mirror already. Reserved.
 
 ~~**Do not implement `0xB7`.** TPMS is not broadcast on this car's CAN-B; it
@@ -149,25 +149,29 @@ the image has ever set it.
 |---|---|---|---|
 | 0:1 | speed, km/h, u16 | `002` b2:b3 | `(b2<<8 \| b3) / 128`, rounded |
 | 2:3 | rpm, u16 | `002` b0:b1 | **verbatim two-byte copy** |
-| 4 | engine load % | — | **always `0x00`** — parked, see below |
-| 5 | throttle % | `2C0` b2 | `(b2 - 23) * 100 / 211`, clamp 0…100 |
+| 4 | engine load % | `1A7` b0:b1, `002` b0:b1 | `100 * (43.4 * Q / rpm) / 90`, clamp 0…100; `0xFF` unavailable, see below |
+| 5 | throttle % | `02C` b2 | `b2 * 0.4` (250 = 100 %), clamp 0…100; `0xFF` unavailable |
 
 - **`002` all-`FF` means unavailable.** When `b0:b1 == 0xFFFF`, speed and rpm are
   both invalid: send `0xFFFF` in **both** fields and clear the `0xB3` validity
   bit. Do **not** compute `0xFFFF / 128` — that is 512 km/h.
-- **Throttle has a redundancy check.** `2C0` b6 mirrors b2 exactly in all 14 457
-  frames of `drive.log`. If `b2 != b6`, discard the sample and keep the previous
-  throttle value.
-- **Engine load is parked.** `02C` b2 is the load-shaped channel (r=+0.988 with
-  pedal) but its 0…136 range has never been calibrated against a scan tool.
-  Send `0x00`, which the contract defines as unknown. Do not scale a guess.
+- **Throttle is the accelerator pedal from `02C` b2**, 0.4 %/count (confirmed
+  against the TCM pedal reading). `02C` all-`FF` (b2 == `0xFF`) is unavailable:
+  send `0xFF`, not 102 %. The earlier `2C0` b2 voltage-span guess is gone.
+- **Engine load is derived, not read.** `Q = 1A7 b0:b1`, `rpm = 002 b0:b1`:
+  injection per stroke `= 43.4 * Q / rpm` mm3 (byte map, "Derived values"),
+  `load % = 100 * inj / 90`, integer math, rounded, clamped 0…100. The
+  unavailable value is **`0xFF`** (amended from `0x00`: 0 % is a real reading,
+  e.g. overrun, and shown as such by the head unit; the consumer rejects
+  anything above 100). Send `0xFF` when rpm is `0xFFFF` or below 300, when `Q`
+  is `0xFFFF`, or when no `1A7` frame has arrived for 500 ms.
 
 ### `0xB4` ENGINE — 5 bytes
 
 | off | field | source | arithmetic |
 |---|---|---|---|
 | 0 | coolant, °C+40 | `02C` b1 | **verbatim byte** — the car already sends °C+40 |
-| 1 | intake, °C+40 | `015` b2 | `b2 + 40` |
+| 1 | intake, °C+40 | — | **always `0xFF`** — no source on the WK |
 | 2 | fuel level % | `159` b5 | `round(b5 * 0.6443)`, clamp 0…100 |
 | 3:4 | volts, centivolts, u16 | `015` b1 | `b1 * 10` |
 
@@ -175,8 +179,12 @@ the image has ever set it.
   temperature.** Changed 2026-10-21, superseding an earlier rule that said to
   suppress the whole frame — that was wrong, because `0xB4` also carries intake,
   fuel % and **voltage**, and one dead sensor must not cost three good signals.
-  When `02C` is all-`FF`, write `0xFF` into `[0]`, keep sending the frame, and
-  clear the `0xB4` validity bit.
+  When `02C` is all-`FF`, write `0xFF` into `[0]` and keep sending the frame.
+  **`0xB0` bit 2 (`0xB4`) means "the frame carries at least one valid field"**,
+  not "coolant is valid": it clears only when coolant, intake, fuel % and volts
+  are all unavailable. Every field carries its own sentinel: coolant and intake
+  `0xFF`, fuel % `0xFF` until the first valid `159` reading since boot (then
+  held, below), volts `0xFFFF` until the first `015` frame has been seen.
   Without a reserved code there was no way to say "unknown": every byte from
   `0x00` to `0xFF` decodes inside the accepted `-40…215 °C`, so `0xFF` read as a
   perfectly plausible 215 °C and would have tripped the overheat alert.
@@ -188,13 +196,10 @@ the image has ever set it.
   unavailable, so no special case is needed on this field at all.
 - **`159` b4 is a hard gate.** `b4 == 0x01` means `b5 = 0xFF` is not a reading.
   When b4 is set, hold the previous fuel figure and clear the `0xB8` validity
-  bit (not `0xB4`'s — the other three fields are still good).
-- **Intake must be clamped before biasing, not computed blindly.** `b2 + 40`
-  overflows: `0xFF + 40` truncates to `0x27` = −1 °C, a plausible-looking lie.
-  If `015` b2 ≥ `0xD7` (which would bias past the reserved code) or the source
-  is unavailable, write `0xFF` explicitly.
-- Intake negative encoding has never been observed on this car. If `015` b2
-  ≥ `0x80`, treat the sample as suspect and send `0xFF`.
+  bit (not `0xB4`'s — fuel % keeps its held value and volts are still good).
+- **Intake is always `0xFF`.** `015` b2 is not intake air (the byte map lists
+  it as an unknown temperature), so it is not decoded. The field stays in the
+  frame for the layout's sake.
 
 ### `0xB5` CLIMATE — 2 bytes
 
@@ -290,7 +295,10 @@ The 300/500 hysteresis band sits between crank-max 410 and idle-min 577.
 
 > **`0xB7` per-tyre no signal.** A tyre whose polled psi is `<= 5` or `0xFF`
 > (no sensor; LF on this car reads 5) is published as `0xFFFF` kPa with flags
-> bit 2 set, for that position only. See `TPMS-POLL-SPEC.md`.
+> bit 2 set, for that position only, with temperature `0xFF` and flags 0, 1, 3
+> cleared. The flags byte is bit0 low battery, bit1 leak, bit2 no signal, bit3
+> low-pressure warning; temperature is the raw WCM byte, degC + 50 (degC = raw - 50; `0xFF` none). See
+> `TPMS-POLL-SPEC.md`.
 
 > **AS BUILT, 2026-10-21 — one correction to this section.** The scheduler DID
 > need a change, for `0xB0` only. `kSlotRequest` was **unreachable** as written:
@@ -360,7 +368,7 @@ Every one of these is computed from the §1 rule. Use them as unit tests.
 |---|---|
 | `AA 55 02 B0 01 2F E1` | heartbeat, rev 1: B2/B3/B4/B5/B8 valid, B7 (bit 4) always 0 in this build |
 | `AA 55 01 B2 03 B5` | ACC on, engine running, not reverse, brake off |
-| `AA 55 06 B3 00 3F 0A 8D 00 2C BA` | 63 km/h, 2701 rpm, load unknown, throttle 44 % |
+| `AA 55 06 B3 00 3F 0A 8D FF 2C B9` | 63 km/h, 2701 rpm, load unavailable, throttle 44 % |
 | `AA 55 05 B4 85 55 5C 05 96 89` | coolant 93 °C, intake 45 °C, fuel 92 %, 14.30 V |
 | `AA 55 05 B4 FF 55 5C 05 96 03` | **coolant not available**, everything else still live |
 | `AA 55 02 B5 00 FA B0` | outside +25.0 °C |
@@ -372,11 +380,13 @@ Worked check on the first one: `0xAA+0x55+0x02+0xB0+0x01+0x2F = 0x1E1` → `0xE1
 Also test, against the host unit tests in `tests/host/`:
 
 - `002` all-`FF` ⇒ `0xB3` carries `FF FF FF FF` in `[0..3]` and `0xB0` bit1 is 0.
-- `02C` all-`FF` ⇒ `0xB4` **is still emitted**, `[0]` is `0xFF`, `[1..4]` still
-  carry live intake/fuel/volts, and `0xB0` bit2 is 0.
-- `015` b2 == `0xFF` ⇒ `0xB4[1]` is `0xFF`, **not** `0x27`/−1 °C.
+- `02C` all-`FF` ⇒ `0xB4` **is still emitted**, `[0]` is `0xFF`, `[2..4]` still
+  carry fuel/volts, and `0xB0` bit2 stays 1 while any field is valid (it is 0
+  only when all four are unavailable, e.g. cold boot).
+- `015` b2 of any value ⇒ `0xB4[1]` is `0xFF`.
 - `159` b4 == 1 ⇒ fuel holds its previous value and `0xB0` bit5 is 0.
-- `2C0` b2 != b6 ⇒ throttle holds its previous value.
+- `02C` b2 == `0xFF` ⇒ throttle `0xFF`; b2 == 250 ⇒ 100 %.
+- load: rpm 2000 / Q 4147 ⇒ 100; Q 0 ⇒ 0; rpm < 300 or Q `FFFF` or stale ⇒ `0xFF`.
 - crank: `000` b0 == `0xA9` with rpm 410 ⇒ `0xB2` bit1 stays 0.
 - run-up: rpm 600 for 3 consecutive frames ⇒ bit1 sets on the third, not the first.
 - shutdown: rpm → `FFFF` ⇒ bit1 clears on the first frame.
@@ -676,11 +686,11 @@ BODY2 and `0xBF` stay reserved; do not touch them.**
 
 | off | field | source | arithmetic |
 |---|---|---|---|
-| 0:1 | fuel flow, u16 big-endian, **0.1 L/h** | `1A7` b0:b1 | **1 s time-weighted average**, `round(Σ(Q·dt) / Σ(dt) / 16)` |
+| 0:1 | fuel flow, u16 big-endian, **0.1 L/h** | `1A7` b0:b1 | **1 s time-weighted average**, `round(Σ(Q·dt) * 10 / Σ(dt) / 128)` |
 
 `1A7` is 6 bytes at ~100 ms while the engine runs (~400 ms at key-off).
 `Q = (b0<<8)|b1`, unsigned big-endian, and **it is already a rate**:
-`L/h = Q / 160`, so `deci-L/h = Q / 16`. Three rules, each of which is a way to
+`L/h = Q / 128`, so `deci-L/h = Q * 10 / 128`. Three rules, each of which is a way to
 get a plausible wrong number:
 
 - **Never multiply by rpm.** `Q` is not per-revolution.
@@ -689,16 +699,16 @@ get a plausible wrong number:
 - **`Q == 0` is a real reading.** Fuel cut on overrun injects nothing and must
   be integrated as zero. Only `Q == 0xFFFF` means unavailable.
 
-Evidence for `/160`: idle ~0.76 L/h, rated power 40.0 vs 40.3 L/h, urban
-consumption, and a 1449.6 s drive replay that integrates to 10.43 L/100 km.
-**Not yet verified at the pump.** That is why the box publishes the rate and
+Evidence for `/128`: fitted against the PCM's own fuel rate (OBD `212B`) on two
+drives (byte map, "Derived values"); it replaces an earlier `/160`.
+**Not verified at the pump.** That is why the box publishes the rate and
 nothing derived from it (§10.7). The reference implementation of the same
 integration on another device is `jeep-carputer/core/Trip.h`.
 
 Resolution of 0.1 L/h doubles as the deadband, by the same reasoning as volts at
 0.1 V: the payload cannot change on sub-resolution noise, so it claims a TX slot
 only when a human-visible digit moves. Full scale is `0xFFFE` = 6553.4 L/h; the
-largest reading the divisor can produce is `Q = 0xFFFE` → `0x1000` = 409.6 L/h,
+largest reading the divisor can produce is `Q = 0xFFFE` → `0x1400` = 512.0 L/h,
 so the clamp in §10.3 is defensive and cannot bind.
 
 ### 10.3 The averaging window
@@ -725,20 +735,20 @@ the decoder — so a bus that has gone silent still turns into `0xFFFF` after a
 second instead of holding the last number for ever):
 
 ```
-if sumDt > 0:  publish min( floor((sumQdt + 8*sumDt) / (16*sumDt)), 0xFFFE )
+if sumDt > 0:  publish min( floor((10*sumQdt + 64*sumDt) / (128*sumDt)), 0xFFFE )
 else:          publish 0xFFFF
 sumQdt = sumDt = 0
 ```
 
-`floor((S + 8T) / 16T)` is integer round-half-up of `S / T / 16`.
+`floor((10S + 64T) / 128T)` is integer round-half-up of `S / T * 10 / 128`.
 
 **Overflow bound (u32 is enough).** `Q ≤ 0xFFFE` and each counted `dt ≤ 300 ms`.
 Intervals are attributed to the window in which their frame arrived, so one
 window holds at most ~1000 + 300 ms of `dt` plus the 8 ms task slop, call it
 1.3 s: `sumQdt ≤ 65 534 × 1 310 ≈ 8.6e7`, 50× inside `2^32`. Even with the main
 loop stalled the sums cannot grow without bound, because a counted `dt` is
-capped at 300 ms per frame and the ring holds 50 entries. `8·sumDt` in the
-rounding term adds ~10 000 — nothing.
+capped at 300 ms per frame and the ring holds 50 entries. The x10 in the
+numerator takes it to ~8.6e8, still 5x inside `2^32`.
 
 Zero state: both sums zero, `haveLast` clear, window start = the counter at
 priming. `customFuelFlow()` is **its own function**, one signal; it is
@@ -808,34 +818,34 @@ double-checked against the full byte sum including `AA 55`.
 
 | frame | meaning |
 |---|---|
-| `AA 55 02 BC 00 7B 38` | 12.3 L/h (`Q` = 1968 steady for 1 s → 123 deci-L/h) |
+| `AA 55 02 BC 00 78 35` | 12.0 L/h (`Q` = 1536 steady for 1 s → 120 deci-L/h) |
 | `AA 55 02 BC 00 00 BD` | **0.0 L/h — overrun fuel cut, a real reading, not a blank** |
 | `AA 55 02 BC FF FF BB` | unavailable (boot, silent second, only-rejected frames) |
-| `AA 55 02 BC 00 3C F9` | 6.0 L/h (600 ms at `Q`=1600 + 400 ms at `Q`=0) |
-| `AA 55 02 BC 10 00 CD` | 409.6 L/h, the largest value the divisor can produce |
+| `AA 55 02 BC 00 3C F9` | 6.0 L/h (600 ms at `Q`=1280 + 400 ms at `Q`=0) |
+| `AA 55 02 BC 14 00 D1` | 512.0 L/h, the largest value the divisor can produce |
 
-Worked check on the first: `0x02 + 0xBC + 0x00 + 0x7B − 1 = 0x138` → `0x38`;
-full sum `0xAA + 0x55 + 0x02 + 0xBC + 0x00 + 0x7B = 0x238` → `0x38`. ✓
-`1968 / 16 = 123.0`, and `1968 / 160 = 12.3`. Third: `0x02 + 0xBC + 0xFF + 0xFF −
-1 = 0x2BB` → `0xBB`. Fourth: `960 000 / 1000 / 16 = 60 = 0x3C`; `0x02 + 0xBC +
-0x3C − 1 = 0xF9`. Second: `0x02 + 0xBC − 1 = 0xBD`. Fifth: `0x02 + 0xBC + 0x10 − 1
-= 0xCD`.
+Worked check on the first: `0x02 + 0xBC + 0x00 + 0x78 − 1 = 0x135` → `0x35`;
+full sum `0xAA + 0x55 + 0x02 + 0xBC + 0x00 + 0x78 = 0x235` → `0x35`. ✓
+`1536 * 10 / 128 = 120`. Third: `0x02 + 0xBC + 0xFF + 0xFF −
+1 = 0x2BB` → `0xBB`. Fourth: `768 000 * 10 / 1000 / 128 = 60 = 0x3C`; `0x02 + 0xBC +
+0x3C − 1 = 0xF9`. Second: `0x02 + 0xBC − 1 = 0xBD`. Fifth: `0x02 + 0xBC + 0x14 − 1
+= 0xD1`.
 
 Also tested:
 
 - `Q = 0` frames are integrated as zero: the result is `00 00`, **not** `FF FF`.
 - a `0xFFFF` frame is rejected, and the interval after it is skipped:
-  `Q` 1600, 1600, `FFFF`, 3200, 1600 at 100 ms spacing → exactly 10.0 L/h (if
-  the 3200 interval were counted it would be 13.3).
+  `Q` 1280, 1280, `FFFF`, 2560, 1280 at 100 ms spacing → exactly 10.0 L/h (if
+  the 2560 interval were counted it would be 13.3).
 - a gap over 300 ms is dropped (a 400 ms hole with a `Q` = 16000 frame after it
   does not move the result); a gap of exactly 300 ms is kept.
 - a window with no frames at all → `FF FF`, and a good window followed by a
   silent one → `FF FF` again, not the old value.
-- time-weighting by interval length, not frame count (250 ms at 3200 + 50 ms at
+- time-weighting by interval length, not frame count (250 ms at 2560 + 50 ms at
   0 → 167, not 80).
-- round half-up: `Q` 1960 → 123, `Q` 1959 → 122.
+- round half-up: `Q` 1607 → 126, `Q` 1606 → 125.
 - the sums reset on close: a quiet second after a busy one reads 0.0.
-- `0xFFFE` never collides with the sentinel (maximum reading → `10 00`).
+- `0xFFFE` never collides with the sentinel (maximum reading → `14 00`).
 - accepting flow frames leaves the `0xB0` mask and `0xB8` untouched.
 - cold boot: `0xBC` is `FF FF` before the first window closes.
 - `kTxSlotCount` == 16 ⇒ `uartSlotState` is 16 long, `uartTxSlotIdx` is intact
@@ -851,5 +861,5 @@ Also tested:
   field stays parked at `0xFFFF`.
 - A validity bit for `0xBC` (§10.4) — needs the second mask byte.
 - `0xBA` LIGHTING, `0xBE` BODY2, `0xBF`.
-- Verifying the `/160` divisor at the pump. Until then the rate is published and
+- Verifying the `/128` divisor at the pump. Until then the rate is published and
   nothing derived from it is trusted on this side.

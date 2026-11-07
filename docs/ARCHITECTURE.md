@@ -312,7 +312,7 @@ ternary.
 | wire overhead | 5 | 4 |
 | TX slots | 16: the stock 6 (`0x72 0xA6 0x73 0xF0 0x12 0x32`) + the custom 10 (`0xB0 0xB2 0xB3 0xB4 0xB5 0xB7 0xB8 0xBB 0xBD 0xBC`) | 5 (`0x08 0x07`, three pages of `0x41`) |
 | head-unit protocol id | 3009001 | 1034025 / 27 / 28 |
-| version string | `H1N4JPF20L-041126` | `H1N4BNZ10L-…` |
+| version string | `H1N4JPF20L-061126` | `H1N4BNZ10L-…` |
 | wire behaviour | stock-equivalent for the stock 6 slots | deliberately diverges |
 
 Only the **jeep** build is a faithful rebuild — and only for the six stock
@@ -462,7 +462,7 @@ void customVoltsIntake(const volatile std::uint8_t* d) noexcept; // 0x015 b1, b2
 void customCoolant(const volatile std::uint8_t* d) noexcept;     // 0x02C b1
 void customParkBrake(const volatile std::uint8_t* d) noexcept;   // 0x0D0 b0 bit 7
 void customFuel(const volatile std::uint8_t* d) noexcept;        // 0x159 b4 gate, b5
-void customThrottle(const volatile std::uint8_t* d) noexcept;    // 0x2C0 b2 (b6 mirror)
+void customThrottle(const volatile std::uint8_t* d) noexcept;    // 0x02C b2 (pedal, 0.4 %/count)
 void customOdometer(const volatile std::uint8_t* d) noexcept;    // 0x014 b0:b1:b2
 void customCompass(const volatile std::uint8_t* d) noexcept;     // 0x1B4 b0, b1
 void customTpmsPoll() noexcept;                                  // -> 0x600, every 30 s

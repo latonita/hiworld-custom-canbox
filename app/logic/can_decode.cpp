@@ -486,7 +486,7 @@ void decodeProfileJeep() noexcept
             break;
         case canid::kJeepCoolant:
             if constexpr (cfg::kIsBenz) { benzCoolant(d); }
-            else                        { customCoolant(d); }
+            else                        { customCoolant(d); customThrottle(d); }
             break;
         /* Three ids with no benz reader and no stock meaning at all. Same
          * no-op argument as above: all three are below 0x400. */
@@ -495,9 +495,6 @@ void decodeProfileJeep() noexcept
             break;
         case canid::kJeepParkBrake:
             if constexpr (!cfg::kIsBenz) { customParkBrake(d); }
-            break;
-        case canid::kJeepThrottle:
-            if constexpr (!cfg::kIsBenz) { customThrottle(d); }
             break;
         case canid::kJeepCompass:
             if constexpr (!cfg::kIsBenz) { customCompass(d); }

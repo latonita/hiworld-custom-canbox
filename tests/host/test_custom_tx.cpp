@@ -203,7 +203,14 @@ void raw500(std::uint8_t b0, std::uint8_t b1, std::uint8_t b2) noexcept
 void armPoll() noexcept
 {
     ram::app().canBusStatus = cfg::kBusRunning;
-    ram::app().customSignals.tpmsPollDiv = 3749U;   /* kTpmsPollPasses - 1 */
+    ram::app().customSignals.tpmsPollDiv = 1249U;   /* kTpmsPollPasses - 1 */
+}
+
+/* ...and make that request the pressure read (21 3B), the start of the cycle. */
+void armPollA() noexcept
+{
+    ram::app().customSignals.tpmsStep = 0U;
+    armPoll();
 }
 
 /* One 8 ms pass of the poll state machine, plus the 4 ms task's drain --
@@ -253,13 +260,11 @@ void fuel(std::uint8_t b4, std::uint8_t b5) noexcept
     pushFrame(logic::canid::kJeepFuel, d);
 }
 
-/* 0x2C0: b2 pedal, b6 its mirror. Pass a different b6 to forge a corrupt
- * frame. */
-void throttle(std::uint8_t b2, std::uint8_t b6) noexcept
+/* 0x02C: b1 coolant (a valid 93 degC), b2 accelerator pedal at 0.4 %/count. */
+void throttle(std::uint8_t b2) noexcept
 {
-    const std::uint8_t d[8] = { 0xFFU, 0xFFU, b2, static_cast<std::uint8_t>(b2 / 2U),
-                                0x7EU, 0xFFU, b6, 0x02U };
-    pushFrame(logic::canid::kJeepThrottle, d);
+    const std::uint8_t d[8] = { 0U, 0x85U, b2, 0x64U, 0U, 0U, 0U, 0U };
+    pushFrame(logic::canid::kJeepCoolant, d);
 }
 
 /* Shorthand: the payload of one custom command, after a publish. */
@@ -343,7 +348,7 @@ TEST(custom_prime_puts_every_field_in_its_no_value_state)
 
     CHECK_EQ(b3()[0], 0xFFU);  CHECK_EQ(b3()[1], 0xFFU);   /* speed  */
     CHECK_EQ(b3()[2], 0xFFU);  CHECK_EQ(b3()[3], 0xFFU);   /* rpm    */
-    CHECK_EQ(b3()[4], 0x00U);                              /* load, parked */
+    CHECK_EQ(b3()[4], 0xFFU);                              /* load n/a */
     CHECK_EQ(b3()[5], 0xFFU);                              /* throttle */
 
     CHECK_EQ(b4()[0], 0xFFU);                              /* coolant */
@@ -406,7 +411,7 @@ TEST(custom_ignition_matches_the_worked_example)
     CHECK_BYTES(wire, want, 6U);
 }
 
-/* 63 km/h, 2701 rpm, load unknown, throttle 44 %. */
+/* 63 km/h, 2701 rpm, no injection data (load unavailable), throttle 44 %. */
 TEST(custom_drivetrain_matches_the_worked_example)
 {
     primed();
@@ -421,9 +426,9 @@ TEST(custom_drivetrain_matches_the_worked_example)
     const std::uint8_t want[11] = { 0xAAU, 0x55U, 0x06U, 0xB3U,
                                     0x00U, 0x3FU,   /* 63 km/h       */
                                     0x0AU, 0x8DU,   /* 2701 rpm      */
-                                    0x00U,          /* load, parked  */
+                                    0xFFU,          /* load n/a      */
                                     0x2CU,          /* throttle 44 % */
-                                    0xBAU };
+                                    0xB9U };
     CHECK_EQ(n, 11U);
     CHECK_BYTES(wire, want, 11U);
 }
@@ -546,7 +551,7 @@ TEST(custom_intake_and_volts_come_from_one_frame)
     decodeOnce();
     logic::customPublish();
 
-    CHECK_EQ(b4()[1], 85U);                              /* 45 + 40     */
+    CHECK_EQ(b4()[1], 0xFFU);                            /* 015 b2 is not intake */
     CHECK_EQ(b4()[3], 0x05U);  CHECK_EQ(b4()[4], 0x96U); /* 1430 cV     */
 }
 
@@ -577,19 +582,27 @@ TEST(custom_fuel_percent_clamps_at_one_hundred)
 TEST(custom_throttle_scales_the_pedal_to_percent)
 {
     primed();
-    throttle(116U, 116U);          /* (116 - 23) * 100 / 211 = 44 % */
+    throttle(110U);                /* 110 * 0.4 = 44 % */
     decodeOnce();
     logic::customPublish();
     CHECK_EQ(b3()[5], 44U);
 
-    /* Rest position is 23 counts, not 0 -- below it the subtraction would
-     * wrap and read 97 %. */
-    throttle(23U, 23U);
+    throttle(0U);
     decodeOnce();
     logic::customPublish();
     CHECK_EQ(b3()[5], 0U);
 
-    throttle(234U, 234U);          /* floored */
+    throttle(250U);                /* 250 counts = 100 % */
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(b3()[5], 100U);
+
+    throttle(1U);                  /* 0.4 % rounds to 0 */
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(b3()[5], 0U);
+
+    throttle(0xFEU);               /* above 250 clamps */
     decodeOnce();
     logic::customPublish();
     CHECK_EQ(b3()[5], 100U);
@@ -786,20 +799,19 @@ TEST(custom_fuel_gate_before_any_reading_leaves_the_sentinels)
     CHECK_EQ(validMask() & ram::kValidB8, 0U);
 }
 
-/* b6 mirrors b2 in all 14 457 frames of drive.log, so a mismatch is a corrupt
- * frame and the sample is discarded rather than published. */
-TEST(custom_throttle_mismatched_mirror_holds_the_previous_value)
+/* 02C all-FF is the module-asleep form: the pedal is unavailable, not 102 %. */
+TEST(custom_throttle_unavailable_publishes_the_sentinel)
 {
     primed();
-    throttle(116U, 116U);
+    throttle(110U);
     decodeOnce();
     logic::customPublish();
     CHECK_EQ(b3()[5], 44U);
 
-    throttle(234U, 0x00U);         /* b6 disagrees */
+    coolantUnavailable();
     decodeOnce();
     logic::customPublish();
-    CHECK_EQ(b3()[5], 44U);        /* unchanged */
+    CHECK_EQ(b3()[5], 0xFFU);
 }
 
 /* 0xFFFF = unavailable (bus waking). Skipped: previous value AND validity are
@@ -892,34 +904,25 @@ TEST(custom_ambient_wire_encoding)
  *
  * Intake shares 0xB4's validity bit with coolant and does not clear it: one
  * dead sensor must not cost the three good signals in this command. */
-TEST(custom_intake_unavailable_publishes_the_reserved_code)
+TEST(custom_intake_is_always_the_reserved_code)
 {
     primed();
     coolant(133U);                 /* keep 0xB4 live */
-    voltsIntake(143U, 45U);
-    decodeOnce();
-    logic::customPublish();
-    CHECK_EQ(b4()[1], 85U);
-
-    voltsIntake(143U, 0xFFU);      /* unavailable */
-    decodeOnce();
-    logic::customPublish();
-    CHECK_EQ(b4()[1], 0xFFU);                            /* NOT 0x27 / -1 degC */
-    CHECK_EQ(validMask() & ram::kValidB4, ram::kValidB4); /* coolant still good */
-
-    /* Anything from 0x80 up is rejected the same way: a two's-complement
-     * negative has never been observed on this car, and from 0xD7 the bias
-     * would run into the reserved code anyway. */
-    voltsIntake(143U, 0x80U);
+    voltsIntake(143U, 45U);        /* 015 b2 is not intake air */
     decodeOnce();
     logic::customPublish();
     CHECK_EQ(b4()[1], 0xFFU);
 
-    /* 0xD6 is the last byte that still biases below the reserved code. */
-    voltsIntake(143U, 45U);
+    voltsIntake(143U, 0xFFU);
     decodeOnce();
     logic::customPublish();
-    CHECK_EQ(b4()[1], 85U);
+    CHECK_EQ(b4()[1], 0xFFU);
+    CHECK_EQ(validMask() & ram::kValidB4, ram::kValidB4); /* coolant still good */
+
+    voltsIntake(143U, 0x80U);
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(b4()[1], 0xFFU);
 }
 
 /* ===========================================================================
@@ -1597,7 +1600,7 @@ TEST(tpms_goes_stale_after_four_missed_polls)
     CHECK_EQ(validMask() & ram::kValidB7, ram::kValidB7);
 
     for (int miss = 0; miss < 4; ++miss) {
-        armPoll();
+        armPollA();
         pollPass();                   /* request goes out */
         runOutDeadline();             /* ...and times out */
     }
@@ -1618,7 +1621,7 @@ TEST(tpms_survives_three_missed_polls)
     decodeOnce();
 
     for (int miss = 0; miss < 3; ++miss) {
-        armPoll();
+        armPollA();
         pollPass();
         runOutDeadline();
     }
@@ -1720,6 +1723,365 @@ TEST(tpms_absent_sensor_is_no_signal_for_that_tyre_only)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * The per-wheel reads: 21 2n (temperature, battery, trigger) and 21 25+n
+ * (low-pressure warning). One request every 10 s in the cycle
+ *   21 3B, 21 2n, 21 25+n, (next wheel) 21 3B ...
+ * ------------------------------------------------------------------------- */
+static void armStep(std::uint8_t step, std::uint8_t wheel) noexcept
+{
+    ram::app().customSignals.tpmsStep  = step;
+    ram::app().customSignals.tpmsWheel = wheel;
+    armPoll();
+    pollPass();
+}
+
+/* 21 2n answer: 61 2n P T X S M. S = frame no. | battery<<2 | trigger<<4 | state<<6 */
+static void sensorReply(std::uint8_t n, std::uint8_t temp, std::uint8_t batt,
+                        std::uint8_t trig, std::uint8_t state = 0U) noexcept
+{
+    const std::uint8_t s = static_cast<std::uint8_t>(
+        1U | (batt << 2) | (trig << 4) | (state << 6));
+    const std::uint8_t d[8] = { 0x07U, 0x61U, static_cast<std::uint8_t>(0x20U + n),
+                                0x20U, temp, 0x00U, s, 0xD2U };
+    pushFrame(logic::canid::kJeepVendorEcho, d);
+}
+
+/* 21 25+n answer: 61 2n+5 B2 B3. */
+static void diagReply(std::uint8_t n, std::uint8_t b2, std::uint8_t b3) noexcept
+{
+    const std::uint8_t d[8] = { 0x04U, 0x61U, static_cast<std::uint8_t>(0x25U + n),
+                                b2, b3, 0xD2U, 0xD2U, 0xD2U };
+    pushFrame(logic::canid::kJeepVendorEcho, d);
+}
+
+/* All four pressures good (33, 32, 33, 30 psi). */
+static void livePressures() noexcept
+{
+    primed();
+    armPollA();
+    pollPass();
+    tpmsReply(0x21U, 0x20U, 0x21U, 0x1EU);
+    decodeOnce();
+}
+
+static void publishPos(std::uint8_t pos) noexcept
+{
+    ram::app().customSignals.tpmsPosition = pos;
+    logic::customPublish();
+}
+
+/* One failed read of a request type: send it, let it time out. */
+static void failRead(std::uint8_t step, std::uint8_t wheel) noexcept
+{
+    armStep(step, wheel);
+    runOutDeadline();
+}
+
+TEST(tpms_cycle_order_and_ten_second_spacing)
+{
+    primed();
+    ram::app().canBusStatus = cfg::kBusRunning;
+
+    static const std::uint8_t want[14] = {
+        0x3BU, 0x20U, 0x25U, 0x3BU, 0x21U, 0x26U, 0x3BU,
+        0x22U, 0x27U, 0x3BU, 0x23U, 0x28U, 0x3BU, 0x20U };
+    std::uint8_t  got[14];
+    unsigned      at[14];
+    unsigned      n = 0U;
+    unsigned      seen = 0U;
+
+    /* Every request is answered at once, so the 10 s gap is the divider alone. */
+    for (unsigned pass = 0U; pass < 1250U * 15U && n < 14U; ++pass) {
+        pollPass();
+        if (fake::canFrameCount() != seen) {
+            seen = static_cast<unsigned>(fake::canFrameCount());
+            const fake::CanFrame* f = fake::lastCanFrame();
+            CHECK_EQ(f->id, 0x600U);
+            CHECK_EQ(f->dlc, 3U);
+            CHECK_EQ(f->data[0], 0x02U);
+            CHECK_EQ(f->data[1], 0x21U);
+            got[n] = f->data[2];
+            at[n]  = pass;
+            ++n;
+            const std::uint8_t lid = f->data[2];
+            if (lid == 0x3BU)      { tpmsReply(0x21U, 0x20U, 0x21U, 0x1EU); }
+            else if (lid < 0x25U)  { sensorReply(static_cast<std::uint8_t>(lid - 0x20U), 0x5AU, 0U, 0U); }
+            else                   { diagReply(static_cast<std::uint8_t>(lid - 0x25U), 0U, 0U); }
+            decodeOnce();
+        }
+    }
+    CHECK_EQ(n, 14U);
+    for (unsigned i = 0U; i < n && i < 14U; ++i) {
+        CHECK_EQ(got[i], want[i]);
+        if (i > 0U) { CHECK(at[i] - at[i - 1U] >= 1250U); }
+    }
+}
+
+TEST(tpms_requests_stay_ten_seconds_apart_when_nothing_answers)
+{
+    primed();
+    ram::app().canBusStatus = cfg::kBusRunning;
+    unsigned seen = 0U;
+    unsigned last = 0U;
+    for (unsigned pass = 0U; pass < 1250U * 9U; ++pass) {
+        pollPass();
+        if (fake::canFrameCount() != seen) {
+            seen = static_cast<unsigned>(fake::canFrameCount());
+            if (seen > 1U) { CHECK(pass - last >= 1250U); }
+            last = pass;
+        }
+    }
+    CHECK(seen >= 8U);
+}
+
+TEST(tpms_never_requests_the_spare_21_24)
+{
+    primed();
+    ram::app().canBusStatus = cfg::kBusRunning;
+    unsigned seen = 0U;
+    for (unsigned pass = 0U; pass < 1250U * 30U; ++pass) {
+        pollPass();
+        if (fake::canFrameCount() != seen) {
+            seen = static_cast<unsigned>(fake::canFrameCount());
+            CHECK(fake::lastCanFrame()->data[2] != 0x24U);
+            CHECK(fake::lastCanFrame()->data[2] != 0x29U);
+        }
+    }
+}
+
+TEST(tpms_reply_is_matched_by_the_echoed_local_id)
+{
+    livePressures();
+    armStep(1U, 0U);                          /* 21 20 outstanding */
+    CHECK_EQ(ram::app().customSignals.tpmsLid, 0x20U);
+
+    sensorReply(1U, 0x5AU, 1U, 2U);           /* answer for 21 21: not ours */
+    decodeOnce();
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 1U);
+    diagReply(0U, 0U, 1U);                    /* 21 25: not ours */
+    decodeOnce();
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 1U);
+    tpmsReply(0x21U, 0x20U, 0x21U, 0x1EU);    /* 21 3B: not ours */
+    decodeOnce();
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 1U);
+    CHECK_EQ(ram::app().customSignals.tyreTemp[1], 0xFFU);
+    CHECK_EQ(ram::app().customSignals.tyreTemp[0], 0xFFU);
+
+    sensorReply(0U, 0x5AU, 0U, 0U);           /* the right one */
+    decodeOnce();
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 0U);
+    CHECK_EQ(ram::app().customSignals.tyreTemp[0], 0x5AU);
+}
+
+TEST(tpms_pressure_reply_does_not_close_a_sensor_request)
+{
+    livePressures();
+    armStep(1U, 2U);
+    tpmsReply(0x30U, 0x30U, 0x30U, 0x30U);
+    decodeOnce();
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 1U);
+    CHECK_EQ(ram::app().customSignals.tyreKpa[0], 228U);   /* unchanged */
+}
+
+TEST(tpms_temperature_is_raw_byte_passed_through)
+{
+    livePressures();
+    static const std::uint8_t in[4]  = { 0x5AU, 0x28U, 0xA0U, 0xA1U };
+    static const std::uint8_t out[4] = { 0x5AU, 0x28U, 0xA0U, 0xA1U };
+    for (std::uint8_t k = 0U; k < 4U; ++k) {
+        armStep(1U, 0U);
+        sensorReply(0U, in[k], 0U, 0U);
+        decodeOnce();
+        publishPos(0U);
+        CHECK_EQ(b7()[3], out[k]);
+    }
+    armStep(1U, 0U);
+    sensorReply(0U, 0xFFU, 0U, 0U);
+    decodeOnce();
+    publishPos(0U);
+    CHECK_EQ(b7()[3], 0xFFU);
+}
+
+TEST(tpms_each_flag_bit_has_its_own_source)
+{
+    livePressures();
+
+    armStep(1U, 1U);  sensorReply(1U, 0x5AU, 1U, 0U);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[4], 0x01U);                 /* battery low */
+
+    armStep(1U, 1U);  sensorReply(1U, 0x5AU, 0U, 2U);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[4], 0x02U);                 /* leak: trigger 2 */
+
+    armStep(1U, 1U);  sensorReply(1U, 0x5AU, 2U, 1U);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[4], 0x00U);                 /* other values: no flags */
+
+    armStep(1U, 1U);  sensorReply(1U, 0x5AU, 0U, 0U, 2U);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[3], 0x5AU);                 /* park mode: temp still sent */
+    CHECK_EQ(b7()[4], 0x00U);
+
+    armStep(2U, 1U);  diagReply(1U, 0x1FU, 0x01U);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[4], 0x08U);                 /* low-pressure warning */
+
+    armStep(1U, 1U);  sensorReply(1U, 0x5AU, 1U, 2U);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[4], 0x0BU);                 /* all three; warning kept */
+
+    armStep(2U, 1U);  diagReply(1U, 0x00U, 0xFEU);  decodeOnce();
+    publishPos(1U);
+    CHECK_EQ(b7()[4], 0x03U);                 /* byte3 bit0 = 0 clears the warning */
+}
+
+TEST(tpms_frame_with_temperature_and_flags_matches_the_vector)
+{
+    livePressures();
+    armStep(1U, 0U);  sensorReply(0U, 0x5AU, 1U, 0U);  decodeOnce();
+    armStep(2U, 0U);  diagReply(0U, 0U, 1U);  decodeOnce();
+    publishPos(0U);
+
+    const std::uint8_t want[10] = { 0xAAU, 0x55U, 0x05U, 0xB7U,
+                                    0x00U, 0x00U, 0xE4U, 0x5AU, 0x09U, 0x02U };
+    std::uint8_t wire[16];
+    CHECK_EQ(hiworldFrame(wire, 0xB7U, b7(), 5U), 10U);
+    CHECK_BYTES(wire, want, 10U);
+}
+
+TEST(tpms_no_sensor_wheel_overrides_temperature_and_flags)
+{
+    primed();
+    armPollA();
+    pollPass();
+    tpmsReply(5U, 0x20U, 0x21U, 0x1EU);       /* LF: the placeholder 5 psi */
+    decodeOnce();
+
+    armStep(1U, 0U);  sensorReply(0U, 0x5AU, 1U, 2U);  decodeOnce();
+    armStep(2U, 0U);  diagReply(0U, 0U, 1U);  decodeOnce();
+
+    publishPos(0U);
+    CHECK_EQ(b7()[1], 0xFFU);  CHECK_EQ(b7()[2], 0xFFU);
+    CHECK_EQ(b7()[3], 0xFFU);
+    CHECK_EQ(b7()[4], ram::kTyreFlagNoSignal);
+}
+
+TEST(tpms_sensor_extras_go_after_three_failed_reads_of_that_wheel)
+{
+    livePressures();
+    armStep(1U, 3U);  sensorReply(3U, 0x50U, 1U, 2U);  decodeOnce();
+    armStep(2U, 3U);  diagReply(3U, 0U, 1U);  decodeOnce();
+    publishPos(3U);
+    CHECK_EQ(b7()[4], 0x0BU);
+
+    failRead(1U, 3U);  failRead(1U, 3U);      /* two misses: held */
+    publishPos(3U);
+    CHECK_EQ(b7()[3], 0x50U);
+    CHECK_EQ(b7()[4], 0x0BU);
+
+    failRead(1U, 3U);                         /* third: temp, bits 0/1 go */
+    publishPos(3U);
+    CHECK_EQ(b7()[3], 0xFFU);
+    CHECK_EQ(b7()[4], 0x08U);                 /* bit 3 belongs to the other read */
+
+    failRead(2U, 3U);  failRead(2U, 3U);
+    publishPos(3U);
+    CHECK_EQ(b7()[4], 0x08U);
+    failRead(2U, 3U);
+    publishPos(3U);
+    CHECK_EQ(b7()[4], 0x00U);
+}
+
+TEST(tpms_a_good_read_resets_the_wheel_miss_count)
+{
+    livePressures();
+    armStep(1U, 0U);  sensorReply(0U, 0x50U, 0U, 0U);  decodeOnce();
+    failRead(1U, 0U);  failRead(1U, 0U);
+    armStep(1U, 0U);  sensorReply(0U, 0x51U, 0U, 0U);  decodeOnce();
+    failRead(1U, 0U);  failRead(1U, 0U);
+    publishPos(0U);
+    CHECK_EQ(b7()[3], 0x51U);
+}
+
+TEST(tpms_failures_of_one_wheel_leave_the_others_alone)
+{
+    livePressures();
+    armStep(1U, 0U);  sensorReply(0U, 0x50U, 0U, 0U);  decodeOnce();
+    armStep(1U, 1U);  sensorReply(1U, 0x52U, 0U, 0U);  decodeOnce();
+    failRead(1U, 0U);  failRead(1U, 0U);  failRead(1U, 0U);
+    publishPos(0U);  CHECK_EQ(b7()[3], 0xFFU);
+    publishPos(1U);  CHECK_EQ(b7()[3], 0x52U);
+}
+
+TEST(tpms_negative_response_to_a_wheel_read_counts_as_a_miss)
+{
+    livePressures();
+    armStep(1U, 2U);  sensorReply(2U, 0x50U, 0U, 0U);  decodeOnce();
+    for (int i = 0; i < 3; ++i) {
+        armStep(1U, 2U);
+        raw500(0x03U, 0x7FU, 0x21U);
+        decodeOnce();
+        CHECK_EQ(ram::app().customSignals.tpmsPending, 0U);
+    }
+    publishPos(2U);
+    CHECK_EQ(b7()[3], 0xFFU);
+    CHECK_EQ(validMask() & ram::kValidB7, ram::kValidB7);   /* pressures unaffected */
+}
+
+TEST(tpms_wheel_read_failures_do_not_stale_the_pressures)
+{
+    livePressures();
+    for (int i = 0; i < 6; ++i) { failRead(1U, 0U); }
+    CHECK_EQ(validMask() & ram::kValidB7, ram::kValidB7);
+    CHECK_EQ(ram::app().customSignals.tyreKpa[0], 228U);
+}
+
+TEST(tpms_stale_pressures_drop_every_wheels_extras)
+{
+    livePressures();
+    for (std::uint8_t w = 0U; w < 4U; ++w) {
+        armStep(1U, w);  sensorReply(w, 0x50U, 1U, 2U);  decodeOnce();
+        armStep(2U, w);  diagReply(w, 0U, 1U);  decodeOnce();
+    }
+    for (int miss = 0; miss < 4; ++miss) { failRead(0U, 0U); }
+
+    for (std::uint8_t w = 0U; w < 4U; ++w) {
+        publishPos(w);
+        CHECK_EQ(b7()[1], 0xFFU);  CHECK_EQ(b7()[2], 0xFFU);
+        CHECK_EQ(b7()[3], 0xFFU);
+        CHECK_EQ(b7()[4], ram::kTyreFlagNoSignal);
+        CHECK_EQ(ram::app().customSignals.tyreTemp[w], 0xFFU);
+        CHECK_EQ(ram::app().customSignals.tyreExtra[w], 0U);
+    }
+}
+
+TEST(tpms_boot_state_has_no_extras)
+{
+    primed();
+    for (std::uint8_t w = 0U; w < 4U; ++w) {
+        CHECK_EQ(ram::app().customSignals.tyreTemp[w], 0xFFU);
+        CHECK_EQ(ram::app().customSignals.tyreExtra[w], 0U);
+        publishPos(w);
+        CHECK_EQ(b7()[3], 0xFFU);
+        CHECK_EQ(b7()[4], ram::kTyreFlagNoSignal);
+    }
+    CHECK_EQ(ram::app().customSignals.tpmsStep, 0U);
+    CHECK_EQ(ram::app().customSignals.tpmsWheel, 0U);
+}
+
+TEST(tpms_a_short_pci_length_is_not_read_past)
+{
+    livePressures();
+    armStep(1U, 0U);
+    const std::uint8_t d[8] = { 0x03U, 0x61U, 0x20U, 0x20U, 0x5AU, 0x00U, 0x14U, 0x00U };
+    pushFrame(logic::canid::kJeepVendorEcho, d);
+    decodeOnce();
+    CHECK_EQ(ram::app().customSignals.tpmsPending, 1U);   /* too short: ignored */
+    CHECK_EQ(ram::app().customSignals.tyreTemp[0], 0xFFU);
+}
+
 /* ===========================================================================
  * 7. The stock slots are untouched.
  *
@@ -1759,8 +2121,8 @@ TEST(custom_block_leaves_the_six_stock_slots_alone)
  * is a time-weighted average. The window opens at counter 0 after primed() and
  * closes on the first customPublish() at or after 1000 ms.
  *
- * L/h = Q / 160, so deci-L/h = Q / 16: Q = 1600 is 10.0 L/h, Q = 1968 is
- * 12.3 L/h exactly. The expected values below are worked out by hand from that
+ * L/h = Q / 128, so deci-L/h = Q * 10 / 128: Q = 1280 is 10.0 L/h, Q = 1536 is
+ * 12.0 L/h exactly. The expected values below are worked out by hand from that
  * and never read back from the firmware.
  * ========================================================================= */
 
@@ -1799,15 +2161,15 @@ void steadyFlow(std::uint16_t q) noexcept
 
 }  // namespace
 
-/* Spec vector: 12.3 L/h = Q 1968 steady -> 123 deci-L/h = 0x007B. */
+/* Spec vector: 12.0 L/h = Q 1536 steady -> 120 deci-L/h = 0x0078. */
 TEST(flow_normal_value_matches_the_worked_example)
 {
     primed();
-    steadyFlow(1968U);
+    steadyFlow(1536U);
     std::uint8_t wire[8];
     closeWindow(wire);
     const std::uint8_t want[7] = { 0xAAU, 0x55U, 0x02U, 0xBCU,
-                                   0x00U, 0x7BU, 0x38U };
+                                   0x00U, 0x78U, 0x35U };
     CHECK_BYTES(wire, want, 7U);
 }
 
@@ -1849,7 +2211,7 @@ TEST(flow_cold_boot_primes_unavailable_before_the_first_window)
 TEST(flow_bus_going_silent_returns_to_unavailable)
 {
     primed();
-    steadyFlow(1600U);
+    steadyFlow(1280U);
     std::uint8_t wire[8];
     closeWindow(wire);
     CHECK_EQ(bC()[0], 0x00U);
@@ -1861,12 +2223,12 @@ TEST(flow_bus_going_silent_returns_to_unavailable)
     CHECK_EQ(bC()[1], 0xFFU);
 }
 
-/* 600 ms at Q = 1600 (10.0 L/h) then 400 ms at Q = 0 -> 0.6 x 10 = 6.0 L/h,
+/* 600 ms at Q = 1280 (10.0 L/h) then 400 ms at Q = 0 -> 0.6 x 10 = 6.0 L/h,
  * i.e. 60 = 0x3C. A plain frame average would say 6/11 x 10 = 5.45. */
 TEST(flow_mixed_values_are_time_weighted)
 {
     primed();
-    for (std::uint32_t t = 0U; t <= 600U; t += 100U) { flowFrame(t, 1600U); }
+    for (std::uint32_t t = 0U; t <= 600U; t += 100U) { flowFrame(t, 1280U); }
     for (std::uint32_t t = 700U; t <= 1000U; t += 100U) { flowFrame(t, 0U); }
     std::uint8_t wire[8];
     closeWindow(wire);
@@ -1875,14 +2237,14 @@ TEST(flow_mixed_values_are_time_weighted)
     CHECK_BYTES(wire, want, 7U);
 }
 
-/* Unequal spacing is weighted by dt, not by frame count: Q = 3200 over one
- * 250 ms interval and Q = 0 over one 50 ms interval -> 3200*250/300 = 2666.7
- * -> /16 = 166.7 -> 167. */
+/* Unequal spacing is weighted by dt, not by frame count: Q = 2560 over one
+ * 250 ms interval and Q = 0 over one 50 ms interval -> 2560*250/300 = 2133.3
+ * -> *10/128 = 166.7 -> 167. */
 TEST(flow_weights_by_interval_length_not_frame_count)
 {
     primed();
-    flowFrame(0U, 3200U);
-    flowFrame(250U, 3200U);
+    flowFrame(0U, 2560U);
+    flowFrame(250U, 2560U);
     flowFrame(300U, 0U);
     std::uint8_t wire[8];
     closeWindow(wire);
@@ -1891,22 +2253,22 @@ TEST(flow_weights_by_interval_length_not_frame_count)
 }
 
 /* A 0xFFFF frame is rejected whole AND voids the interval after it. Timeline:
- *   t=0   Q 1600   first frame, nothing to integrate
- *   t=100 Q 1600   +100 ms @ 1600
+ *   t=0   Q 1280   first frame, nothing to integrate
+ *   t=100 Q 1280   +100 ms @ 1280
  *   t=200 FFFF     rejected, lastFlowMs invalidated
- *   t=300 Q 3200   NOT counted (its dt would span the hole)
- *   t=400 Q 1600   +100 ms @ 1600
- * -> 1600 exactly = 10.0 L/h = 100. If the interval after the FFFF were
- * counted the answer would be 640000/300 = 2133 = 13.3 L/h, and if the 0xFFFF
+ *   t=300 Q 2560   NOT counted (its dt would span the hole)
+ *   t=400 Q 1280   +100 ms @ 1280
+ * -> 1280 exactly = 10.0 L/h = 100. If the interval after the FFFF were
+ * counted the answer would be 512000/300 = 1707 = 13.3 L/h, and if the 0xFFFF
  * were read as a Q it would be hundreds of L/h. */
 TEST(flow_unavailable_frame_is_rejected_and_skips_the_next_interval)
 {
     primed();
-    flowFrame(0U, 1600U);
-    flowFrame(100U, 1600U);
+    flowFrame(0U, 1280U);
+    flowFrame(100U, 1280U);
     flowFrame(200U, 0xFFFFU);
-    flowFrame(300U, 3200U);
-    flowFrame(400U, 1600U);
+    flowFrame(300U, 2560U);
+    flowFrame(400U, 1280U);
     std::uint8_t wire[8];
     closeWindow(wire);
     CHECK_EQ(bC()[0], 0x00U);
@@ -1930,10 +2292,10 @@ TEST(flow_all_unavailable_frames_publish_unavailable)
 TEST(flow_gap_over_300ms_is_dropped)
 {
     primed();
-    flowFrame(0U, 1600U);
-    flowFrame(100U, 1600U);
+    flowFrame(0U, 1280U);
+    flowFrame(100U, 1280U);
     flowFrame(500U, 16000U);           /* 400 ms gap: stamp only */
-    flowFrame(600U, 1600U);            /* +100 ms @ 1600 */
+    flowFrame(600U, 1280U);            /* +100 ms @ 1280 */
     std::uint8_t wire[8];
     closeWindow(wire);
     CHECK_EQ(bC()[0], 0x00U);
@@ -1944,30 +2306,31 @@ TEST(flow_gap_over_300ms_is_dropped)
 TEST(flow_gap_of_exactly_300ms_is_kept)
 {
     primed();
-    flowFrame(0U, 1600U);
-    flowFrame(300U, 3200U);            /* 300 ms @ 3200 = 20.0 L/h */
+    flowFrame(0U, 1280U);
+    flowFrame(300U, 2560U);            /* 300 ms @ 2560 = 20.0 L/h */
     std::uint8_t wire[8];
     closeWindow(wire);
     CHECK_EQ(bC()[0], 0x00U);
     CHECK_EQ(bC()[1], 0xC8U);          /* 200 */
 }
 
-/* Integer rounding is half-up: Q 1960 = 122.5 -> 123, Q 1959 = 122.4375 -> 122. */
+/* Integer rounding is half-up: Q 1612 = 125.9375 -> 126, Q 1613 = 126.016 ->
+ * 126; the boundary is Q 1606 = 125.47 -> 125 and Q 1607 = 125.55 -> 126. */
 TEST(flow_rounds_half_up)
 {
     primed();
-    steadyFlow(1960U);
+    steadyFlow(1607U);
     std::uint8_t wire[8];
     closeWindow(wire);
-    CHECK_EQ(bC()[1], 123U);
+    CHECK_EQ(bC()[1], 126U);
 
     primed();
-    steadyFlow(1959U);
+    steadyFlow(1606U);
     closeWindow(wire);
-    CHECK_EQ(bC()[1], 122U);
+    CHECK_EQ(bC()[1], 125U);
 }
 
-/* Largest representable reading. Q = 0xFFFE is 409.6 L/h = 4096 = 0x1000, so
+/* Largest representable reading. Q = 0xFFFE is 511.98 L/h = 5120 = 0x1400, so
  * the 0xFFFE clamp is defensive only -- but the result must never be 0xFFFF,
  * which is the sentinel. */
 TEST(flow_maximum_reading_is_not_confused_with_the_sentinel)
@@ -1977,7 +2340,7 @@ TEST(flow_maximum_reading_is_not_confused_with_the_sentinel)
     std::uint8_t wire[8];
     closeWindow(wire);
     const std::uint8_t want[7] = { 0xAAU, 0x55U, 0x02U, 0xBCU,
-                                   0x10U, 0x00U, 0xCDU };
+                                   0x14U, 0x00U, 0xD1U };
     CHECK_BYTES(wire, want, 7U);
     CHECK(ram::app().customSignals.flowDeciLph != 0xFFFFU);
 }
@@ -1987,7 +2350,7 @@ TEST(flow_maximum_reading_is_not_confused_with_the_sentinel)
 TEST(flow_windows_do_not_leak_into_each_other)
 {
     primed();
-    steadyFlow(1600U);
+    steadyFlow(1280U);
     std::uint8_t wire[8];
     closeWindow(wire);
     CHECK_EQ(bC()[1], 0x64U);
@@ -2011,7 +2374,7 @@ TEST(flow_has_no_validity_bit_and_leaves_fuel_level_alone)
     const std::uint8_t litre0 = b8()[0];
     const std::uint8_t litre1 = b8()[1];
 
-    steadyFlow(1968U);
+    steadyFlow(1536U);
     std::uint8_t wire[8];
     closeWindow(wire);
     CHECK_EQ(validMask(), maskBefore);
@@ -2052,4 +2415,147 @@ TEST(flow_block_is_sixteen_slots_and_0xBC_reaches_the_wire)
     }
     CHECK(ram::app().uartTxSlotIdx <= svc::hu::kTxSlots);
     CHECK(found);
+}
+
+
+/* ===========================================================================
+ * 0xB4 validity: bit 2 means "the frame carries at least one valid field".
+ * ========================================================================= */
+
+/* Engine off: coolant goes all-FF but volts (015) and the held fuel % are
+ * still being sent, so the head unit must keep them: bit 2 stays set. */
+TEST(b4_bit_stays_set_when_only_coolant_is_lost)
+{
+    primed();
+    coolant(133U);
+    voltsIntake(126U, 0xFFU);
+    fuel(0U, 143U);
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(validMask() & ram::kValidB4, ram::kValidB4);
+
+    coolantUnavailable();
+    fuel(1U, 0xFFU);
+    decodeOnce();
+    logic::customPublish();
+
+    CHECK_EQ(b4()[0], 0xFFU);                            /* coolant n/a   */
+    CHECK_EQ(b4()[2], 92U);                              /* fuel held     */
+    CHECK_EQ(b4()[3], 0x04U);  CHECK_EQ(b4()[4], 0xECU); /* 12.60 V       */
+    CHECK_EQ(validMask() & ram::kValidB4, ram::kValidB4);
+}
+
+/* Cold boot: nothing seen, every field carries its own sentinel, bit clear. */
+TEST(b4_cold_boot_has_all_sentinels_and_bit_clear)
+{
+    primed();
+    logic::customPublish();
+    CHECK_EQ(b4()[0], 0xFFU);
+    CHECK_EQ(b4()[1], 0xFFU);
+    CHECK_EQ(b4()[2], 0xFFU);
+    CHECK_EQ(b4()[3], 0xFFU);  CHECK_EQ(b4()[4], 0xFFU);
+    CHECK_EQ(validMask() & ram::kValidB4, 0U);
+}
+
+/* Fuel %: 0xFF until the first valid 159, then held across the gate. Volts
+ * are 0xFFFF until the first 015. Either one alone sets the bit. */
+TEST(b4_fuel_and_volts_each_set_the_bit_on_their_own)
+{
+    primed();
+    fuel(1U, 0xFFU);
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(b4()[2], 0xFFU);
+    CHECK_EQ(validMask() & ram::kValidB4, 0U);
+
+    fuel(0U, 143U);
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(b4()[2], 92U);
+    CHECK_EQ(b4()[3], 0xFFU);  CHECK_EQ(b4()[4], 0xFFU); /* no 015 yet   */
+    CHECK_EQ(validMask() & ram::kValidB4, ram::kValidB4);
+
+    primed();
+    voltsIntake(143U, 45U);
+    decodeOnce();
+    logic::customPublish();
+    CHECK_EQ(b4()[2], 0xFFU);
+    CHECK_EQ(validMask() & ram::kValidB4, ram::kValidB4);
+}
+
+
+/* ===========================================================================
+ * 0xB3[4] engine load: 100 * (43.4 * Q / rpm) / 90, clamped 0..100, 0xFF when
+ * rpm or Q is unavailable or rpm < 300.
+ * ========================================================================= */
+
+namespace {
+
+/* One 0x002 frame carrying rpm (speed 0) and one 0x1A7 frame carrying Q, then
+ * a publish, with the box clock at t. */
+void loadInputs(std::uint16_t rpm, std::uint16_t q, std::uint32_t t) noexcept
+{
+    clockAt(t);
+    const std::uint8_t e[8] = { static_cast<std::uint8_t>(rpm >> 8),
+                                static_cast<std::uint8_t>(rpm), 0U, 0U, 0U, 0U, 0U, 0U };
+    pushFrame(logic::canid::kJeepEngine, e);
+    const std::uint8_t f[8] = { static_cast<std::uint8_t>(q >> 8),
+                                static_cast<std::uint8_t>(q), 0U, 0U, 0U, 0U, 0U, 0U };
+    pushFrame(logic::canid::kJeepFuelFlow, f);
+    decodeOnce();
+    decodeOnce();
+    logic::customPublish();
+}
+
+}  // namespace
+
+/* Idle: ~9 mm3 -> ~10 %. rpm 600, Q 124: 43.4 * 124 / 600 = 8.97 mm3 -> 9.96 %
+ * -> 10. */
+TEST(load_idle_is_about_ten_percent)
+{
+    primed();
+    loadInputs(600U, 124U, 10U);
+    CHECK_EQ(b3()[4], 10U);
+}
+
+/* Peak: 90 mm3 = 100 %. rpm 2000, Q 4147: 43.4 * 4147 / 2000 = 90.0 mm3. */
+TEST(load_full_scale_is_one_hundred_and_clamps)
+{
+    primed();
+    loadInputs(2000U, 4147U, 10U);
+    CHECK_EQ(b3()[4], 100U);
+
+    loadInputs(2000U, 9000U, 20U);        /* 195 mm3 -> clamp */
+    CHECK_EQ(b3()[4], 100U);
+}
+
+/* Overrun fuel cut: Q = 0 is a real reading, 0 % load. */
+TEST(load_overrun_is_zero_not_unavailable)
+{
+    primed();
+    loadInputs(1500U, 0U, 10U);
+    CHECK_EQ(b3()[4], 0U);
+}
+
+TEST(load_unavailable_when_rpm_or_q_missing_or_low_rpm)
+{
+    primed();
+    logic::customPublish();
+    CHECK_EQ(b3()[4], 0xFFU);              /* nothing seen yet */
+
+    loadInputs(0xFFFFU, 1000U, 10U);       /* rpm unavailable */
+    CHECK_EQ(b3()[4], 0xFFU);
+
+    loadInputs(299U, 1000U, 20U);          /* below 300 rpm */
+    CHECK_EQ(b3()[4], 0xFFU);
+
+    loadInputs(1000U, 0xFFFFU, 30U);       /* Q unavailable */
+    CHECK_EQ(b3()[4], 0xFFU);
+
+    loadInputs(1000U, 1000U, 40U);         /* 43.4 mm3 -> 48 % */
+    CHECK_EQ(b3()[4], 48U);
+
+    clockAt(2000U);                        /* 1A7 went silent: stale Q */
+    logic::customPublish();
+    CHECK_EQ(b3()[4], 0xFFU);
 }

@@ -34,25 +34,12 @@ namespace {
  * ------------------------------------------------------------------------- */
 constexpr std::uint8_t kHeartbeatPasses = 125U;
 
-/* Engine load: the contract defines 0x00 as unknown, and it stays unknown.
- *
- * 0x02C b2 is the load-shaped channel -- r = +0.988 against pedal position --
- * but its 0..136 range has never been calibrated against a scan tool, so any
- * scale factor would be invented. A field that reads 0 is uninstrumented; a
- * plausible-looking fabricated curve is a number someone eventually believes.
- * Same reasoning as kNoSource in raise_benz_tx.cpp.
- *
- * Note this is the one field in the block whose unknown encoding is NOT
- * all-ones, and the reason is that 0xFF would mean 255 % load. 0 % is at least
- * outside the set of values the field can legitimately report as a surprise. */
-constexpr std::uint8_t kLoadParked = ram::kCustomLoadUnknown;
-
 /* Range to empty: still parked. The box keeps no history (no trip, no
  * persistent store), and range is litres-left over a CONSUMPTION average,
  * which is exactly such a history. 0xBC now publishes the instantaneous flow
- * (0x1A7, L/h = Q/160), so the raw ingredient is on the wire -- but its divisor
- * is not yet verified at the pump, and folding a candidate divisor into a
- * distance is how a dashboard ends up confidently wrong. The radio side owns
+ * (0x1A7, L/h = Q/128), so the raw ingredient is on the wire -- but its divisor
+ * is not verified at the pump, and folding it into a distance is how a
+ * dashboard ends up confidently wrong. The radio side owns
  * the integration (litres = sum(flow x 1 s)) and so owns range. 0xFFFF is
  * outside any plausible range and is rejected for free by a consumer that
  * range-checks at all. */
@@ -148,12 +135,13 @@ void customPublish() noexcept
     /* ---- 0xB3 DRIVETRAIN: speed, rpm, load, throttle --------------------- */
     put16(&f.b3[0], c.speedKph);
     put16(&f.b3[2], c.rpm);
-    f.b3[4] = kLoadParked;
+    customEngineLoad();
+    f.b3[4] = c.loadPct;
     f.b3[5] = c.throttlePct;
 
     /* ---- 0xB4 ENGINE: coolant, intake, fuel %, volts --------------------- */
     f.b4[0] = c.coolantBias40;
-    f.b4[1] = c.intakeBias40;
+    f.b4[1] = c.intakeBias40;         /* always 0xFF: no WK source */
     f.b4[2] = c.fuelPct;
     put16(&f.b4[3], c.centiVolts);
 
@@ -161,16 +149,10 @@ void customPublish() noexcept
     put16s(&f.b5[0], c.outsideDeciC);
 
     /* ---- 0xB7 TYRE: ONE corner per frame, rotating -----------------------
-     * The position byte is advanced by customTpmsPoll() every 5 s, so this
-     * packs whichever corner is current. Temperature is ALWAYS the reserved
-     * not-available code: 0x213B carries no temperature at all, and the
-     * per-sensor identifiers that do have one decode it by a hypothesis
-     * (raw - 40) that nobody has confirmed.
-     *
-     * The flags byte reports only "no signal", and only when the data has gone
-     * stale. Battery, leak and sensor state live in per-tyre fault identifiers
-     * this build deliberately does not read, so claiming them would be
-     * inventing data. */
+     * The position byte is advanced by customTpmsPoll() every 5 s. A wheel
+     * with no pressure (no sensor, or the data gone stale) publishes no
+     * temperature and none of the battery/leak/low-pressure bits whatever the
+     * per-wheel reads last said: the WCM still answers for an absent sensor. */
     {
         const std::uint8_t  pos = c.tpmsPosition;
         const std::uint16_t kpa = c.tyreKpa[pos];
@@ -178,8 +160,8 @@ void customPublish() noexcept
 
         f.b7[0] = pos;
         put16(&f.b7[1], kpa);
-        f.b7[3] = ram::kCustomUnknown8;
-        f.b7[4] = live ? 0U : ram::kTyreFlagNoSignal;
+        f.b7[3] = live ? c.tyreTemp[pos] : ram::kCustomUnknown8;
+        f.b7[4] = live ? c.tyreExtra[pos] : ram::kTyreFlagNoSignal;
     }
 
     /* ---- 0xB8 FUEL: decilitres, range ------------------------------------ */

@@ -60,7 +60,7 @@ constexpr std::uint8_t  kRunStreakNeeded = 3U;
 /* 0x1A7 fuel flow (spec section 10): the averaging window, the longest
  * inter-frame gap still integrated (three missed 100 ms frames), and the top
  * of the published range -- 0xFFFF is the sentinel, so 0xFFFE is the ceiling.
- * It is DEFENSIVE: Q <= 0xFFFE gives at most 4096 deci-L/h (409.6 L/h), so the
+ * It is DEFENSIVE: Q <= 0xFFFE gives at most 5120 deci-L/h (512.0 L/h), so the
  * clamp cannot bind today; it is there so a future change to the divisor can
  * never make a reading collide with the sentinel. */
 constexpr std::uint32_t kFlowWindowMs = 1000U;
@@ -76,10 +76,23 @@ constexpr std::uint8_t kAsciiR = 0x52U;   /* 'R' */
  * testing the whole byte would report the brake permanently engaged. */
 constexpr std::uint8_t kParkBrakeBit = 0x80U;
 
-/* 0x2C0 b2, accelerator pedal: 23 at rest, 234 floored. Evidence: id 0x2C0,
- * pedal probable/high confidence. */
-constexpr std::uint8_t  kPedalRest = 23U;
-constexpr std::uint32_t kPedalSpan = 234U - 23U;   /* 211 counts = 100 %     */
+/* 0x02C b2, accelerator pedal: 0.4 %/count, 250 = 100 %. Evidence: byte map,
+ * confirmed (r = 0.9995 against the TCM pedal reading). So pct = b2 * 2 / 5,
+ * done as (2 * b2 + 2) / 5 for round-half-up. */
+constexpr std::uint32_t kPedalNum   = 2U;
+constexpr std::uint32_t kPedalDen   = 5U;
+constexpr std::uint32_t kPedalRound = 2U;
+
+/* Engine load from the injection quantity (byte map, "Derived values"):
+ *   inj_mm3_stroke = 43.4 * Q / rpm,  load % = 100 * inj / 90
+ *   => load % = 4340 * Q / (90 * rpm), rounded half-up in integers.
+ * Below kLoadMinRpm (cranking / stalling) the quotient is meaningless. Q must
+ * also be fresh: 0x1A7 runs at ~100 ms, so older than kLoadMaxAgeMs means the
+ * stream stopped. 4340 * 65534 = 284 M, inside u32. */
+constexpr std::uint32_t kLoadNum      = 4340U;
+constexpr std::uint32_t kLoadDen      = 90U;
+constexpr std::uint16_t kLoadMinRpm   = 300U;
+constexpr std::uint32_t kLoadMaxAgeMs = 500U;
 
 /* 0x159 b4 is a hard validity gate: b4 == 1 <-> b5 == 0xFF is not a reading.
  * True with zero exceptions across every log in the repo. */
@@ -116,9 +129,6 @@ constexpr std::uint16_t kFuelDeciPerCount = 5U;
  * reserved code rather than held: an unavailable sensor must read "unknown",
  * not "whatever it said last".
  * ------------------------------------------------------------------------- */
-constexpr std::uint8_t kTempNegative = 0x80U;
-constexpr std::uint8_t kTempBias     = 40U;
-
 /* 0x015 b1 is 0.1 V/count and the 0xB4 field is centivolts: x10 exactly. */
 constexpr std::uint16_t kCentiVoltsPerCount = 10U;
 
@@ -152,31 +162,71 @@ constexpr std::uint16_t kDegPerCount      = 2U;
  * service byte for a service-qualified identifier sends three bytes and EVERY
  * MODULE ANSWERS NOTHING. That cost a sibling project a debugging session.
  * ------------------------------------------------------------------------- */
-constexpr std::uint8_t kTpmsRequest[3] = { 0x02U, 0x21U, 0x3BU };
 constexpr std::uint8_t kTpmsRequestDlc = 3U;
-static_assert(kTpmsRequestDlc == sizeof(kTpmsRequest),
-              "txEnqueue copies min(dlc, 8) bytes from a pointer whose extent it "
-              "cannot know, so a DLC longer than the buffer reads past it and puts "
-              "whatever follows in .rodata onto the vehicle bus");
+constexpr std::uint8_t kTpmsRequestPci = 0x02U;   /* single frame, 2 PDU bytes */
+constexpr std::uint8_t kTpmsService    = 0x21U;   /* readDataByLocalIdentifier */
 
-/* The reply: 06 61 3B p1 p2 p3 p4 [junk]. Trust the PCI nibble, never the DLC
- * -- the byte after the declared length is whatever was in the responder's
- * buffer last, and it is neither data nor zero. */
-constexpr std::uint8_t kTpmsReplyPci     = 0x06U;   /* single frame, 6 PDU bytes */
+/* The three requests, one every 10 s, in a repeating cycle:
+ *   A  21 3B        all four pressures
+ *   B  21 20+n      wheel n: temperature, battery, trigger
+ *   C  21 25+n      wheel n: diagnostic DB (faults, low-pressure warning)
+ * after C the wheel n advances. 21 24 (the spare) is never read. */
+constexpr std::uint8_t kTpmsLidPressures  = 0x3BU;
+constexpr std::uint8_t kTpmsLidSensorBase = 0x20U;
+constexpr std::uint8_t kTpmsLidDiagBase   = 0x25U;
+constexpr std::uint8_t kTpmsStepPressures = 0U;
+constexpr std::uint8_t kTpmsStepSensor    = 1U;
+constexpr std::uint8_t kTpmsStepDiag      = 2U;
+
+/* Replies: [PCI] 61 <lid> ... . Trust the PCI nibble, never the DLC -- the
+ * byte after the declared length is whatever was in the responder's buffer
+ * last, and it is neither data nor zero. Offsets below are frame bytes
+ * (d[0] = PCI, d[1] = 0x61). */
 constexpr std::uint8_t kTpmsReplyService = 0x61U;   /* 0x21 + 0x40 = positive    */
-constexpr std::uint8_t kTpmsReplyLid     = 0x3BU;
 constexpr std::uint8_t kKwpNegative      = 0x7FU;
 constexpr std::size_t  kTpmsFirstPsiByte = 3U;
+constexpr std::uint8_t kTpmsPressuresPdu = 6U;      /* 61 3B p1 p2 p3 p4         */
+constexpr std::uint8_t kTpmsSensorPdu    = 6U;      /* 61 2n P T X S             */
+constexpr std::uint8_t kTpmsDiagPdu      = 4U;      /* 61 2n B2 B3               */
+constexpr std::uint8_t kTpmsPduMax       = 7U;      /* single frame holds 7      */
+
+/* 21 2n: 61 2n P T X S M. Bytes counted from the 0x61 as byte 0, so frame
+ * offset = byte + 1.
+ *   byte2 pressure (raw-1 psi, ignored: pressures come from 21 3B)
+ *   byte3 air temperature: raw WCM byte, scale UNCONFIRMED. Sent verbatim in
+ *         0xB7 byte 3; consumers treat it as degF provisionally
+ *   byte5 bits0-1 frame number (ignored), bits2-3 battery (1 = low),
+ *         bits4-5 transmission trigger (2 = Pressure Loss),
+ *         bits6-7 sensor state (2 = park mode; ignored, temp still sent)
+ * The box does no conversion; the head-unit apps own the scale. */
+constexpr std::size_t  kTpmsSensorTempByte  = 4U;   /* frame offset of byte3 */
+constexpr std::size_t  kTpmsSensorStateByte = 6U;   /* frame offset of byte5 */
+constexpr std::uint8_t kTpmsBattShift        = 2U;
+constexpr std::uint8_t kTpmsBattLow          = 1U;
+constexpr std::uint8_t kTpmsTrigShift        = 4U;
+constexpr std::uint8_t kTpmsTrigPressureLoss = 2U;
+constexpr std::uint8_t kTpmsTwoBits          = 0x03U;
+
+/* 21 25+n: 61 2n+5 B2 B3, from the vendor diagnostic DB ONLY -- NOT VERIFIED
+ * ON THE CAR.
+ *   byte2 bit0 pressure sensor HW fault, bit1 pressure SW over/underflow,
+ *         bit2 temp sensor HW fault, bit3 temp SW over/underflow,
+ *         bit4 accel sensor HW fault   (none of these are decoded for output)
+ *   byte3 bit0 "Tire n Low Pressure Warning"                                */
+constexpr std::size_t  kTpmsDiagWarnByte = 4U;      /* frame offset of byte3 */
+constexpr std::uint8_t kTpmsDiagWarnBit  = 0x01U;
 
 /* Cadences, in 8 ms passes of the periodic-TX task. A uint8_t divider
  * saturates at 2.04 s, which is why the counters are 16-bit. */
-constexpr std::uint16_t kTpmsPollPasses   = 3750U;  /* 30 s between polls       */
+constexpr std::uint16_t kTpmsPollPasses   = 1250U;  /* 10 s between requests    */
 constexpr std::uint16_t kTpmsRotatePasses = 625U;   /*  5 s between corners     */
 constexpr std::uint8_t  kTpmsReplyPasses  = 63U;    /* ~500 ms to answer        */
-/* Four consecutive misses -- two minutes -- before the data is called stale.
- * The exchange was measured at 47/47 on a real drive, so this is a backstop,
- * not an expectation. */
+/* Four consecutive missed pressure polls (A) -- two minutes -- before the data
+ * is called stale. The exchange was measured at 47/47 on a real drive, so this
+ * is a backstop, not an expectation. */
 constexpr std::uint8_t  kTpmsStaleMisses  = 4U;
+/* Failed reads of one wheel's 21 2n (or 21 25+n) before its extras are dropped. */
+constexpr std::uint8_t  kTpmsExtraMisses  = 3U;
 
 /* psi -> kPa. The WCM reports plain psi at 1 psi/count; the head-unit contract
  * wants u16 kPa. x 6.894759, rounded. Widest intermediate 255 * 68948 =
@@ -210,6 +260,20 @@ void setValid(std::uint8_t bit, bool live) noexcept
                    : static_cast<std::uint8_t>(cur & static_cast<std::uint8_t>(~bit));
 }
 
+/* 0xB0 bit 2 means "the 0xB4 frame carries at least one valid field". Every
+ * field has its own sentinel (coolant/intake 0xFF, fuel % 0xFF, volts 0xFFFF),
+ * so the bit is derived from the fields, not owned by one source. Call after
+ * any of them changes. */
+void updateB4Valid() noexcept
+{
+    const ram::CustomSignals& c = ram::app().customSignals;
+    const bool any = (c.coolantBias40 != ram::kCustomUnknown8)
+                  || (c.intakeBias40  != ram::kCustomUnknown8)
+                  || (c.fuelPct       != ram::kCustomUnknown8)
+                  || (c.centiVolts    != ram::kCustomUnknown16);
+    setValid(ram::kValidB4, any);
+}
+
 void setIgnBit(std::uint8_t bit, bool on) noexcept
 {
     ram::CustomSignals& c = ram::app().customSignals;
@@ -233,9 +297,53 @@ void tpmsBlank() noexcept
     ram::CustomSignals& c = ram::app().customSignals;
 
     for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
-        c.tyreKpa[i] = ram::kCustomUnknown16;
+        c.tyreKpa[i]      = ram::kCustomUnknown16;
+        c.tyreTemp[i]     = ram::kCustomUnknown8;
+        c.tyreExtra[i]    = 0U;
+        c.tyreMissTemp[i] = kTpmsExtraMisses;
+        c.tyreMissDiag[i] = kTpmsExtraMisses;
     }
     setValid(ram::kValidB7, false);
+}
+
+/* One failed read (timeout or negative) of the request in flight. */
+void tpmsFail() noexcept
+{
+    ram::CustomSignals& c = ram::app().customSignals;
+    const std::uint8_t  lid = c.tpmsLid;
+
+    c.tpmsPending = 0U;
+    if (lid == kTpmsLidPressures) {
+        if (c.tpmsFailures < kTpmsStaleMisses) {
+            c.tpmsFailures = static_cast<std::uint8_t>(c.tpmsFailures + 1U);
+        }
+        if (c.tpmsFailures >= kTpmsStaleMisses) {
+            tpmsBlank();
+        }
+    } else if (lid < kTpmsLidDiagBase) {
+        const std::uint8_t n = static_cast<std::uint8_t>(lid - kTpmsLidSensorBase);
+        if (n < ram::kTyreCount) {
+            if (c.tyreMissTemp[n] < kTpmsExtraMisses) {
+                c.tyreMissTemp[n] = static_cast<std::uint8_t>(c.tyreMissTemp[n] + 1U);
+            }
+            if (c.tyreMissTemp[n] >= kTpmsExtraMisses) {
+                c.tyreTemp[n]  = ram::kCustomUnknown8;
+                c.tyreExtra[n] = static_cast<std::uint8_t>(
+                    c.tyreExtra[n] & ram::kTyreFlagLowPressure);
+            }
+        }
+    } else {
+        const std::uint8_t n = static_cast<std::uint8_t>(lid - kTpmsLidDiagBase);
+        if (n < ram::kTyreCount) {
+            if (c.tyreMissDiag[n] < kTpmsExtraMisses) {
+                c.tyreMissDiag[n] = static_cast<std::uint8_t>(c.tyreMissDiag[n] + 1U);
+            }
+            if (c.tyreMissDiag[n] >= kTpmsExtraMisses) {
+                c.tyreExtra[n] = static_cast<std::uint8_t>(
+                    c.tyreExtra[n] & static_cast<std::uint8_t>(~ram::kTyreFlagLowPressure));
+            }
+        }
+    }
 }
 
 }  // namespace
@@ -257,6 +365,8 @@ void customPrimeSignals() noexcept
     c.speedKph       = ram::kCustomUnknown16;
     c.rpm            = ram::kCustomUnknown16;
     c.throttlePct    = ram::kCustomUnknown8;
+    c.loadPct        = ram::kCustomLoadUnknown;
+    c.flowLastQ      = ram::kCustomUnknown16;
     c.coolantBias40  = ram::kCustomUnknown8;
     c.intakeBias40   = ram::kCustomUnknown8;
     c.fuelPct        = ram::kCustomUnknown8;
@@ -292,6 +402,15 @@ void customPrimeSignals() noexcept
     c.tpmsPending   = 0U;
     c.tpmsDeadline  = 0U;
     c.tpmsFailures  = kTpmsStaleMisses;   /* nothing heard yet == stale */
+    c.tpmsLid       = 0U;
+    c.tpmsStep      = kTpmsStepPressures;
+    c.tpmsWheel     = 0U;
+    for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
+        c.tyreTemp[i]     = ram::kCustomUnknown8;
+        c.tyreExtra[i]    = 0U;
+        c.tyreMissTemp[i] = kTpmsExtraMisses;
+        c.tyreMissDiag[i] = kTpmsExtraMisses;
+    }
 
     c.ignBits      = 0U;
     c.valid        = 0U;    /* nothing is live until the car says so */
@@ -445,15 +564,14 @@ void customAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
 }
 
 /* ============================================================================
- * 0x015 -- b1 battery voltage at 0.1 V/count, b2 intake/charge air temperature.
+ * 0x015 -- b1 battery voltage at 0.1 V/count.
  * Evidence: id 0x015. Voltage Confirmed (125 = 12.5 V key-on, 143-146 running,
- * 103 cranking); b2 a candidate -- its positive values read plausibly as raw
- * degrees C, identity and negative encoding unconfirmed.
+ * 103 cranking). b2 is NOT intake air (the byte map lists it as an unknown
+ * temperature), so the 0xB4 intake field is always the reserved 0xFF and b2
+ * is not decoded here.
  *
- * Both fields live in 0xB4, whose validity bit belongs to COOLANT alone (see
- * customCoolant). That is deliberate and is what the spec says: one bit per
- * command, owned by one source. An unavailable intake reading is reported by
- * the field's own 0xFF, not by the command's bit.
+ * 0xB4's validity bit means "at least one field is valid" (updateB4Valid);
+ * each field also reports its own loss with its own sentinel.
  *
  * This is a third reader of 0x015 -- jeepSteering() takes b4:b5 and, in a benz
  * build, benzVoltage() takes b1.
@@ -469,18 +587,7 @@ void customVoltsIntake(const volatile std::uint8_t* d) noexcept
      * construction and needs no code. */
     c.centiVolts = static_cast<std::uint16_t>(static_cast<std::uint16_t>(d[1])
                                               * kCentiVoltsPerCount);
-
-    /* Intake is CLAMPED BEFORE BIASING, never computed blindly: 0xFF + 40
-     * truncates to 0x27 and would publish -1 degC. Unavailable or suspect goes
-     * out as the reserved 0xFF.
-     *
-     * No validity bit of its own -- 0xB4's bit belongs to coolant alone, and
-     * the spec is explicit that one dead sensor must not cost the three good
-     * signals sharing this command. The field reports its own loss. */
-    const std::uint8_t b2 = d[2];
-    c.intakeBias40 = (b2 >= kTempNegative)
-                         ? ram::kCustomUnknown8
-                         : static_cast<std::uint8_t>(b2 + kTempBias);
+    updateB4Valid();
 }
 
 /* ============================================================================
@@ -502,6 +609,10 @@ void customVoltsIntake(const volatile std::uint8_t* d) noexcept
  * sentinel is still TESTED here, but only to drive the validity bit -- 0xB4's
  * bit belongs to this frame alone.
  *
+ * 0xB0 bit 2 is NOT owned by coolant: it says the frame has at least one
+ * valid field (updateB4Valid), so a dead coolant sensor at engine off does not
+ * make the head unit withdraw fuel and volts that are still being sent.
+ *
  * The test is b1 rather than the whole frame. The spec says "02C all-FF", and
  * in the logs the frame does go all-FF together -- but the coolant byte itself
  * is the only one this function reads, so testing it directly is both simpler
@@ -516,7 +627,7 @@ void customCoolant(const volatile std::uint8_t* d) noexcept
     c.coolantBias40 = b1;             /* already degC+40 -- no arithmetic, and
                                        * 0xFF passes through as the reserved
                                        * "not available" code */
-    setValid(ram::kValidB4, b1 != ram::kCustomUnknown8);
+    updateB4Valid();
 }
 
 /* ============================================================================
@@ -553,8 +664,8 @@ void customParkBrake(const volatile std::uint8_t* d) noexcept
  *
  * TWO DESTINATIONS, ONE SOURCE. b5 feeds the litres in 0xB8 and the percentage
  * in 0xB4 byte 2. They share this gate but NOT a validity bit: a gated sample
- * clears 0xB8's bit and leaves 0xB4's alone, because 0xB4's other three fields
- * (coolant, intake, volts) are still good.
+ * clears 0xB8's bit, and 0xB4's bit stays set while any 0xB4 field is valid
+ * (the held fuel % counts, and so does volts).
  *
  * ON THE GATE THE PREVIOUS FIGURE IS HELD, not blanked -- the one field in this
  * block that holds rather than publishing a sentinel. That is deliberate and it
@@ -573,6 +684,7 @@ void customFuel(const volatile std::uint8_t* d) noexcept
 
     if (d[4] == kFuelGateInvalid) {
         setValid(ram::kValidB8, false);
+        updateB4Valid();
         return;                       /* hold both destinations */
     }
 
@@ -587,43 +699,30 @@ void customFuel(const volatile std::uint8_t* d) noexcept
     c.fuelDecilitres = static_cast<std::uint16_t>(
         static_cast<std::uint16_t>(raw) * kFuelDeciPerCount);
     setValid(ram::kValidB8, true);
+    updateB4Valid();
 }
 
 /* ============================================================================
- * 0x2C0 b2 -- accelerator pedal position, scaled to 0..100 %.
- * Evidence: id 0x2C0, pedal probable/high confidence: 23 at rest, up to 234
- * floored.
+ * 0x02C b2 -- accelerator pedal position, 0.4 %/count (250 = 100 %).
+ * Evidence: byte map, confirmed (r = 0.9995 against the TCM pedal reading).
+ * 0x02C is all-FF when unavailable, so b2 == 0xFF publishes the reserved
+ * 0xFF rather than 102 %. Values above 250 clamp to 100.
  *
- * b6 IS A REDUNDANCY CHECK, not a second signal. It mirrors b2 exactly in all
- * 14 457 frames of drive.log, so a mismatch means a corrupt frame and the
- * sample is DISCARDED -- the previous throttle value stands. This is the only
- * field in the block with an in-frame integrity check and it costs one
- * comparison, so it is used.
- *
- * Below the 23-count rest position the subtraction would wrap, so it floors at
- * zero rather than reading 97 %.
- *
- * NOT ENGINE LOAD. 0x02C b2 is the load-shaped channel (r = +0.988 with the
- * pedal) but its 0..136 range has never been calibrated against a scan tool,
- * so the load field of 0xB3 goes out as the contract's unknown value and no
- * guess is scaled. See custom_tx.cpp.
+ * Replaces the earlier 0x2C0 b2 voltage-span guess; 0x2C0 is no longer read.
+ * Not engine load -- see customEngineLoad().
  * ==========================================================================*/
 void customThrottle(const volatile std::uint8_t* d) noexcept
 {
     ram::CustomSignals& c = ram::app().customSignals;
     const std::uint8_t  b2 = d[2];
 
-    if (b2 != d[6]) {
-        return;                       /* corrupt frame: hold */
-    }
-
-    if (b2 <= kPedalRest) {
-        c.throttlePct = 0U;
+    if (b2 == ram::kCustomUnknown8) {
+        c.throttlePct = ram::kCustomUnknown8;
         return;
     }
 
-    std::uint32_t pct = (static_cast<std::uint32_t>(b2 - kPedalRest)
-                         * kPercentMax) / kPedalSpan;
+    std::uint32_t pct = (static_cast<std::uint32_t>(b2) * kPedalNum + kPedalRound)
+                        / kPedalDen;
     if (pct > kPercentMax) {
         pct = kPercentMax;
     }
@@ -727,13 +826,13 @@ void customCompass(const volatile std::uint8_t* d) noexcept
 
 /* ============================================================================
  * 0x1A7 b0:b1 -- fuel-flow RATE, for 0xBC FLOW. docs/CUSTOM-TX-SPEC.md s10.
- * Evidence: id 0x1A7, rate identity probable; the divisor is anchored at idle
- * (~0.76 L/h), at rated power (40.0 vs 40.3 L/h) and by urban consumption, and
- * a 1449.6 s drive replay integrates to 10.43 L/100 km. NOT yet verified at the
- * pump -- which is why this stays a rate and the litres stay the radio's job.
+ * Evidence: id 0x1A7, rate identity probable; the divisor 128 was fitted
+ * against the PCM's own fuel-rate reading (OBD 212B) on two drives. It is not
+ * verified at the pump -- which is why this stays a rate and the litres stay
+ * the radio's job.
  *
  * Q = (b0 << 8) | b1, unsigned big-endian, and it is ALREADY a rate:
- * L/h = Q / 160, so deci-L/h = Q / 16. Three ways to get this wrong, all of
+ * L/h = Q / 128, so deci-L/h = Q * 10 / 128. Three ways to get this wrong, all of
  * which the byte map warns about:
  *   - NEVER MULTIPLY BY RPM. Q is not per-revolution; that turns a rate into
  *     a number that tracks the tachometer, not the injectors.
@@ -755,7 +854,7 @@ void customCompass(const volatile std::uint8_t* d) noexcept
  * the far side of a hole. customFuelFlowTick() turns the sums into a value.
  *
  * Overflow: Q <= 0xFFFE and each counted dt <= 300 ms; a window collects at
- * most ~1.3 s of dt, so sumQdt <= ~8.6e7 and u32 is 50x clear of 4.29e9.
+ * most ~1.3 s of dt, so sumQdt <= ~8.6e7 and u32 is 50x clear of 4.29e9 (5x clear after the x10).
  *
  * No DLC check: the dispatcher hands over the data pointer only, like every
  * other custom decoder here. The id is unique to this signal on the WK body
@@ -771,8 +870,10 @@ void customFuelFlow(const volatile std::uint8_t* d) noexcept
 
     if (q == ram::kCustomUnknown16) {
         c.flowHaveLast = 0U;          /* reject, and void the next interval */
+        c.flowLastQ    = ram::kCustomUnknown16;
         return;
     }
+    c.flowLastQ = static_cast<std::uint16_t>(q);
 
     if (c.flowHaveLast != 0U) {
         const std::uint32_t dt = now - c.flowLastMs;   /* wraps correctly */
@@ -785,12 +886,37 @@ void customFuelFlow(const volatile std::uint8_t* d) noexcept
     c.flowHaveLast = 1U;
 }
 
+/* Engine load 0..100 %, derived from the injection quantity (see kLoadNum).
+ * Unavailable (0xFF, which the decoder rejects as > 100) when rpm is absent or
+ * below kLoadMinRpm, or Q is absent or stale. Called from customPublish(). */
+void customEngineLoad() noexcept
+{
+    ram::CustomSignals& c = ram::app().customSignals;
+    const std::uint32_t now = ram::app().sched.counter;
+    const std::uint16_t rpm = c.rpm;
+    const std::uint16_t q   = c.flowLastQ;
+
+    if ((rpm == ram::kCustomUnknown16) || (rpm < kLoadMinRpm)
+        || (q == ram::kCustomUnknown16) || (c.flowHaveLast == 0U)
+        || ((now - c.flowLastMs) > kLoadMaxAgeMs)) {
+        c.loadPct = ram::kCustomLoadUnknown;
+        return;
+    }
+
+    const std::uint32_t den = kLoadDen * static_cast<std::uint32_t>(rpm);
+    std::uint32_t pct = (kLoadNum * static_cast<std::uint32_t>(q) + (den / 2U)) / den;
+    if (pct > kPercentMax) {
+        pct = kPercentMax;
+    }
+    c.loadPct = static_cast<std::uint8_t>(pct);
+}
+
 /* The window close. Every 1000 ms: if any interval was integrated, publish
- * round-half-up(sumQdt / sumDt / 16) deci-L/h clamped to 0xFFFE (0xFFFF is the
+ * round-half-up(sumQdt * 10 / sumDt / 128) deci-L/h clamped to 0xFFFE (0xFFFF is the
  * sentinel and must not be reachable as a reading); otherwise 0xFFFF. Both sums
  * reset either way. Runs from the 8 ms task so a silent bus -- no 0x1A7 at all
  * -- still turns into 0xFFFF after a second instead of holding the last value
- * for ever. Integer half-up: floor((S + 8*T) / (16*T)). The 0.1 L/h
+ * for ever. Integer half-up: floor((10*S + 64*T) / (128*T)). The 0.1 L/h
  * resolution is the deadband, as 0.1 V is for volts. */
 void customFuelFlowTick() noexcept
 {
@@ -803,8 +929,9 @@ void customFuelFlowTick() noexcept
     c.flowWindowMs = now;
 
     if (c.flowSumDt > 0U) {
-        std::uint32_t v = (c.flowSumQdt + 8U * c.flowSumDt)
-                        / (16U * c.flowSumDt);
+        /* 10 * sumQdt <= ~8.6e8, inside 2^32 */
+        std::uint32_t v = (10U * c.flowSumQdt + 64U * c.flowSumDt)
+                        / (128U * c.flowSumDt);
         if (v > kFlowMaxDeci) {
             v = kFlowMaxDeci;
         }
@@ -864,16 +991,9 @@ void customTpmsPoll() noexcept
             c.tpmsDeadline = static_cast<std::uint8_t>(c.tpmsDeadline - 1U);
         }
         if (c.tpmsDeadline == 0U) {
-            /* Timed out. No immediate retry: the next 30 s tick tries again.
-             * A retry would be solving a problem never observed -- 47 of 47
-             * on a real drive -- at the cost of more bus traffic. */
-            c.tpmsPending = 0U;
-            if (c.tpmsFailures < kTpmsStaleMisses) {
-                c.tpmsFailures = static_cast<std::uint8_t>(c.tpmsFailures + 1U);
-            }
-            if (c.tpmsFailures >= kTpmsStaleMisses) {
-                tpmsBlank();
-            }
+            /* Timed out. No immediate retry: the next request goes out on
+             * the normal 10 s tick, and the cycle moves on. */
+            tpmsFail();
         }
         return;                       /* one request in flight at a time */
     }
@@ -890,7 +1010,26 @@ void customTpmsPoll() noexcept
         return;
     }
 
-    svc::can::txEnqueue(canid::kWcmTpmsRequest, 0U, kTpmsRequestDlc, kTpmsRequest);
+    std::uint8_t lid = kTpmsLidPressures;
+    if (c.tpmsStep == kTpmsStepSensor) {
+        lid = static_cast<std::uint8_t>(kTpmsLidSensorBase + c.tpmsWheel);
+    } else if (c.tpmsStep == kTpmsStepDiag) {
+        lid = static_cast<std::uint8_t>(kTpmsLidDiagBase + c.tpmsWheel);
+    }
+
+    /* Next request in the cycle: A -> B -> C -> (next wheel) A ... */
+    if (c.tpmsStep == kTpmsStepDiag) {
+        c.tpmsStep  = kTpmsStepPressures;
+        c.tpmsWheel = static_cast<std::uint8_t>(
+            (c.tpmsWheel + 1U) % ram::kTyreCount);
+    } else {
+        c.tpmsStep = static_cast<std::uint8_t>(c.tpmsStep + 1U);
+    }
+
+    /* txEnqueue copies the bytes before returning, so a local is fine. */
+    const std::uint8_t req[kTpmsRequestDlc] = { kTpmsRequestPci, kTpmsService, lid };
+    svc::can::txEnqueue(canid::kWcmTpmsRequest, 0U, kTpmsRequestDlc, req);
+    c.tpmsLid      = lid;
     c.tpmsPending  = 1U;
     c.tpmsDeadline = kTpmsReplyPasses;
 }
@@ -923,28 +1062,73 @@ void customTpmsReply(const volatile std::uint8_t* d) noexcept
     /* A negative response -- 7F 21 xx -- is a real answer, so it closes the
      * request, but it carries no data. */
     if (d[1] == kKwpNegative) {
-        c.tpmsPending = 0U;
-        if (c.tpmsFailures < kTpmsStaleMisses) {
-            c.tpmsFailures = static_cast<std::uint8_t>(c.tpmsFailures + 1U);
-        }
-        if (c.tpmsFailures >= kTpmsStaleMisses) {
-            tpmsBlank();
-        }
+        tpmsFail();
         return;
     }
 
-    if ((d[0] != kTpmsReplyPci) || (d[1] != kTpmsReplyService) ||
-        (d[2] != kTpmsReplyLid)) {
-        return;                       /* not our answer; leave the poll open */
+    /* Match by the echoed local id; anything else is not our answer and the
+     * request stays open. The PCI length must cover what we read. */
+    const std::uint8_t lid = c.tpmsLid;
+    if ((d[1] != kTpmsReplyService) || (d[2] != lid) || ((d[0] & 0xF0U) != 0U)) {
+        return;
+    }
+    const std::uint8_t pdu = static_cast<std::uint8_t>(d[0] & 0x0FU);
+    if (pdu > kTpmsPduMax) {
+        return;
     }
 
-    for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
-        c.tyreKpa[i] = psiToKpa(d[kTpmsFirstPsiByte + i]);
+    if (lid == kTpmsLidPressures) {
+        if (pdu < kTpmsPressuresPdu) {
+            return;
+        }
+        for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
+            c.tyreKpa[i] = psiToKpa(d[kTpmsFirstPsiByte + i]);
+        }
+        c.tpmsPending  = 0U;
+        c.tpmsFailures = 0U;
+        setValid(ram::kValidB7, true);
+        return;
     }
 
-    c.tpmsPending  = 0U;
-    c.tpmsFailures = 0U;
-    setValid(ram::kValidB7, true);
+    if (lid < kTpmsLidDiagBase) {
+        if (pdu < kTpmsSensorPdu) {
+            return;
+        }
+        const std::uint8_t n = static_cast<std::uint8_t>(lid - kTpmsLidSensorBase);
+        const std::uint8_t t = d[kTpmsSensorTempByte];
+        const std::uint8_t st = d[kTpmsSensorStateByte];
+        const std::uint8_t batt = static_cast<std::uint8_t>(
+            (st >> kTpmsBattShift) & kTpmsTwoBits);
+        const std::uint8_t trig = static_cast<std::uint8_t>(
+            (st >> kTpmsTrigShift) & kTpmsTwoBits);
+        std::uint8_t x = static_cast<std::uint8_t>(
+            c.tyreExtra[n] & ram::kTyreFlagLowPressure);
+        if (batt == kTpmsBattLow) {
+            x = static_cast<std::uint8_t>(x | ram::kTyreFlagBatteryLow);
+        }
+        if (trig == kTpmsTrigPressureLoss) {
+            x = static_cast<std::uint8_t>(x | ram::kTyreFlagLeak);
+        }
+        /* Raw WCM byte, passed through unchanged (0xFF stays "none"). */
+        c.tyreTemp[n]     = t;
+        c.tyreExtra[n]    = x;
+        c.tyreMissTemp[n] = 0U;
+        c.tpmsPending     = 0U;
+        return;
+    }
+
+    if (pdu < kTpmsDiagPdu) {
+        return;
+    }
+    const std::uint8_t n = static_cast<std::uint8_t>(lid - kTpmsLidDiagBase);
+    std::uint8_t x = static_cast<std::uint8_t>(
+        c.tyreExtra[n] & static_cast<std::uint8_t>(~ram::kTyreFlagLowPressure));
+    if ((d[kTpmsDiagWarnByte] & kTpmsDiagWarnBit) != 0U) {
+        x = static_cast<std::uint8_t>(x | ram::kTyreFlagLowPressure);
+    }
+    c.tyreExtra[n]    = x;
+    c.tyreMissDiag[n] = 0U;
+    c.tpmsPending     = 0U;
 }
 
 }  // namespace logic

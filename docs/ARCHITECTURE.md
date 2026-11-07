@@ -310,14 +310,14 @@ ternary.
 |---|---|---|
 | framing | `AA 55 LEN CMD payload CKS`, CKS = sum − 1 | `2E CMD LEN payload CKS`, CKS = ~sum |
 | wire overhead | 5 | 4 |
-| TX slots | 16: the stock 6 (`0x72 0xA6 0x73 0xF0 0x12 0x32`) + the custom 10 (`0xB0 0xB2 0xB3 0xB4 0xB5 0xB7 0xB8 0xBB 0xBD 0xBC`) | 5 (`0x08 0x07`, three pages of `0x41`) |
+| TX slots | 13: the stock 6 (`0x72 0xA6 0x73 0xF0 0x12 0x32`) + the custom 7 of telemetry v2 (`0xB0 0xB3 0xB2 0xB4 0xB5 0xB7 0xB8`; `0xB3`/`0xB2` on the priority lane, `0xB0` on the request lane) | 5 (`0x08 0x07`, three pages of `0x41`) |
 | head-unit protocol id | 3009001 | 1034025 / 27 / 28 |
-| version string | `H1N4JPF20L-061126` | `H1N4BNZ10L-…` |
+| version string | `H1N4JPF20L-071126` | `H1N4BNZ10L-…` |
 | wire behaviour | stock-equivalent for the stock 6 slots | deliberately diverges |
 
 Only the **jeep** build is a faithful rebuild — and only for the six stock
 slots. It also carries the **custom `0xB0`–`0xB8` telemetry block**
-(`docs/CUSTOM-TX-SPEC.md`), six commands of its own in the free `0xB0`–`0xBF`
+(`docs/TELEMETRY-V2-SPEC.md`; v1 was `docs/CUSTOM-TX-SPEC.md`), seven commands of its own in the free `0xB0`–`0xBF`
 range that publish WK signals the Hiworld protocol has no field for: coolant,
 intake air, outside air, battery volts, throttle, fuel, road speed, the parking
 brake, the odometer and a magnetic compass. The stock six are untouched, so the Android plugin's view of
@@ -493,12 +493,14 @@ derived *from* a sentinel. That is what stops `0x02C`'s all-`FF` becoming a plau
 ### `custom_tx.hpp`
 ```cpp
 void customPrimeFrames() noexcept;  // sentinels into ram::AppRam::customFrames, once at init
-void customPublish() noexcept;      // ram::CustomSignals -> ram::AppRam::customFrames
+void customPublish() noexcept;      // 8 ms entry: drift-free 100 ms tick (+ 1 s task)
+void customTick100() noexcept;      // age sources, pack 0xB3/0xB2, queue them on the priority lane
+void customTick1000() noexcept;     // pack 0xB4 0xB5 0xB7 0xB8 + heartbeat, request 0xB0
 ```
-Its spec is `docs/CUSTOM-TX-SPEC.md`, which also lists the four commands in the range that are
-deliberately **not** built and why (`0xB1` and `0xB6` duplicate stock `0xF0` and `0x12`;
-`0xB7` TPMS and `0xB9` KEY have no source on this car). Like `benzPublish()` it packs payload
-buffers and does **not** transmit — the round-robin notices a payload differs from its shadow.
+Its spec is `docs/TELEMETRY-V2-SPEC.md` (§14 is the wire summary). `0xB1`, `0xB6` and `0xB9`–`0xBF`
+are never emitted. Unlike `benzPublish()` it also QUEUES: `svc::hu::requestPriority()` for `0xB3`
+(every tick) and `0xB2` (on change / 1 s), `svc::hu::requestSend()` for `0xB0`; the slow rows go
+through the ordinary change-driven round-robin with a 144 ms keep-alive step.
 
 The one exception is `0xB0`, whose payload is a validity mask that may legitimately be
 constant for hours: a change-driven scheduler would only send it on the ~8.6 s keep-alive

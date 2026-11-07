@@ -327,6 +327,20 @@ a field for none of them. A jeep build therefore adds eight commands of its own 
 > compass really is still reporting. **Key-off is `0xB2` bit 0, never the compass.** A consumer
 > must not read a live `0xBD` as "the car is awake"; that half is consumer-side.
 
+### Telemetry v2 (supersedes FR-108 … FR-141)
+
+FR-108 … FR-141 describe layout v1 of the custom block (`docs/CUSTOM-TX-SPEC.md`) and are **superseded**
+by the requirements below; the TPMS poll requirements FR-128 … FR-135 still apply to the WCM exchange,
+except that `0xB0` no longer has a validity bit 4. Contract: `docs/TELEMETRY-V2-SPEC.md`.
+
+| ID | Requirement | Where / verified by |
+|---|---|---|
+| **FR-145** | A jeep build shall send exactly `0xB0 0xB2 0xB3 0xB4 0xB5 0xB7 0xB8` from the custom block (13 TX slots) and never `0xB1`, `0xB6`, `0xB9`–`0xBF`. | `hu_hiworld.cpp` `kTxTable` + static_asserts; test `v2_jeep_build_has_thirteen_tx_slots`, `v2_scheduler_cadences_on_a_live_bus` |
+| **FR-146** | `0xB3` FAST shall be queued on every 100 ms tick of a drift-free divider of the 1 kHz counter, whatever its content; `0xB2` STATE when its payload changed or 1 s after its last queue; both on a priority lane served one frame per 8 ms pass ahead of the 48 ms boundary. The Benz image's scheduler shall be unchanged. | `logic::customPublish()`, `customTick100()`, `svc::hu::txSched()`; tests `v2_state_queued_on_change_and_every_second_only`, `v2_scheduler_cadences_on_a_live_bus`, `v2_priority_frame_is_built_from_the_buffer` |
+| **FR-147** | Each of the 15 CAN sources shall be stamped on every accepted frame and be alive only within 3x its nominal period; a dead source shall put its fields at their sentinels and its STATE bits and S6 bit at 0. | `customAgeSources()`; tests `v2_002_silent_151_ms_goes_to_sentinels`, `v2_fuel_gate_holds_and_stale_source_blanks`, `v2_dead_006_clears_lights` |
+| **FR-148** | Indicator bits shall be held 700 ms after the last `006` frame that set them (works for pulsing or held bits); hazard = both bits in one frame; ignored while `000` reads `00`/`01`. | `customLights()`, `customIndicatorTick()`; tests `v2_indicator_*`, `v2_hazard_sets_all_three_bits`, `v2_lock_flash_with_key_out_is_ignored` |
+| **FR-149** | The slow rows shall be resent at least every 2 s under any traffic (keep-alive step 144 ms, `kIdleDelay` 2, jeep only); stock `0x32` change detection shall compare only payload `[0..1]`. | `head_unit.hpp`/`.cpp`; tests `v2_scheduler_idle_link_slow_cycle_is_under_1700_ms`, `v2_stock_0x32_compares_gear_only`, `v2_scheduler_slot_index_survives_a_million_passes` |
+
 ## 3. Non-functional requirements
 
 ### 3.1 Memory map and entry

@@ -1,5 +1,8 @@
 # Custom TX block `0xB0`–`0xBF` — firmware implementation spec
 
+> **SUPERSEDED by [`TELEMETRY-V2-SPEC.md`](TELEMETRY-V2-SPEC.md)** (built 2026-11-07, firmware
+> `H1N4JPF20L-071126`). Kept only as history: nothing below describes the current wire format.
+
 > **This is a work order, not an analysis.** Everything here is decided. Build
 > exactly this. Where something is deliberately NOT built, it says so and why.
 >

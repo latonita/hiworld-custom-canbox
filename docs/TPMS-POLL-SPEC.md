@@ -1,5 +1,9 @@
 # `0xB7` TYRE — polling the WCM for TPMS. Firmware implementation spec
 
+> **Telemetry v2 (2026-11-07):** the `0xB0` validity mask no longer exists, so every mention of
+> "`0xB0` bit 4" below is history; staleness shows only as `FFFF` kPa + flag bit 2. `0xB7` itself is
+> unchanged, and is packed once a second by the 1 s task. See `TELEMETRY-V2-SPEC.md` §3.6.
+
 > **This is a work order, not an analysis.** Everything here is decided. Build
 > exactly this.
 >

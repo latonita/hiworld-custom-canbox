@@ -43,25 +43,28 @@ so `tools/iap_upload.py` runs on the host.
 
 | `--protocol` | Version tag | What | Status |
 |---|---|---|---|
-| `jeep` (default) | `H1N4JPF20L-<ddmmyy>` | Faithful rebuild of the stock Hiworld dialect + the custom `0xB0`-`0xBD` telemetry block | The one in use |
+| `jeep` (default) | `H1N4JPF20L-<ddmmyy>` | Faithful rebuild of the stock Hiworld dialect + the custom telemetry block v2 (`0xB0`-`0xB8`) | The one in use |
 | `benz` | `H1N4BNZ10L-<ddmmyy>` | Emulates a Raise Mercedes canbox (see [`raise-benz-emulation.md`](raise-benz-emulation.md)) | Alternative, not actively used |
 
 Version string shape: `H1N4` (BSP family) `JPF2` (car profile, same token as Android protocol id
 3009001) `0` (profile sub-revision) `L` (vendor image; stock is `A`) `-ddmmyy`. Only the date moves
 between our builds. Authoritative comment: `app/include/app_config.hpp` (Box identity). Current
-`kVersionString`: `H1N4JPF20L-061126` (jeep), `H1N4BNZ10L-171026` (benz).
+`kVersionString`: `H1N4JPF20L-071126` (jeep), `H1N4BNZ10L-171026` (benz).
 
 Build history on the wire: `-171026` stock six slots only, `-211026` adds the telemetry block,
 `-241026` adds `0xBC` fuel flow, `-251025` reorders `0x3D0` for the WK amp, restores the
 saved volume at boot and saves settings only once they settle,
-`-301026` resends unchanged slots under constant traffic (busy-link refresh) and reports a missing TPMS sensor as no signal.
+`-301026` resends unchanged slots under constant traffic (busy-link refresh) and reports a missing TPMS sensor as no signal,
+`-061126` adds per-wheel tyre temperature/battery/leak/low-pressure flags (the rollback image), `-071126` replaces the
+custom block with telemetry v2 (`TELEMETRY-V2-SPEC.md`; on the car since 2026-11-07 with the matching Dashwheel decoder).
 
 ## Signal reference
 
 | Document | What |
 |---|---|
 | [`../data-provided-JPF20L.md`](../data-provided-JPF20L.md) | Every data element the jeep build sends, by command and byte, with CAN source |
-| [`CUSTOM-TX-SPEC.md`](CUSTOM-TX-SPEC.md) | The custom `0xB0`-`0xBD` block: payloads, validity mask, state machines; section 9 odometer/compass, section 10 fuel flow `0xBC` |
+| [`TELEMETRY-V2-SPEC.md`](TELEMETRY-V2-SPEC.md) | **Current** custom protocol (layout v2, on the car since 2026-11-07): frames, sentinels, staleness, scheduler lanes; §14 wire summary |
+| [`CUSTOM-TX-SPEC.md`](CUSTOM-TX-SPEC.md) | Layout v1 — superseded, historical (last in `-061126`) |
 | [`TPMS-POLL-SPEC.md`](TPMS-POLL-SPEC.md) | `0xB7` tyre pressure: KWP2000 `21 3B` poll of the WCM every 30 s |
 | [`REQUIREMENTS.md`](REQUIREMENTS.md) | Numbered requirements (FR-xx) for stock and custom behaviour |
 | [`JEEP-WK-CAN-ID-byte-map.md`](JEEP-WK-CAN-ID-byte-map.md) | WK CAN ids/bytes and confidence levels |

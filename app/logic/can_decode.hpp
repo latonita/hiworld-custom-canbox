@@ -97,10 +97,13 @@ inline constexpr std::uint32_t kJeepCoolant     = 0x02CU;  /* coolant temp     *
  * costs no stock behaviour. */
 inline constexpr std::uint32_t kJeepFuel        = 0x159U;  /* level + gate     */
 inline constexpr std::uint32_t kJeepParkBrake   = 0x0D0U;
-inline constexpr std::uint32_t kJeepThrottle    = 0x2C0U;  /* pedal + mirror   */
+inline constexpr std::uint32_t kJeepThrottle    = 0x2C0U;  /* pedals, b4 boost */
+/* Telemetry v2 (docs/TELEMETRY-V2-SPEC.md), same no-op argument. */
+inline constexpr std::uint32_t kJeepKey         = 0x012U;  /* WCM key status   */
+inline constexpr std::uint32_t kJeepTransfer    = 0x1B2U;  /* 4WD range        */
 inline constexpr std::uint32_t kJeepCompass     = 0x1B4U;  /* sector + heading */
-/* Instantaneous fuel-flow RATE, b0:b1 big-endian, L/h = Q/160, ~100 ms while
- * the engine runs. Feeds 0xBC FLOW (spec section 10). Same no-op argument as
+/* Instantaneous fuel-flow RATE, b0:b1 big-endian, L/h = Q/128, ~100 ms while
+ * the engine runs. Feeds 0xB3 FAST (telemetry v2). Same no-op argument as
  * the others: 0x1A7 is below 0x400 and falls into decodeSwcService() in the
  * stock image, which returns at once. */
 inline constexpr std::uint32_t kJeepFuelFlow    = 0x1A7U;

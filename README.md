@@ -32,28 +32,30 @@ bus (83.333 kbit/s), written `ID bN` (CAN id, data byte). Full byte-level detail
 | Engine RPM | 1 rpm | `002` b0:b1 | `0x32` |
 | Amplifier / tone / volume, firmware version | settings; ASCII | box | `0xA6`, `0x12`, `0xF0` |
 
-### Custom telemetry block (new)
+### Custom telemetry block (layout v2, `docs/TELEMETRY-V2-SPEC.md`)
+
+The current custom protocol, on the car since 2026-11-07 (`H1N4JPF20L-071126`). Layout v1
+(`docs/CUSTOM-TX-SPEC.md`) is superseded and kept as history; `-061126` is the rollback image.
 
 | Signal | Unit / resolution | CAN source | Command |
 |---|---|---|---|
-| Heartbeat, validity bits | protocol rev + 8 "data is live" bits | box | `0xB0` |
-| Ignition (ACC), engine running, reverse, parking brake | flags | `000`, `002`, `003`, `0D0` | `0xB2` |
-| Vehicle speed | 1 km/h | `002` b2:b3 / 128 | `0xB3` |
-| Engine RPM | 1 rpm | `002` b0:b1 | `0xB3` |
-| Throttle | 0–100 % | `02C` b2 | `0xB3` |
-| Engine load | 0–100 % | derived from `1A7` and `002` | `0xB3` |
-| Coolant temperature | 1 deg C | `02C` b1 | `0xB4` |
-| Fuel level | 0–100 % | `159` b5 | `0xB4` |
-| Battery voltage | 0.1 V steps | `015` b1 | `0xB4` |
-| Outside air temperature | 0.1 deg C | `014` b4:b5 | `0xB5` |
-| Tyre pressure, 4 corners | 1 kPa, one corner per 5 s | polled from the tyre module (WCM) every 30 s | `0xB7` |
-| Fuel in tank | 0.1 L | `159` b5 | `0xB8` |
-| Odometer | 0.1 km | `014` b0:b2 | `0xBB` |
-| Compass (8-way sector + heading) | 2 deg heading, magnetic | `1B4` b0:b1 | `0xBD` |
-| Fuel flow | 0.1 L/h, 1 s average | `1A7` b0:b1 | `0xBC` |
+| Heartbeat: layout version, capability bitmap, counter | 1 Hz | box | `0xB0` |
+| Ignition state, engine running, RAP, key in, reverse, parking brake | enum + flags | `000`, `002`, `006`, `012`, `003`, `0D0` | `0xB2` S0 |
+| Brake pedal, driver belt, doors, hatch | flags | `003`, `013` | `0xB2` S1 |
+| Indicators (debounced), hazard, position, low/high beam, fogs | flags | `006` b0 | `0xB2` S2 |
+| Cruise, A/C compressor, ESP, MIL, oil/charge/ABS lamps, 4WD range, glow, water-in-fuel | flags + enum | `003`, `1B2` | `0xB2` S3/S4 |
+| Gear incl. AutoStick 1-4, source-alive bits | enum, bitmap | `003` b4 | `0xB2` S5/S6 |
+| Vehicle speed, RPM | 0.1 km/h, 1 rpm | `002` | `0xB3` (every 100 ms) |
+| Engine load, accelerator pedal | 0-100 % | `1A7`+`002`, `02C` b2 | `0xB3` |
+| Fuel flow | 0.01 L/h, 100 ms mean | `1A7` b0:b1 | `0xB3` |
+| Oil pressure, boost (MAP) | ~4 kPa/count, 1 hPa abs | `02C` b0, `2C0` b4 | `0xB3` |
+| Coolant, battery, fuel % and litres | °C+40, 0.1 V, %, 0.1 L | `02C`, `015`, `159` | `0xB4` |
+| Outside air, minutes since RUN | 0.1 °C, min | `014` b4:b5, `159` b0 | `0xB5` |
+| Tyres, one corner per 5 s: kPa, temperature, battery/leak/no-signal/low-pressure flags | | polled from the WCM every 10 s | `0xB7` |
+| Odometer, compass sector + heading | 0.1 km, 2° | `014`, `1B4` | `0xB8` |
 
-Not sent (no source on this car's bus): intake air temperature and range (always "n/a"), tyre
-temperature (always "n/a"). `0xBC` has no validity bit; `FFFF` means "no data".
+Every field has its own "n/a" sentinel and every CAN source is aged in the box (3x its period).
+Not sent (no source on this car's bus): intake air temperature, steering angle, range.
 
 ### Confirmed vs not
 
@@ -94,7 +96,7 @@ temperature (always "n/a"). `0xBC` has no validity bit; `FFFF` means "no data".
 | Intake temperature, range, tyre temperature | — | — (fields exist, always "n/a") |
 | Data validity reporting | — | ✓ per-signal bits in `0xB0` |
 | Stock protocol 3009001 | ✓ | ✓ still works; stock frames unchanged except `0x32` (gear and RPM now filled) |
-| Custom block `0xB0`–`0xBD` | — | additive; needs an app that reads it (for example Dashwheel) |
+| Custom block `0xB0`–`0xB8` (v2) | — | additive; needs an app that reads it (for example Dashwheel) |
 | Firmware updatable from the radio | ✓ | ✓ same updater, bootloader untouched |
 
 Differences to know about:

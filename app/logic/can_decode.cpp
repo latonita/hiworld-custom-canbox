@@ -440,6 +440,9 @@ void decodeProfileJeep() noexcept
                     decodeRap(d[1]);                                 /* RAP        */
                 }
             }
+            if constexpr (!cfg::kIsBenz) {
+                customLights(d, svc::can::rxDlc());                  /* lights, RAP */
+            }
             break;
         case canid::kJeepEngine:
             jeepEngine(d);                                           /* rpm        */
@@ -447,22 +450,27 @@ void decodeProfileJeep() noexcept
                 benzRpm(d);
                 benzSpeed(d);
             } else {
-                customEngine(d);
+                customEngine(d, svc::can::rxDlc());
             }
             break;
         case canid::kJeepReverse:
             jeepReverse(d);                                          /* reverse+gear*/
             if constexpr (!cfg::kIsBenz) {
-                customGear(d);
+                customCluster(d, svc::can::rxDlc());                 /* telltales  */
             }
             break;
-        case canid::kJeepDoors:      decodeDoors(d[2]);       break; /* doors      */
+        case canid::kJeepDoors:
+            decodeDoors(d[2]);                                       /* doors      */
+            if constexpr (!cfg::kIsBenz) {
+                customBody(d, svc::can::rxDlc());                    /* + belt     */
+            }
+            break;
         case canid::kJeepSteering:
             jeepSteering(d);                                         /* steering   */
             if constexpr (cfg::kIsBenz) {
                 benzVoltage(d);
             } else {
-                customVoltsIntake(d);
+                customVolts(d, svc::can::rxDlc());
             }
             break;
         /* 0x014 and 0x02C are not stock cases at all: in the stock image they
@@ -476,31 +484,35 @@ void decodeProfileJeep() noexcept
                 benzTrip(d);
                 benzAmbient(d, svc::can::rxDlc());
             } else {
-                /* TWO INDEPENDENT READERS of one frame, with separate gates and
-                 * separate validity bits: b4:b5 ambient can be unavailable while
-                 * b0:b1:b2 odometer is live, and the converse. Kept as two
-                 * functions for exactly that reason -- see custom_decode.hpp. */
-                customAmbient(d, svc::can::rxDlc());
-                customOdometer(d);
+                customTrip(d, svc::can::rxDlc());                    /* odo + air  */
             }
             break;
         case canid::kJeepCoolant:
             if constexpr (cfg::kIsBenz) { benzCoolant(d); }
-            else                        { customCoolant(d); customThrottle(d); }
+            else                        { customEngineBay(d, svc::can::rxDlc()); }
             break;
-        /* Three ids with no benz reader and no stock meaning at all. Same
-         * no-op argument as above: all three are below 0x400. */
+        /* Ids with no benz reader and no stock meaning at all. Same no-op
+         * argument as above: all are below 0x400. */
         case canid::kJeepFuel:
-            if constexpr (!cfg::kIsBenz) { customFuel(d); }
+            if constexpr (!cfg::kIsBenz) { customFuel(d, svc::can::rxDlc()); }
             break;
         case canid::kJeepParkBrake:
-            if constexpr (!cfg::kIsBenz) { customParkBrake(d); }
+            if constexpr (!cfg::kIsBenz) { customParkBrake(d, svc::can::rxDlc()); }
             break;
         case canid::kJeepCompass:
-            if constexpr (!cfg::kIsBenz) { customCompass(d); }
+            if constexpr (!cfg::kIsBenz) { customCompass(d, svc::can::rxDlc()); }
             break;
         case canid::kJeepFuelFlow:
-            if constexpr (!cfg::kIsBenz) { customFuelFlow(d); }
+            if constexpr (!cfg::kIsBenz) { customFuelFlow(d, svc::can::rxDlc()); }
+            break;
+        case canid::kJeepKey:
+            if constexpr (!cfg::kIsBenz) { customKey(d, svc::can::rxDlc()); }
+            break;
+        case canid::kJeepTransfer:
+            if constexpr (!cfg::kIsBenz) { customTransfer(d, svc::can::rxDlc()); }
+            break;
+        case canid::kJeepThrottle:
+            if constexpr (!cfg::kIsBenz) { customBoost(d, svc::can::rxDlc()); }
             break;
         case canid::kJeepIllum:      decodeIllumLevel(d[1]);  break; /* illum + %  */
         case canid::kJeepSwcButtons: decodeSwcButtons(d);     break; /* SWC keys   */

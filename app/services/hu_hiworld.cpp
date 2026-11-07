@@ -52,12 +52,12 @@ volatile std::uint8_t* buf73() noexcept { return ram::app().buf73; }
  * back over SWD to prove the flashed image booted. */
 volatile std::uint8_t* bufF0() noexcept { return ram::g_versionString; }
 
-/* ---- the custom 0xB0-0xB8 telemetry block -------------------------------
+/* ---- the custom 0xB0-0xB8 telemetry block, layout v2 --------------------
  * NOT stock. Standalone objects in ram::AppRam::customFrames, deliberately NOT
  * windows onto ram::VehicleState: that block's relative offsets ARE the stock
  * Hiworld protocol and cannot absorb a field the stock protocol does not have.
  * Filled by logic::customPublish() from the 8 ms task. See
- * docs/CUSTOM-TX-SPEC.md. */
+ * docs/TELEMETRY-V2-SPEC.md. */
 volatile std::uint8_t* bufB0() noexcept { return ram::app().customFrames.b0; }
 volatile std::uint8_t* bufB2() noexcept { return ram::app().customFrames.b2; }
 volatile std::uint8_t* bufB3() noexcept { return ram::app().customFrames.b3; }
@@ -65,9 +65,6 @@ volatile std::uint8_t* bufB4() noexcept { return ram::app().customFrames.b4; }
 volatile std::uint8_t* bufB5() noexcept { return ram::app().customFrames.b5; }
 volatile std::uint8_t* bufB7() noexcept { return ram::app().customFrames.b7; }
 volatile std::uint8_t* bufB8() noexcept { return ram::app().customFrames.b8; }
-volatile std::uint8_t* bufBB() noexcept { return ram::app().customFrames.bB; }
-volatile std::uint8_t* bufBD() noexcept { return ram::app().customFrames.bD; }
-volatile std::uint8_t* bufBC() noexcept { return ram::app().customFrames.bC; }
 
 /* ---- shadows: ram::AppRam::uartShadows, the old bare literals ------------ */
 volatile std::uint8_t* shadow72() noexcept { return ram::app().uartShadows.msg72; }
@@ -83,9 +80,6 @@ volatile std::uint8_t* shadowB4() noexcept { return ram::app().uartShadows.msgB4
 volatile std::uint8_t* shadowB5() noexcept { return ram::app().uartShadows.msgB5; }
 volatile std::uint8_t* shadowB7() noexcept { return ram::app().uartShadows.msgB7; }
 volatile std::uint8_t* shadowB8() noexcept { return ram::app().uartShadows.msgB8; }
-volatile std::uint8_t* shadowBB() noexcept { return ram::app().uartShadows.msgBB; }
-volatile std::uint8_t* shadowBD() noexcept { return ram::app().uartShadows.msgBD; }
-volatile std::uint8_t* shadowBC() noexcept { return ram::app().uartShadows.msgBC; }
 
 /* The non-payload bytes THIS dialect puts on the wire: AA 55 LEN CMD .. CKS.
  * Spelled out rather than read from cfg::kUartFrameOverhead, which follows the
@@ -98,36 +92,28 @@ constexpr std::size_t kWireOverhead = 5U;
 /* --- flash 0x08009F2C --- box -> head unit, emitted round-robin in order.
  *
  * The first SIX rows are the stock table, in the stock transmit order; a
- * reader diffing this against Ghidra should find them unchanged. The last six
- * are the custom telemetry block and have no stock counterpart at all --
- * docs/CUSTOM-TX-SPEC.md section 2 says which commands in 0xB0-0xBF are built
- * and, as importantly, which are deliberately NOT (0xB1 VERSION and 0xB6 BODY
- * are pure duplicates of stock 0xF0 and 0x12; 0xB7 TPMS and 0xB9 KEY have no
- * source on this car). Those four stay RESERVED: do not fill the gap in the
- * numbering just because it looks untidy -- and the same goes for the gaps at
- * 0xBA and 0xBE (and 0xBF), which ../canbus-to-canbox-signal-map.md section 9
- * has already allocated to LIGHTING, BODY2 and a spare. 0xBB and 0xBD are not
- * free choices either; they are that allocation. 0xBC was reserved for GEAR
- * there and struck out (gear is already in stock 0x32), which freed the number
- * for FLOW, the last row -- appended, so the rows above keep their indices. */
+ * reader diffing this against Ghidra should find them unchanged except for
+ * 0x32's compare length (lane note in hu_dialect.hpp). The last seven are the
+ * custom telemetry block, layout v2 (docs/TELEMETRY-V2-SPEC.md), which has no
+ * stock counterpart at all. 0xB1, 0xB6 and 0xB9-0xBF are never emitted.
+ * Nothing may address a row by a hard-coded index: find it by command. */
 extern constexpr TxDesc kTxTable[kSlots] = {
-    { 0x72U, 14U, &buf72, &shadow72 },  /* flags, SWC key, illum, steering   */
-    { 0xA6U,  8U, &bufA6, &shadowA6 },  /* amplifier level + tone alias      */
-    { 0x73U,  8U, &buf73, &shadow73 },  /* always zero                       */
-    { 0xF0U, 17U, &bufF0, &shadowF0 },  /* the version string                */
-    { 0x12U, 10U, &buf12, &shadow12 },  /* doors, volume, tone               */
-    { 0x32U, 14U, &buf32, &shadow32 },  /* gear, rpm                         */
-    /* ---- custom telemetry, jeep builds only (docs/CUSTOM-TX-SPEC.md) ---- */
-    { 0xB0U,  2U, &bufB0, &shadowB0 },  /* heartbeat + validity mask         */
-    { 0xB2U,  1U, &bufB2, &shadowB2 },  /* ACC, engine, reverse, park brake  */
-    { 0xB3U,  6U, &bufB3, &shadowB3 },  /* speed, rpm, load, throttle        */
-    { 0xB4U,  5U, &bufB4, &shadowB4 },  /* coolant, intake, fuel %, volts    */
-    { 0xB5U,  2U, &bufB5, &shadowB5 },  /* outside air                       */
-    { 0xB7U,  5U, &bufB7, &shadowB7 },  /* ONE tyre, rotating through corners */
-    { 0xB8U,  4U, &bufB8, &shadowB8 },  /* fuel litres, range                */
-    { 0xBBU,  3U, &bufBB, &shadowBB },  /* odometer, 0.1 km                  */
-    { 0xBDU,  3U, &bufBD, &shadowBD },  /* compass sector + heading          */
-    { 0xBCU,  2U, &bufBC, &shadowBC },  /* fuel flow, 0.1 L/h (appended last) */
+    { 0x72U, 14U, &buf72, &shadow72, kLaneSlow, 0U },  /* flags, SWC, illum, steering */
+    { 0xA6U,  8U, &bufA6, &shadowA6, kLaneSlow, 0U },  /* amplifier level + tone alias */
+    { 0x73U,  8U, &buf73, &shadow73, kLaneSlow, 0U },  /* always zero                */
+    { 0xF0U, 17U, &bufF0, &shadowF0, kLaneSlow, 0U },  /* the version string         */
+    { 0x12U, 10U, &buf12, &shadow12, kLaneSlow, 0U },  /* doors, volume, tone        */
+    { 0x32U, 14U, &buf32, &shadow32, kLaneSlow, 2U },  /* gear; rpm rides the cycle  */
+    /* ---- custom telemetry v2, jeep builds only ---- */
+    { 0xB0U,  4U, &bufB0, &shadowB0, kLaneRequest, 0U }, /* heartbeat, 1 Hz request */
+    /* FAST before STATE: the priority lane serves rows in table order, and
+     * FAST is the 100 ms liveness frame, so it never waits behind STATE. */
+    { 0xB3U, 11U, &bufB3, &shadowB3, kLanePrio, 0U },  /* FAST: every 100 ms        */
+    { 0xB2U,  7U, &bufB2, &shadowB2, kLanePrio, 0U },  /* STATE: bits + source-alive */
+    { 0xB4U,  5U, &bufB4, &shadowB4, kLaneSlow, 0U },  /* coolant, volts, fuel      */
+    { 0xB5U,  3U, &bufB5, &shadowB5, kLaneSlow, 0U },  /* outside air, minutes off  */
+    { 0xB7U,  5U, &bufB7, &shadowB7, kLaneSlow, 0U },  /* ONE tyre, rotating        */
+    { 0xB8U,  6U, &bufB8, &shadowB8, kLaneSlow, 0U },  /* odometer, compass         */
 };
 
 /* ===========================================================================
@@ -153,15 +139,12 @@ static_assert(kTxTable[3].len == sizeof(ram::UartShadows::msgF0), "0xF0 shadow")
 static_assert(kTxTable[4].len == sizeof(ram::UartShadows::msg12), "0x12 shadow");
 static_assert(kTxTable[5].len == sizeof(ram::UartShadows::msg32), "0x32 shadow");
 static_assert(kTxTable[6].len == sizeof(ram::UartShadows::msgB0), "0xB0 shadow");
-static_assert(kTxTable[7].len == sizeof(ram::UartShadows::msgB2), "0xB2 shadow");
-static_assert(kTxTable[8].len == sizeof(ram::UartShadows::msgB3), "0xB3 shadow");
+static_assert(kTxTable[7].len == sizeof(ram::UartShadows::msgB3), "0xB3 shadow");
+static_assert(kTxTable[8].len == sizeof(ram::UartShadows::msgB2), "0xB2 shadow");
 static_assert(kTxTable[9].len == sizeof(ram::UartShadows::msgB4), "0xB4 shadow");
 static_assert(kTxTable[10].len == sizeof(ram::UartShadows::msgB5), "0xB5 shadow");
 static_assert(kTxTable[11].len == sizeof(ram::UartShadows::msgB7), "0xB7 shadow");
 static_assert(kTxTable[12].len == sizeof(ram::UartShadows::msgB8), "0xB8 shadow");
-static_assert(kTxTable[13].len == sizeof(ram::UartShadows::msgBB), "0xBB shadow");
-static_assert(kTxTable[14].len == sizeof(ram::UartShadows::msgBD), "0xBD shadow");
-static_assert(kTxTable[15].len == sizeof(ram::UartShadows::msgBC), "0xBC shadow");
 
 /* Row -> live buffer. The four VehicleState rows must match their window
  * lengths; the other two are standalone objects. */
@@ -172,18 +155,46 @@ static_assert(kTxTable[3].len == cfg::kVersionLength,          "0xF0 buffer");
 static_assert(kTxTable[4].len == ram::VehicleState::kWin12Len, "0x12 window");
 static_assert(kTxTable[5].len == ram::VehicleState::kWin32Len, "0x32 window");
 
-/* ...and the six custom rows against their standalone payload buffers. These
- * are NOT VehicleState windows -- see the note on the buffer accessors. */
+/* ...and the seven custom rows against their standalone payload buffers.
+ * These are NOT VehicleState windows -- see the note on the buffer accessors. */
 static_assert(kTxTable[6].len == sizeof(ram::CustomFrames::b0), "0xB0 buffer");
-static_assert(kTxTable[7].len == sizeof(ram::CustomFrames::b2), "0xB2 buffer");
-static_assert(kTxTable[8].len == sizeof(ram::CustomFrames::b3), "0xB3 buffer");
+static_assert(kTxTable[7].len == sizeof(ram::CustomFrames::b3), "0xB3 buffer");
+static_assert(kTxTable[8].len == sizeof(ram::CustomFrames::b2), "0xB2 buffer");
 static_assert(kTxTable[9].len == sizeof(ram::CustomFrames::b4), "0xB4 buffer");
 static_assert(kTxTable[10].len == sizeof(ram::CustomFrames::b5), "0xB5 buffer");
 static_assert(kTxTable[11].len == sizeof(ram::CustomFrames::b7), "0xB7 buffer");
 static_assert(kTxTable[12].len == sizeof(ram::CustomFrames::b8), "0xB8 buffer");
-static_assert(kTxTable[13].len == sizeof(ram::CustomFrames::bB), "0xBB buffer");
-static_assert(kTxTable[14].len == sizeof(ram::CustomFrames::bD), "0xBD buffer");
-static_assert(kTxTable[15].len == sizeof(ram::CustomFrames::bC), "0xBC buffer");
+
+/* The commands themselves, pinned so a reshuffle is a deliberate edit. */
+static_assert(kTxTable[6].cmd == 0xB0U && kTxTable[7].cmd == 0xB3U
+              && kTxTable[8].cmd == 0xB2U && kTxTable[9].cmd == 0xB4U
+              && kTxTable[10].cmd == 0xB5U && kTxTable[11].cmd == 0xB7U
+              && kTxTable[12].cmd == 0xB8U, "custom block commands");
+
+/* A compare length can only shorten the compare, never run past the row. */
+constexpr bool cmpLengthsFit() noexcept
+{
+    for (std::uint8_t i = 0U; i < kSlots; ++i) {
+        if (kTxTable[i].cmp > kTxTable[i].len) {
+            return false;
+        }
+    }
+    return true;
+}
+static_assert(cmpLengthsFit(), "a row compares more bytes than it has");
+
+/* Telemetry v2 never emits these (docs/TELEMETRY-V2-SPEC.md section 2). */
+constexpr bool noRetiredCommands() noexcept
+{
+    for (std::uint8_t i = 0U; i < kSlots; ++i) {
+        const std::uint8_t c = kTxTable[i].cmd;
+        if (c == 0xB1U || c == 0xB6U || (c >= 0xB9U && c <= 0xBFU)) {
+            return false;
+        }
+    }
+    return true;
+}
+static_assert(noRetiredCommands(), "0xB1, 0xB6 and 0xB9-0xBF are never emitted");
 
 /* The reserved commands must never appear in the table. 0xE0 is the head
  * unit's own reboot trigger, 0xFE/0xFF are ACK/NAK and 0xD2 is cluster text;

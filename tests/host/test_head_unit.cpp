@@ -554,7 +554,7 @@ TEST(head_unit_busy_link_still_resends_unchanged_slots)
     CHECK(seen[0xF0]);     /* never changes after the first sweep */
     CHECK(seen[0x73]);
     CHECK(seen[0xA6]);
-    CHECK(seen[0xBC]);     /* last slot in the table */
+    CHECK(seen[0xB8]);     /* last slot in the table */
     CHECK(fast * 2U > bound);   /* fast slots still get over half the passes */
 }
 

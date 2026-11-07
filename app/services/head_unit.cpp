@@ -173,21 +173,58 @@ std::uint8_t pendingRequest() noexcept
     volatile std::uint8_t* const st = slotState();
 
     for (std::uint8_t i = 0U; i < kTxSlots; ++i) {
-        if (st[i] == kSlotRequest) {
+        /* Priority rows use kSlotRequest too, but they belong to the lane
+         * above the 48 ms boundary and are never served from here. */
+        if ((st[i] == kSlotRequest) && (kTxTable[i].lane != kLanePrio)) {
             return i;
         }
     }
     return kTxSlots;
 }
 
+/* The first queued PRIORITY row, in table order, or kTxSlots if none. Not
+ * stock; telemetry v2 (docs/TELEMETRY-V2-SPEC.md section 7.2). */
+std::uint8_t pendingPriority() noexcept
+{
+    volatile std::uint8_t* const st = slotState();
+
+    for (std::uint8_t i = 0U; i < kTxSlots; ++i) {
+        if ((kTxTable[i].lane == kLanePrio) && (st[i] == kSlotRequest)) {
+            return i;
+        }
+    }
+    return kTxSlots;
+}
+
+/* Bytes the round-robin compares for change detection. */
+inline std::uint8_t compareLen(const TxDesc& e) noexcept
+{
+    return (e.cmp == 0U) ? e.len : e.cmp;
+}
+
 /* ---- the slot rotation ---------------------------------------------------
  * util_wrap_index(idx, +1, hi = 5, lo = 0, wrap_mode = 0). The stock
  * wrap_mode's sense is the opposite of its name: 0 means WRAP, which is
  * svc::bytes::wrapIndex's `clamp == false`. See bytes.hpp. */
-inline std::uint8_t nextSlot(std::uint8_t idx) noexcept
+inline std::uint8_t wrapNext(std::uint8_t idx) noexcept
 {
     return svc::bytes::wrapIndex(static_cast<int>(idx), 1,
                                  static_cast<int>(kTxSlots) - 1, 0, false);
+}
+
+/* The next SLOW row after idx (telemetry v2: the keep-alive and the busy
+ * refresh walk only the slow lane). Bounded at one lap. With every row slow
+ * -- the stock table, the Benz table -- this is exactly wrapNext(). */
+inline std::uint8_t nextSlot(std::uint8_t idx) noexcept
+{
+    std::uint8_t n = idx;
+    for (std::uint8_t i = 0U; i < kTxSlots; ++i) {
+        n = wrapNext(n);
+        if (kTxTable[n].lane == kLaneSlow) {
+            return n;
+        }
+    }
+    return n;
 }
 
 /* ============================================================================
@@ -338,11 +375,15 @@ void roundRobin() noexcept
     do {
         const TxDesc& e = kTxTable[r.uartTxSlotIdx];
 
-        if (svc::bytes::differ(e.shadow(), e.buf(), e.len)) {
+        /* Only slow rows are change-driven; priority and request rows have
+         * their own triggers (telemetry v2). The compare may be shorter than
+         * the row (stock 0x32), the shadow copy never is. */
+        if ((e.lane == kLaneSlow)
+            && svc::bytes::differ(e.shadow(), e.buf(), compareLen(e))) {
             svc::bytes::copy(e.shadow(), e.buf(), e.len);
             return;
         }
-        r.uartTxSlotIdx = nextSlot(r.uartTxSlotIdx);
+        r.uartTxSlotIdx = wrapNext(r.uartTxSlotIdx);
     } while (r.uartTxSlotIdx != start);
 
     r.uartTxSlotIdx = kTxSlots;   /* sentinel: nothing to send */
@@ -395,6 +436,28 @@ void txSched() noexcept
         q[kAckQueueTail] =
             static_cast<std::uint8_t>((static_cast<std::size_t>(qt) + 1U)
                                       % kAckQueueEntries);
+    }
+
+    /* ---- the PRIORITY lane (telemetry v2; NOT stock) ----------------------
+     * docs/TELEMETRY-V2-SPEC.md section 7.2. One queued priority frame per
+     * pass, ahead of the 48 ms boundary, and RETURN: the tick is left as it
+     * is, so a boundary that fell on this pass fires on the next free one
+     * (uartTxTick only grows past 6, it never wraps in practice: at most two
+     * priority frames are queued per 100 ms). The busy re-check covers the
+     * ACK just above, which may have claimed the transmitter this pass.
+     * Compiled out of a benz image, whose table has no priority rows. */
+    if constexpr (!cfg::kIsBenz) {
+        const std::uint8_t p = pendingPriority();
+        if ((p < kTxSlots) && (f[kFbTxBusy] == 0U)) {
+            const TxDesc& e = kTxTable[p];
+            svc::bytes::copy(e.shadow(), e.buf(), e.len);
+            buildFrame(p);
+            st[p] = kSlotIdle;
+            return;
+        }
+        if (f[kFbTxBusy] != 0U) {
+            return;
+        }
     }
 
     if (r.uartTxTick <= static_cast<std::uint8_t>(kTicksPerFrame - 1U)) {
@@ -550,6 +613,21 @@ void requestSend(std::uint8_t cmd) noexcept
     }
     /* Not in this dialect's table. Deliberately silent: the caller is
      * protocol-agnostic and a benz image genuinely has no 0xB0 row. */
+}
+
+/* ============================================================================
+ * requestPriority -- queue a kLanePrio row (see head_unit.hpp). NOT stock.
+ * ==========================================================================*/
+void requestPriority(std::uint8_t cmd) noexcept
+{
+    volatile std::uint8_t* const st = slotState();
+
+    for (std::uint8_t i = 0U; i < kTxSlots; ++i) {
+        if ((kTxTable[i].cmd == cmd) && (kTxTable[i].lane == kLanePrio)) {
+            st[i] = kSlotRequest;
+            return;
+        }
+    }
 }
 
 /* ============================================================================

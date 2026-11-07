@@ -63,11 +63,37 @@ inline volatile std::uint8_t* rxf() noexcept { return ram::app().uartRxFrame; }
  * ========================================================================= */
 using BufFn = volatile std::uint8_t* (*)() noexcept;
 
+/* ---------------------------------------------------------------------------
+ * LANES (not stock; telemetry v2, docs/TELEMETRY-V2-SPEC.md section 7).
+ *
+ *   kLaneSlow     the stock 48 ms change-driven round-robin, its keep-alive
+ *                 and its busy refresh. Every stock row, every Benz row.
+ *   kLanePrio     sent ONLY when queued by svc::hu::requestPriority(), one
+ *                 frame per 8 ms pass, ahead of the 48 ms boundary. The
+ *                 round-robin, the keep-alive and the refresh never touch it.
+ *   kLaneRequest  sent ONLY on svc::hu::requestSend() (the 1 Hz heartbeat);
+ *                 also skipped by the round-robin and the keep-alive, so it
+ *                 is not sent twice a second.
+ *
+ * `cmp` is the number of leading payload bytes the round-robin compares for
+ * change detection; 0 means all `len`. Stock 0x32 uses 2 (the gear byte and
+ * the one before it) so a moving rpm does not claim a 48 ms slot every pass;
+ * the whole payload still goes out whenever the row is sent.
+ *
+ * Both members have defaults, so a row written { cmd, len, buf, shadow } --
+ * every Benz row -- is a slow row compared in full, exactly as before.
+ * ------------------------------------------------------------------------- */
+inline constexpr std::uint8_t kLaneSlow    = 0U;
+inline constexpr std::uint8_t kLanePrio    = 1U;
+inline constexpr std::uint8_t kLaneRequest = 2U;
+
 struct TxDesc {
     std::uint8_t cmd;
     std::uint8_t len;
     BufFn        buf;     /* live payload source                            */
     BufFn        shadow;  /* last-sent copy, for change detection           */
+    std::uint8_t lane = kLaneSlow;
+    std::uint8_t cmp  = 0U;   /* bytes compared; 0 = len                    */
 };
 
 namespace detail {
@@ -83,13 +109,13 @@ void rxDispatch() noexcept;
 /* ---- the stock Hiworld dialect, hu_hiworld.cpp -------------------------- */
 namespace hiworld {
 
-/* Sixteen: the six stock slots from the flash table at 0x08009F2C, plus the
- * ten of the custom 0xB0-0xBD telemetry block (docs/CUSTOM-TX-SPEC.md,
- * docs/TPMS-POLL-SPEC.md for 0xB7, spec section 10 for 0xBC). A
+/* Thirteen: the six stock slots from the flash table at 0x08009F2C, plus the
+ * seven of the custom telemetry block v2 (docs/TELEMETRY-V2-SPEC.md,
+ * docs/TPMS-POLL-SPEC.md for 0xB7). A
  * static_assert in head_unit.cpp couples this to cfg::kTxSlotCount, which is
  * what ram::AppRam::uartSlotState is sized from -- change one and the build
  * stops rather than the scheduler corrupting its own index. */
-inline constexpr std::uint8_t kSlots = 16U;
+inline constexpr std::uint8_t kSlots = 13U;
 
 extern const TxDesc kTxTable[];
 

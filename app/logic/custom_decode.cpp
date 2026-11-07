@@ -3,15 +3,20 @@
  *
  * Evidence for every identifier, byte, scale and sentinel below:
  * docs/JEEP-WK-CAN-ID-byte-map.md, quoted per function. The destination side
- * -- why these units and why these clamps -- is docs/CUSTOM-TX-SPEC.md
- * section 3 and custom_tx.hpp.
+ * -- units, sentinels, cadences -- is docs/TELEMETRY-V2-SPEC.md.
+ *
+ * THE SHAPE OF EVERY DECODER HERE (layout v2). A decoder checks the DLC covers
+ * what it reads, copies the raw bytes it owns into ram::CustomSignals and
+ * STAMPS ITS SOURCE (lastMs + seen bit). It decides nothing about validity:
+ * the 100 ms producer in custom_tx.cpp ages every source and writes a
+ * sentinel for a dead one. A frame that fails a decoder's own gate (short,
+ * out of range) is not stamped, so a source that only ever sends garbage goes
+ * stale on its own.
  *
  * THIS TU IS COMPILED AND TYPE-CHECKED IN EVERY BUILD -- tools/build.py and
  * tools/test.py glob app/logic/, so a benz image compiles these decoders too.
  * The calls are then dropped by `if constexpr (!cfg::kIsBenz)` at the dispatch
- * site and the code itself by --gc-sections at link, which is the point: a
- * mistake here shows up on every build rather than waiting for someone to
- * build the other variant.
+ * site and the code itself by --gc-sections at link.
  * ==========================================================================*/
 
 #include "custom_decode.hpp"
@@ -28,129 +33,139 @@ namespace logic {
 namespace {
 
 /* ---------------------------------------------------------------------------
- * The 0x000 b0 ignition ladder. Evidence: id 0x000, Confirmed.
- *     00 wake/uninitialised   01 off   63 ACC   85 ignition ON   A9 crank
- * Anything else is left alone rather than guessed at: the ladder above covers
- * every value in every capture, so an unknown byte means the capture set is
- * incomplete, not that the key turned off.
+ * Source ages: 3 x the nominal period of each id (spec section 6, byte map
+ * periods). Indexed by ram::kSrc*. 0x1A7 slows to ~400 ms at key-off, hence
+ * 1.2 s rather than 300 ms.
  * ------------------------------------------------------------------------- */
-constexpr std::uint8_t kIgnWake  = 0x00U;
-constexpr std::uint8_t kIgnOff   = 0x01U;
-constexpr std::uint8_t kIgnAcc   = 0x63U;
-constexpr std::uint8_t kIgnRun   = 0x85U;
-constexpr std::uint8_t kIgnCrank = 0xA9U;
+constexpr std::uint16_t kSrcLimitMs[ram::kSrcCount] = {
+    300U,    /* 000  100 ms   */
+    150U,    /* 002   50 ms   */
+    1400U,   /* 003 ~450 ms   */
+    300U,    /* 006  100 ms   */
+    3000U,   /* 012   ~1 s    */
+    1500U,   /* 013  500 ms   */
+    300U,    /* 014  100 ms   */
+    300U,    /* 015  100 ms   */
+    1500U,   /* 02C ~500 ms   */
+    3500U,   /* 0D0 ~1.15 s   */
+    3000U,   /* 159   ~1 s    */
+    1200U,   /* 1A7  100 / 400 ms */
+    4400U,   /* 1B2 ~1.45 s   */
+    1500U,   /* 1B4  500 ms   */
+    300U,    /* 2C0  100 ms   */
+};
 
 /* ---------------------------------------------------------------------------
- * The engine-running hysteresis band. CUSTOM-TX-SPEC.md section 5.
- *
- * Neither rpm nor the ignition byte works alone: grouped by ignition state
- * over jeep-can-b-logs/playback.log, CRANK (0xA9) reaches 410 rpm and RUN
- * (0x85) also shows 0. Idle on this 3.0 CRD is 577-580, so 300/500 is a clean
- * gap between crank-max and idle-min.
- *
- * Asymmetric ON PURPOSE: slow to claim the engine is running (three
- * consecutive 0x002 frames, 150 ms at the 50 ms cadence), instant to give up.
- * A false "running" drives a consumer to show a live engine on a dead one; a
- * false "stopped" only blanks a gauge for 150 ms.
+ * The 0x000 b0 ignition ladder. Evidence: id 0x000, Confirmed.
+ *     00 no key   01 key in at OFF   63 ACC   85 ON/run   A9 crank
  * ------------------------------------------------------------------------- */
-constexpr std::uint16_t kRunSetRpm      = 500U;
-constexpr std::uint16_t kRunClearRpm    = 300U;
+constexpr std::uint8_t kIgnNoKey  = 0x00U;
+constexpr std::uint8_t kIgnKeyOff = 0x01U;
+constexpr std::uint8_t kIgnAcc    = 0x63U;
+constexpr std::uint8_t kIgnRun    = 0x85U;
+constexpr std::uint8_t kIgnCrank  = 0xA9U;
+
+/* ---------------------------------------------------------------------------
+ * The engine-running hysteresis band. Spec section 5 (unchanged from v1).
+ * Neither rpm nor the ignition byte works alone: CRANK (0xA9) reaches 410 rpm
+ * and RUN (0x85) also shows 0. Idle on this 3.0 CRD is 577-580, so 300/500 is
+ * a clean gap. Slow to claim "running" (three consecutive 0x002 frames,
+ * 150 ms), instant to give up.
+ * ------------------------------------------------------------------------- */
+constexpr std::uint16_t kRunSetRpm       = 500U;
+constexpr std::uint16_t kRunClearRpm     = 300U;
 constexpr std::uint8_t  kRunStreakNeeded = 3U;
 
-/* 0x1A7 fuel flow (spec section 10): the averaging window, the longest
- * inter-frame gap still integrated (three missed 100 ms frames), and the top
- * of the published range -- 0xFFFF is the sentinel, so 0xFFFE is the ceiling.
- * It is DEFENSIVE: Q <= 0xFFFE gives at most 5120 deci-L/h (512.0 L/h), so the
- * clamp cannot bind today; it is there so a future change to the divisor can
- * never make a reading collide with the sentinel. */
-constexpr std::uint32_t kFlowWindowMs = 1000U;
-constexpr std::uint32_t kFlowMaxGapMs = 300U;
-constexpr std::uint32_t kFlowMaxDeci  = 0xFFFEU;
+/* Indicator hold, spec section 3.2.1. Longer than the longest flasher off
+ * phase (60 flashes/min = 500 ms) plus one 100 ms 0x006 sample plus margin.
+ * It works whether 006 b0 bits 0/1 PULSE with the flasher or HOLD while the
+ * stalk is out: either way every frame with the bit set reloads the timer and
+ * the state clears 700-800 ms after the last one. Unmeasured; one constant. */
+constexpr std::uint32_t kIndicatorHoldMs = 700U;
+constexpr std::uint8_t  kTurnLeftBit  = 0x01U;   /* 006 b0 bit 0 */
+constexpr std::uint8_t  kTurnRightBit = 0x02U;   /* 006 b0 bit 1 */
 
-/* 0x003 b4 is the ASCII code of the character the cluster displays. */
-constexpr std::uint8_t kAsciiR = 0x52U;   /* 'R' */
-
-/* 0x0D0 b0 bit 7. Evidence: id 0x0D0, Confirmed by the 2026-10-13 stationary
- * test (04 00 released -> 84 00 lever pulled). MASK BIT 7 ONLY: the 0x04
- * baseline bit was set throughout that session with the brake released, so
- * testing the whole byte would report the brake permanently engaged. */
-constexpr std::uint8_t kParkBrakeBit = 0x80U;
-
-/* 0x02C b2, accelerator pedal: 0.4 %/count, 250 = 100 %. Evidence: byte map,
- * confirmed (r = 0.9995 against the TCM pedal reading). So pct = b2 * 2 / 5,
- * done as (2 * b2 + 2) / 5 for round-half-up. */
-constexpr std::uint32_t kPedalNum   = 2U;
-constexpr std::uint32_t kPedalDen   = 5U;
-constexpr std::uint32_t kPedalRound = 2U;
-
-/* Engine load from the injection quantity (byte map, "Derived values"):
- *   inj_mm3_stroke = 43.4 * Q / rpm,  load % = 100 * inj / 90
- *   => load % = 4340 * Q / (90 * rpm), rounded half-up in integers.
- * Below kLoadMinRpm (cranking / stalling) the quotient is meaningless. Q must
- * also be fresh: 0x1A7 runs at ~100 ms, so older than kLoadMaxAgeMs means the
- * stream stopped. 4340 * 65534 = 284 M, inside u32. */
-constexpr std::uint32_t kLoadNum      = 4340U;
-constexpr std::uint32_t kLoadDen      = 90U;
-constexpr std::uint16_t kLoadMinRpm   = 300U;
-constexpr std::uint32_t kLoadMaxAgeMs = 500U;
-
-/* 0x159 b4 is a hard validity gate: b4 == 1 <-> b5 == 0xFF is not a reading.
- * True with zero exceptions across every log in the repo. */
+/* 0x159 b4 is a hard validity gate: b4 == 1 <-> b5 == 0xFF is not a reading. */
 constexpr std::uint8_t kFuelGateInvalid = 0x01U;
-
-/* b5 is litres at 0.5 L/count, and the tank is 77.6 L = 155.2 counts. Percent
- * is therefore raw / 155.2 * 100 = raw * 0.6443, done in integer with a
- * round-half-up rather than a truncation. The widest intermediate is
- * 255 * 6443 = 1 642 965, comfortably inside 32 bits. */
-constexpr std::uint32_t kFuelPctNum   = 6443U;
-constexpr std::uint32_t kFuelPctDen   = 10000U;
-constexpr std::uint32_t kFuelPctRound = kFuelPctDen / 2U;
-constexpr std::uint8_t  kPercentMax   = 100U;
-
-/* b5 is 0.5 L/count and the 0xB8 field is decilitres, so x5 exactly. */
+/* b5 is 0.5 L/count over a 77.6 L tank: % = b5 * 50 / 77.6 = b5 * 500 / 776,
+ * rounded half up. 255 * 500 = 127 500, no overflow anywhere. */
+constexpr std::uint32_t kFuelPctNum = 500U;
+constexpr std::uint32_t kFuelPctDen = 776U;
+constexpr std::uint8_t  kPercentMax = 100U;
 constexpr std::uint16_t kFuelDeciPerCount = 5U;
 
-/* ---------------------------------------------------------------------------
- * Temperatures on this block are one byte biased +40, and 0xFF IS THE RESERVED
- * "not available" CODE for every one of them (CUSTOM-TX-SPEC.md section 3,
- * amended 2026-10-21; the consumer decodes it as
- * XyautoProtocol.TEMP_NOT_AVAILABLE). The cost is that exactly 215 degC is
- * unrepresentable -- the usable top is 0xFE = 214 degC, which no coolant or
- * intake reaches.
- *
- * Two separate reasons a source byte at or above 0x80 is rejected, and the
- * tighter one is what the constant encodes:
- *   - 0xFF + 40 TRUNCATES to 0x27, which decodes as -1 degC: a plausible-
- *     looking lie, and the trap that makes blind biasing wrong. Anything from
- *     0xD7 up biases into or past the reserved code.
- *   - a byte at or above 0x80 would be a two's-complement negative, an
- *     encoding never observed on this car.
- * 0x80 covers both, so that is the gate. The sample is published as the
- * reserved code rather than held: an unavailable sensor must read "unknown",
- * not "whatever it said last".
- * ------------------------------------------------------------------------- */
-/* 0x015 b1 is 0.1 V/count and the 0xB4 field is centivolts: x10 exactly. */
-constexpr std::uint16_t kCentiVoltsPerCount = 10U;
-
-/* 0x002 b2:b3 is km/h x128. Rounded, not truncated -- the +64 is half an LSB
- * of the destination. */
-constexpr std::uint16_t kSpeedShift = 7U;    /* /128 */
-constexpr std::uint16_t kSpeedHalf  = 64U;
-
-/* ---------------------------------------------------------------------------
- * 0x1B4, the compass. Evidence: id 0x1B4, direction and heading Confirmed
- * against two independent sessions (2026 n=2953, 2019 n=1584).
- *
- * b0 is an 8-way sector enum 0=N..7=NW and b1 is magnetic heading at
- * 2 deg/count, so the only legal values are b0 <= 7 and b1 <= 179 (358 deg).
- * The gate below tests BOTH TOGETHER and rejects the sample whole: a b0 of 9
- * means the byte no longer means what the table says, and masking it to 1
- * would confidently publish "NE".
- * ------------------------------------------------------------------------- */
+/* 0x1B4: b0 sector 0..7, b1 heading 0..179 (x2 deg). Gated together. */
 constexpr std::uint8_t  kCompassSectorMax = 7U;
-constexpr std::uint8_t  kHeadingCountMax  = 179U;   /* 179 * 2 = 358 deg */
+constexpr std::uint8_t  kHeadingCountMax  = 179U;
 constexpr std::uint16_t kDegPerCount      = 2U;
 
+/* The longest sample-and-hold interval the flow integral accepts: the 0x1A7
+ * staleness limit. */
+constexpr std::uint32_t kFlowHoldMs = 1200U;
+
+/* Minimum DLCs: the highest byte each decoder reads, plus one. A shorter frame
+ * is rejected whole and NOT stamped. */
+constexpr std::uint8_t kDlc002 = 4U;
+constexpr std::uint8_t kDlc003 = 5U;
+constexpr std::uint8_t kDlc006 = 2U;
+constexpr std::uint8_t kDlc012 = 3U;
+constexpr std::uint8_t kDlc013 = 3U;
+constexpr std::uint8_t kDlc014 = 3U;
+constexpr std::uint8_t kDlc015 = 2U;
+constexpr std::uint8_t kDlc02C = 3U;
+constexpr std::uint8_t kDlc0D0 = 1U;
+constexpr std::uint8_t kDlc159 = 6U;
+constexpr std::uint8_t kDlc1A7 = 2U;
+constexpr std::uint8_t kDlc1B2 = 2U;
+constexpr std::uint8_t kDlc1B4 = 2U;
+constexpr std::uint8_t kDlc2C0 = 5U;
+
+std::uint32_t nowMs() noexcept { return ram::app().sched.counter; }
+
+void stamp(std::uint8_t src) noexcept
+{
+    ram::CustomSignals& c = ram::app().customSignals;
+    c.lastMs[src] = nowMs();
+    c.srcSeen = static_cast<std::uint16_t>(c.srcSeen | (1U << src));
+}
+
+std::uint16_t be16(const volatile std::uint8_t* d, std::size_t i) noexcept
+{
+    return static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(d[i]) << 8) | d[i + 1U]);
+}
+
+/* Integrate the HELD Q from flowMarkMs up to now, then move the mark. Only
+ * while the held Q is a reading and its frame is younger than kFlowHoldMs:
+ * a sample is not held across a hole in the stream. */
+void flowIntegrate(std::uint32_t now) noexcept
+{
+    ram::CustomSignals& c = ram::app().customSignals;
+    const std::uint32_t dt = now - c.flowMarkMs;
+    c.flowMarkMs = now;
+
+    const bool held = (c.flowQ != ram::kCustomUnknown16)
+                   && ((c.srcSeen & (1U << ram::kSrc1A7)) != 0U)
+                   && ((now - c.lastMs[ram::kSrc1A7]) <= kFlowHoldMs)
+                   && (dt <= kFlowHoldMs);
+    if (!held) {
+        return;
+    }
+    c.flowSumQdt += static_cast<std::uint32_t>(c.flowQ) * dt;
+    c.flowSumDt  += dt;
+}
+
+/* Reload one indicator timer. */
+void indicatorHold(std::uint8_t bit, std::uint8_t idx, std::uint32_t now) noexcept
+{
+    ram::CustomSignals& c = ram::app().customSignals;
+    c.indUntil[idx] = now + kIndicatorHoldMs;
+    c.indActive = static_cast<std::uint8_t>(c.indActive | bit);
+}
+
+/* ---------------------------------------------------------------------------
+ * TPMS constants and helpers (unchanged from feature/tpms-temp).
+ * ------------------------------------------------------------------------- */
 /* ---------------------------------------------------------------------------
  * TPMS over KWP2000. docs/TPMS-POLL-SPEC.md.
  *
@@ -251,43 +266,6 @@ std::uint16_t psiToKpa(std::uint8_t psi) noexcept
 }
 
 
-void setValid(std::uint8_t bit, bool live) noexcept
-{
-    ram::CustomSignals& c = ram::app().customSignals;
-    const std::uint8_t cur = c.valid;
-
-    c.valid = live ? static_cast<std::uint8_t>(cur | bit)
-                   : static_cast<std::uint8_t>(cur & static_cast<std::uint8_t>(~bit));
-}
-
-/* 0xB0 bit 2 means "the 0xB4 frame carries at least one valid field". Every
- * field has its own sentinel (coolant/intake 0xFF, fuel % 0xFF, volts 0xFFFF),
- * so the bit is derived from the fields, not owned by one source. Call after
- * any of them changes. */
-void updateB4Valid() noexcept
-{
-    const ram::CustomSignals& c = ram::app().customSignals;
-    const bool any = (c.coolantBias40 != ram::kCustomUnknown8)
-                  || (c.intakeBias40  != ram::kCustomUnknown8)
-                  || (c.fuelPct       != ram::kCustomUnknown8)
-                  || (c.centiVolts    != ram::kCustomUnknown16);
-    setValid(ram::kValidB4, any);
-}
-
-void setIgnBit(std::uint8_t bit, bool on) noexcept
-{
-    ram::CustomSignals& c = ram::app().customSignals;
-    const std::uint8_t cur = c.ignBits;
-
-    c.ignBits = on ? static_cast<std::uint8_t>(cur | bit)
-                   : static_cast<std::uint8_t>(cur & static_cast<std::uint8_t>(~bit));
-}
-
-std::uint16_t be16(const volatile std::uint8_t* d, std::size_t i) noexcept
-{
-    return static_cast<std::uint16_t>(
-        (static_cast<std::uint16_t>(d[i]) << 8) | d[i + 1U]);
-}
 /* Blank every corner and say so. Used before the first answer and after the
  * data goes stale -- the frame still goes out, because the scheduler's
  * keep-alive cannot be told to skip a slot, so every field has to be honest on
@@ -303,7 +281,6 @@ void tpmsBlank() noexcept
         c.tyreMissTemp[i] = kTpmsExtraMisses;
         c.tyreMissDiag[i] = kTpmsExtraMisses;
     }
-    setValid(ram::kValidB7, false);
 }
 
 /* One failed read (timeout or negative) of the request in flight. */
@@ -346,52 +323,80 @@ void tpmsFail() noexcept
     }
 }
 
+
+
 }  // namespace
 
 /* ============================================================================
- * Prime every signal to its "no value" encoding.
+ * Prime every signal to its "no value" state and every source to dead.
  *
  * MUST run before the first transmit. .bss is zeroed at startup, and zero is a
- * perfectly plausible reading for most of these: a zeroed coolant byte is
- * -40 degC, a zeroed volts field is 0.00 V and a zeroed throttle is a closed
- * pedal. The validity mask would say "not live", but section 4 of the spec is
- * explicit that a consumer may ignore 0xB0 -- so the FIELDS have to be honest
- * on their own too.
+ * plausible reading for most of these (0.0 km, due north, -40 degC). Sources
+ * start UNSEEN, so the first packing writes sentinels whatever the raw bytes
+ * hold; the raw bytes are primed anyway so nothing reads as a reading by
+ * accident.
  * ==========================================================================*/
 void customPrimeSignals() noexcept
 {
     ram::CustomSignals& c = ram::app().customSignals;
+    const std::uint32_t now = nowMs();
 
-    c.speedKph       = ram::kCustomUnknown16;
+    for (std::uint8_t i = 0U; i < ram::kSrcCount; ++i) {
+        c.lastMs[i] = now;
+    }
+    c.srcSeen  = 0U;
+    c.srcAlive = 0U;
+
+    c.ign            = kIgnNoKey;
     c.rpm            = ram::kCustomUnknown16;
-    c.throttlePct    = ram::kCustomUnknown8;
-    c.loadPct        = ram::kCustomLoadUnknown;
-    c.flowLastQ      = ram::kCustomUnknown16;
-    c.coolantBias40  = ram::kCustomUnknown8;
-    c.intakeBias40   = ram::kCustomUnknown8;
-    c.fuelPct        = ram::kCustomUnknown8;
-    c.centiVolts     = ram::kCustomUnknown16;
-    c.outsideDeciC   = ram::kCustomUnknownS16;
-    c.fuelDecilitres = ram::kCustomUnknown16;
-
-    /* A zeroed CustomSignals would publish "0.0 km, due north, 0 deg" as
-     * though the car had said it -- and unlike -40 degC coolant those read as
-     * MORE plausible than a real reading, not less. Priming matters most
-     * exactly where the fabricated value looks reasonable. */
+    c.speedRaw       = ram::kCustomUnknown16;
+    c.lamps0         = 0U;
+    c.lamps1         = 0U;
+    c.lever          = 0xC0U;            /* "selector unavailable" */
+    c.brake          = 0U;
+    c.prndl          = 0U;
+    c.lights         = 0U;
+    c.rapByte        = 0U;
+    c.keyByte        = 0U;
+    c.beltByte       = 0U;
+    c.doorByte       = 0U;
     c.odometerDeciKm = ram::kCustomUnknown24;
-    c.headingDeg     = ram::kCustomUnknown16;
+    c.outsideDeciC   = ram::kCustomUnknownS16;
+    c.volts          = ram::kCustomUnknown8;
+    c.oil            = ram::kCustomUnknown8;
+    c.coolant        = ram::kCustomUnknown8;
+    c.pedal          = ram::kCustomUnknown8;
+    c.parkByte       = 0U;
+    c.minutesOff     = ram::kCustomUnknown8;
+    c.fuelPct        = ram::kCustomUnknown8;
+    c.fuelDecilitres = ram::kCustomUnknown16;
+    c.transfer       = 0x07U;            /* "unavailable" */
     c.compassSector  = ram::kCustomUnknown8;
+    c.headingDeg     = ram::kCustomUnknown16;
+    c.boost          = ram::kCustomUnknown8;
 
-    /* Fuel flow: a zeroed field would claim "0.0 L/h" -- a real reading (fuel
-     * cut on overrun) the car never sent. 0xFFFF is the ONLY absent signal for
-     * 0xBC, there being no validity bit. The window starts now so the first
-     * close is a full second after boot, and no previous frame exists yet. */
-    c.flowDeciLph    = ram::kCustomUnknown16;
-    c.flowSumQdt     = 0U;
-    c.flowSumDt      = 0U;
-    c.flowLastMs     = 0U;
-    c.flowHaveLast   = 0U;
-    c.flowWindowMs   = ram::app().sched.counter;
+    c.runStreak = 0U;
+    c.engineRun = 0U;
+
+    c.flowQ        = ram::kCustomUnknown16;
+    c.flowMarkMs   = now;
+    c.flowSumQdt   = 0U;
+    c.flowSumDt    = 0U;
+    c.flowCentiLph = ram::kCustomUnknown16;
+    c.loadPct      = ram::kCustomUnknown8;
+
+    for (std::uint8_t i = 0U; i < ram::kIndTimers; ++i) {
+        c.indUntil[i] = now;
+    }
+    c.indActive = 0U;
+
+    c.nextTickMs = now + 100U;
+    c.tickCount  = 0U;
+    c.stateAge   = 0U;
+    for (std::uint8_t i = 0U; i < sizeof(c.stateLast); ++i) {
+        c.stateLast[i] = 0U;
+    }
+    c.heartbeat = 0U;
 
     for (std::uint8_t i = 0U; i < ram::kTyreCount; ++i) {
         c.tyreKpa[i] = ram::kCustomUnknown16;
@@ -411,105 +416,110 @@ void customPrimeSignals() noexcept
         c.tyreMissTemp[i] = kTpmsExtraMisses;
         c.tyreMissDiag[i] = kTpmsExtraMisses;
     }
-
-    c.ignBits      = 0U;
-    c.valid        = 0U;    /* nothing is live until the car says so */
-    c.runStreak    = 0U;
-    c.cranking     = 0U;
-    c.heartbeatDiv = 0U;
 }
 
 /* ============================================================================
- * 0x000 b0 -- ignition state.  Evidence: id 0x000, Confirmed.
+ * Source ages. True while `src` has been seen since boot and its last
+ * accepted frame is no older than its limit. Wrap-safe u32 subtraction.
+ * ==========================================================================*/
+bool customSourceAlive(std::uint8_t src, std::uint32_t now) noexcept
+{
+    if (src >= ram::kSrcCount) {
+        return false;
+    }
+    const ram::CustomSignals& c = ram::app().customSignals;
+    if ((c.srcSeen & (1U << src)) == 0U) {
+        return false;
+    }
+    return (now - c.lastMs[src]) <= kSrcLimitMs[src];
+}
+
+std::uint16_t customAgeSources(std::uint32_t now) noexcept
+{
+    ram::CustomSignals& c = ram::app().customSignals;
+    std::uint16_t alive = 0U;
+
+    for (std::uint8_t i = 0U; i < ram::kSrcCount; ++i) {
+        if (customSourceAlive(i, now)) {
+            alive = static_cast<std::uint16_t>(alive | (1U << i));
+        }
+    }
+    c.srcAlive = alive;
+
+    /* A dead 0x002 must not leave "running" latched: revival needs three
+     * fresh frames again. */
+    if ((alive & (1U << ram::kSrc002)) == 0U) {
+        c.runStreak = 0U;
+        c.engineRun = 0U;
+    }
+    return alive;
+}
+
+/* ============================================================================
+ * 0x000 b0 -- ignition ladder. Evidence: id 0x000, Confirmed.
  *
- * Two outputs. The ACC bit of 0xB2, and the crank latch the engine-running
- * state machine in customEngine() reads: cranking must VETO "running", because
- * a crank reaches 410 rpm and would otherwise trip a naive rpm threshold.
- *
- * This is a second reader of a frame the stock decoder already handles --
- * shared::decodeIgnition() derives ram::VehicleState::kFlagAccOn from the same
- * byte with a different rule ((b0 & 0xE0) > 0x10). The two deliberately do not
- * share: that rule is stock behaviour that gates the whole CAN TX block, and
- * the ladder here is the documented one. They agree on every observed value.
- *
- * Validity: 0xB2's bit goes live on the first 0x000 frame of any kind and
- * never goes back -- the ladder has no "unavailable" code, and 0x000 arriving
- * at all is itself the evidence that the source is fitted.
+ * Kept raw; the enum is mapped at packing. Cranking VETOES "running" at once:
+ * a crank reaches 410 rpm. Second reader of a frame the stock decoder handles
+ * (shared::decodeIgnition, kFlagAccOn); the two deliberately do not share.
  * ==========================================================================*/
 void customIgnition(std::uint8_t b0) noexcept
 {
     ram::CustomSignals& c = ram::app().customSignals;
 
-    c.cranking = (b0 == kIgnCrank) ? 1U : 0U;
+    c.ign = b0;
+    stamp(ram::kSrc000);
 
-    if ((b0 == kIgnAcc) || (b0 == kIgnRun) || (b0 == kIgnCrank)) {
-        setIgnBit(ram::kIgnAccOn, true);
-    } else if ((b0 == kIgnWake) || (b0 == kIgnOff)) {
-        setIgnBit(ram::kIgnAccOn, false);
-    } else {
-        /* Outside the documented ladder: hold. */
-    }
-
-    setValid(ram::kValidB2, true);
-
-    /* Cranking clears "running" immediately, without waiting for the next
-     * 0x002. 0x000 runs at 100 ms and 0x002 at 50 ms, so this only ever wins
-     * the race by a frame -- but the cost of being wrong in this direction is
-     * a blanked gauge and in the other direction a false reading. */
-    if (c.cranking != 0U) {
+    if (b0 == kIgnCrank) {
         c.runStreak = 0U;
-        setIgnBit(ram::kIgnEngineRun, false);
+        c.engineRun = 0U;
+    }
+}
+
+std::uint8_t customIgnitionEnum(std::uint8_t b0) noexcept
+{
+    switch (b0) {
+    case kIgnNoKey:  return 0U;
+    case kIgnKeyOff: return 1U;
+    case kIgnAcc:    return 2U;
+    case kIgnRun:    return 3U;
+    case kIgnCrank:  return 4U;
+    default:         return ram::kIgnEnumUnknown;
     }
 }
 
 /* ============================================================================
- * 0x002 -- b0:b1 engine rpm at 1 rpm/count, b2:b3 road speed at raw/128 km/h.
- * Evidence: id 0x002, DLC 8, 50 ms, Confirmed. All-FF = unavailable.
+ * 0x002 -- b0:b1 rpm (1 rpm/count), b2:b3 speed (km/h x128). DLC 8, 50 ms.
+ * Evidence: id 0x002, Confirmed. Each field has its own FFFF sentinel; the
+ * packer never computes FFFF / 128.
  *
- * ONE SENTINEL GOVERNS BOTH FIELDS, which is what the spec says and what the
- * logs show: when the engine is off the whole frame goes to FF, not just the
- * rpm half. So b0:b1 == 0xFFFF invalidates speed too, and the 0xB3 validity
- * bit tracks exactly that.
- *
- * DO NOT compute 0xFFFF / 128 -- that is 512 km/h, a number a consumer accepts.
- *
- * Note this is a second reader of a frame jeepEngine() already handles for the
- * stock 0x32 message, where the rpm pair is copied VERBATIM because the car's
- * unavailable sentinel and the radio's blank-this-field sentinel happen to be
- * the same value. Here the sentinel is explicit instead of lucky.
+ * The engine-running state machine (spec section 5) runs here, per frame:
+ * set after three consecutive frames >= 500 rpm and not cranking; clear at
+ * once below 300 rpm, on FFFF, or cranking; hold in between.
  * ==========================================================================*/
-void customEngine(const volatile std::uint8_t* d) noexcept
+void customEngine(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
 {
+    if (dlc < kDlc002) {
+        return;
+    }
     ram::CustomSignals& c = ram::app().customSignals;
 
-    const std::uint16_t rpmRaw   = be16(d, 0U);
-    const std::uint16_t speedRaw = be16(d, 2U);
-    const bool          rpmValid = (rpmRaw != ram::kCustomUnknown16);
+    const std::uint16_t rpm = be16(d, 0U);
+    c.rpm      = rpm;
+    c.speedRaw = be16(d, 2U);
+    stamp(ram::kSrc002);
 
-    if (!rpmValid) {
-        c.rpm      = ram::kCustomUnknown16;
-        c.speedKph = ram::kCustomUnknown16;
-        setValid(ram::kValidB3, false);
-    } else {
-        c.rpm = rpmRaw;
-        c.speedKph = static_cast<std::uint16_t>(
-            (speedRaw + kSpeedHalf) >> kSpeedShift);
-        setValid(ram::kValidB3, true);
-    }
+    const bool rpmValid = (rpm != ram::kCustomUnknown16);
+    const bool cranking = (c.ign == kIgnCrank);
 
-    /* ---- the engine-running state machine, CUSTOM-TX-SPEC.md section 5 ----
-     * Clear is immediate and unconditional; set needs three consecutive
-     * qualifying frames. The band between kRunClearRpm and kRunSetRpm is
-     * neither, so the bit HOLDS there -- that is the hysteresis. */
-    if (!rpmValid || (rpmRaw < kRunClearRpm) || (c.cranking != 0U)) {
+    if (!rpmValid || (rpm < kRunClearRpm) || cranking) {
         c.runStreak = 0U;
-        setIgnBit(ram::kIgnEngineRun, false);
-    } else if (rpmRaw >= kRunSetRpm) {
+        c.engineRun = 0U;
+    } else if (rpm >= kRunSetRpm) {
         if (c.runStreak < kRunStreakNeeded) {
             c.runStreak = static_cast<std::uint8_t>(c.runStreak + 1U);
         }
         if (c.runStreak >= kRunStreakNeeded) {
-            setIgnBit(ram::kIgnEngineRun, true);
+            c.engineRun = 1U;
         }
     } else {
         /* 300..499 rpm, not cranking: hold both the bit and the streak. */
@@ -517,430 +527,382 @@ void customEngine(const volatile std::uint8_t* d) noexcept
 }
 
 /* ============================================================================
- * 0x003 b4 -- the reverse bit of 0xB2.
+ * 0x003 -- cluster telltales + gear selector. DLC 7, ~450 ms.
+ * Evidence: id 0x003 (b0/b1/b4 = CCN KWP 213F bytes 2/3/7, matched
+ * sample-for-sample). b0, b1 lamp bits; b2 lever (C0 = unavailable); b3 bit0
+ * brake switch; b4 the PRNDL ASCII the cluster shows.
  *
- * b4 is the ASCII code of the PRNDL character the cluster displays, and it is
- * used here rather than b2 for the same reason jeepGearFromAscii() uses it:
- * b2 is a lever bitfield in which every AutoStick manual range also reads
- * 0x84, so b2 cannot separate D from a limited range. For REVERSE specifically
- * either byte would do, but reading the same byte as the gear decoder means
- * the two can never disagree about which gear the car is in.
- *
- * Deliberately NOT derived from ram::VehicleState::kFlagReverse: that flag is
- * computed from b2's low nibble, it gates the stock steering-angle decode and
- * the reverse status line, and it is stock behaviour this build does not
- * touch. Two readers, one frame, no coupling.
+ * A third reader of 0x003: stock jeepReverse() keeps the reverse flag from
+ * b2 and the 0x32 gear from b4. No coupling.
  * ==========================================================================*/
-void customGear(const volatile std::uint8_t* d) noexcept
+void customCluster(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
 {
-    setIgnBit(ram::kIgnReverse, d[4] == kAsciiR);
+    if (dlc < kDlc003) {
+        return;
+    }
+    ram::CustomSignals& c = ram::app().customSignals;
+
+    c.lamps0 = d[0];
+    c.lamps1 = d[1];
+    c.lever  = d[2];
+    c.brake  = d[3];
+    c.prndl  = d[4];
+    stamp(ram::kSrc003);
+}
+
+std::uint8_t customGearEnum(std::uint8_t lever, std::uint8_t ascii) noexcept
+{
+    if (lever == 0xC0U) {
+        return ram::kCustomUnknown8;    /* selector unavailable */
+    }
+    switch (ascii) {
+    case 0x50U: return 0U;   /* P */
+    case 0x52U: return 1U;   /* R */
+    case 0x4EU: return 2U;   /* N */
+    case 0x44U: return 3U;   /* D */
+    case 0x31U: return 4U;   /* AutoStick 1 */
+    case 0x32U: return 5U;   /* AutoStick 2 */
+    case 0x33U: return 6U;   /* AutoStick 3 */
+    case 0x34U: return 7U;   /* AutoStick 4 */
+    default:    return ram::kCustomUnknown8;
+    }
 }
 
 /* ============================================================================
- * 0x014 b4:b5 -- outside air temperature, the value the cluster displays.
- * Evidence: verified on the car (Jeep WK, CAN-B 83.3k): u16 big-endian,
- * degC = raw * 0.01 - 40; `17 3E` = 5950 = 19.50 degC, cluster showed 19.
- * (The old reading of b4 alone as whole degC was wrong: b4 is the HIGH byte.)
+ * 0x006 -- b0 lights and indicators, b1 RAP. DLC 7, 100 ms.
+ * Evidence: id 0x006, all bits Confirmed (owner high-beam and fog runs).
  *
- * 0xFFFF means unavailable (bus waking, module not ready) and a frame shorter
- * than 6 bytes has no b5: both are skipped outright -- previous value AND
- * validity bit left as they were, so a wake-up burst of FFFF cannot blank a
- * good reading. The car already filters the value (follows the sensor while
- * driving, blocks rises when slow or stopped), so there is no filter here.
+ * Bits 3-7 are kept raw. Bits 0/1 feed the debounce (spec section 3.2.1): a
+ * frame with bit 0 (1) set reloads the left (right) 700 ms timer, both bits
+ * in ONE frame (0x1B pattern) reload the hazard timer as well.
  *
- * Published at 0.1 degC (see ambientDeciC) as signed decidegrees; the cluster
- * itself shows whole degrees. Max is raw 0xFFFE = 615.34 degC = 6153, far inside s16 and clear of
- * the 0x8000 sentinel, so no clamp is needed.
+ * LOCK-CONFIRM FLASH. Locking the car flashes 006 b0 = 03 for ~0.2 s, which
+ * the hold would stretch into a 0.7 s "hazard". While 0x000 is alive and
+ * reads 00 (no key) or 01 (key in at OFF) the indicator bits are ignored.
+ * The cost, accepted: hazards switched on with the key out are not shown.
+ * (Owner note from the withdrawn 0xBA LIGHTING draft, 2026-11-07.)
  * ==========================================================================*/
-void customAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
+void customLights(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
 {
+    if (dlc < kDlc006) {
+        return;
+    }
+    ram::CustomSignals& c = ram::app().customSignals;
+    const std::uint32_t now = nowMs();
+    const std::uint8_t  b0  = d[0];
+
+    c.lights  = b0;
+    c.rapByte = d[1];
+    stamp(ram::kSrc006);
+
+    const bool keyOut = customSourceAlive(ram::kSrc000, now)
+                     && ((c.ign == kIgnNoKey) || (c.ign == kIgnKeyOff));
+    if (keyOut) {
+        return;
+    }
+    if ((b0 & kTurnLeftBit) != 0U) {
+        indicatorHold(ram::kIndLeft, 0U, now);
+    }
+    if ((b0 & kTurnRightBit) != 0U) {
+        indicatorHold(ram::kIndRight, 1U, now);
+    }
+    if ((b0 & (kTurnLeftBit | kTurnRightBit)) == (kTurnLeftBit | kTurnRightBit)) {
+        indicatorHold(ram::kIndHazard, 2U, now);
+    }
+}
+
+/* Expire the indicator timers. Called from the 100 ms tick. */
+void customIndicatorTick(std::uint32_t now) noexcept
+{
+    ram::CustomSignals& c = ram::app().customSignals;
+    std::uint8_t active = c.indActive;
+
+    for (std::uint8_t i = 0U; i < ram::kIndTimers; ++i) {
+        const std::uint8_t bit = static_cast<std::uint8_t>(1U << i);
+        if (((active & bit) != 0U)
+            && (static_cast<std::int32_t>(now - c.indUntil[i]) >= 0)) {
+            active = static_cast<std::uint8_t>(active & static_cast<std::uint8_t>(~bit));
+        }
+    }
+    c.indActive = active;
+}
+
+/* ============================================================================
+ * 0x012 b2 bit 1 -- valid SKIM key in the ignition. DLC 6, ~1 s.
+ * Evidence: id 0x012, Confirmed (WCM KWP 2118 live, flips at key pull).
+ * ==========================================================================*/
+void customKey(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
+{
+    if (dlc < kDlc012) {
+        return;
+    }
+    ram::app().customSignals.keyByte = d[2];
+    stamp(ram::kSrc012);
+}
+
+/* ============================================================================
+ * 0x013 -- b0 bit 3 driver belt UNfastened, b2 bits 0-4 FL FR RR RL hatch.
+ * DLC 5, 500 ms. Evidence: id 0x013, Confirmed. Second reader of the frame
+ * stock decodeDoors() uses for 0x12.
+ * ==========================================================================*/
+void customBody(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
+{
+    if (dlc < kDlc013) {
+        return;
+    }
+    ram::CustomSignals& c = ram::app().customSignals;
+    c.beltByte = d[0];
+    c.doorByte = d[2];
+    stamp(ram::kSrc013);
+}
+
+/* ============================================================================
+ * 0x014 -- b0:b2 odometer (0.1 km, FFFFFF n/a), b4:b5 outside air
+ * (u16 BE, raw x 0.01 - 40 degC, FFFF n/a). DLC 7, 100 ms.
+ * Evidence: id 0x014, odometer Confirmed, outside air Probable/high.
+ *
+ * Odometer: verbatim, the car's FFFFFF is the wire sentinel. Outside air:
+ * FFFF or a frame without b5 KEEPS the previous value (the cluster does the
+ * same at wake); before the first usable read it stays 0x8000.
+ * ==========================================================================*/
+void customTrip(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
+{
+    if (dlc < kDlc014) {
+        return;
+    }
+    ram::CustomSignals& c = ram::app().customSignals;
+
+    c.odometerDeciKm = (static_cast<std::uint32_t>(d[0]) << 16)
+                     | (static_cast<std::uint32_t>(d[1]) << 8)
+                     |  static_cast<std::uint32_t>(d[2]);
+
     const std::uint16_t raw = ambientRaw(d);
-    if (!ambientUsable(raw, dlc)) {
-        return;                       /* keep value and validity */
+    if (ambientUsable(raw, dlc)) {
+        c.outsideDeciC = ambientDeciC(raw);
+    }
+    stamp(ram::kSrc014);
+}
+
+/* ============================================================================
+ * 0x015 b1 -- battery volts at 0.1 V/count. DLC 6, 100 ms. Confirmed.
+ * Verbatim; 0xFF would be 25.5 V, above any real reading, and is the sentinel.
+ * b2 is NOT intake air (byte map: unknown temperature); v2 has no intake field.
+ * ==========================================================================*/
+void customVolts(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
+{
+    if (dlc < kDlc015) {
+        return;
+    }
+    ram::app().customSignals.volts = d[1];
+    stamp(ram::kSrc015);
+}
+
+/* ============================================================================
+ * 0x02C -- b0 oil pressure (~4 kPa/count gauge, 00 engine off), b1 coolant
+ * (degC + 40), b2 accelerator pedal (0.4 %/count, 250 = 100 %). DLC 6,
+ * ~500 ms. Evidence: id 0x02C, all Confirmed (oil scale probable; pedal
+ * r = 0.9995 vs the TCM). Oil and coolant verbatim: the car's all-FF
+ * "unavailable" is the wire's 0xFF. The pedal is scaled at packing.
+ * ==========================================================================*/
+void customEngineBay(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
+{
+    if (dlc < kDlc02C) {
+        return;
+    }
+    ram::CustomSignals& c = ram::app().customSignals;
+    c.oil     = d[0];
+    c.coolant = d[1];
+    c.pedal   = d[2];
+    stamp(ram::kSrc02C);
+}
+
+/* ============================================================================
+ * 0x0D0 b0 bit 7 -- parking brake engaged. DLC 2, ~1.15 s. Confirmed.
+ * MASK BIT 7 ONLY at packing: bit 2 (0x04) is "ignition RUN", the released
+ * baseline while driving.
+ * ==========================================================================*/
+void customParkBrake(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
+{
+    if (dlc < kDlc0D0) {
+        return;
+    }
+    ram::app().customSignals.parkByte = d[0];
+    stamp(ram::kSrc0D0);
+}
+
+/* ============================================================================
+ * 0x159 -- b0 minutes since RUN (FF transient = n/a), b4 gate, b5 fuel level
+ * at 0.5 L/count. DLC 6, ~1 s. Evidence: id 0x159, layout Confirmed, litre
+ * scale Probable.
+ *
+ * b4 == 01 means b5 is not a reading: the previous % and litres are HELD (the
+ * gate asserts at key-off and a parked tank does not change). b5 == FF with an
+ * open gate is treated the same way. Before the first reading the primed
+ * sentinels stand; when 0x159 itself goes stale the packer sends sentinels.
+ * ==========================================================================*/
+void customFuel(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
+{
+    if (dlc < kDlc159) {
+        return;
+    }
+    ram::CustomSignals& c = ram::app().customSignals;
+
+    c.minutesOff = d[0];
+    stamp(ram::kSrc159);
+
+    const std::uint8_t b5 = d[5];
+    if ((d[4] == kFuelGateInvalid) || (b5 == ram::kCustomUnknown8)) {
+        return;                                   /* hold */
     }
 
-    ram::app().customSignals.outsideDeciC = ambientDeciC(raw);
-    setValid(ram::kValidB5, true);
-}
-
-/* ============================================================================
- * 0x015 -- b1 battery voltage at 0.1 V/count.
- * Evidence: id 0x015. Voltage Confirmed (125 = 12.5 V key-on, 143-146 running,
- * 103 cranking). b2 is NOT intake air (the byte map lists it as an unknown
- * temperature), so the 0xB4 intake field is always the reserved 0xFF and b2
- * is not decoded here.
- *
- * 0xB4's validity bit means "at least one field is valid" (updateB4Valid);
- * each field also reports its own loss with its own sentinel.
- *
- * This is a third reader of 0x015 -- jeepSteering() takes b4:b5 and, in a benz
- * build, benzVoltage() takes b1.
- * ==========================================================================*/
-void customVoltsIntake(const volatile std::uint8_t* d) noexcept
-{
-    ram::CustomSignals& c = ram::app().customSignals;
-
-    /* Volts has no sentinel on this id: b1 is a live ADC reading in every
-     * capture, including key-off (126 = 12.6 V) and cranking (103 = 10.3 V).
-     * The happy consequence of x10 is that centivolts always move in steps of
-     * ten, so the 0.1 V deadband the spec asks for is satisfied by
-     * construction and needs no code. */
-    c.centiVolts = static_cast<std::uint16_t>(static_cast<std::uint16_t>(d[1])
-                                              * kCentiVoltsPerCount);
-    updateB4Valid();
-}
-
-/* ============================================================================
- * 0x02C b1 -- coolant temperature. THE TRAP IN THIS WHOLE BLOCK.
- *
- * Evidence: id 0x02C, coolant high confidence, scale probable (a cold start
- * climbs 68 -> 132 raw = 28 -> 92 degC). The car already sends degC+40, which
- * is exactly the 0xB4 encoding, so a valid reading is a VERBATIM byte copy.
- *
- * And that was the trap. 0x02C sends all-FF for unavailable, and before the
- * block reserved a code every byte from 0x00 to 0xFF decoded inside the
- * accepted -40..215 degC -- so 0xFF read as a perfectly plausible 215 degC and
- * would have tripped the consumer's overheat alert.
- *
- * 0xFF IS NOW THE RESERVED "not available" CODE for every +40-biased
- * temperature in this block, which makes the verbatim copy correct in BOTH
- * directions: the car sends 0xFF for unavailable and 0xFF is also what this
- * block means by unavailable. The byte needs no special case at all. The
- * sentinel is still TESTED here, but only to drive the validity bit -- 0xB4's
- * bit belongs to this frame alone.
- *
- * 0xB0 bit 2 is NOT owned by coolant: it says the frame has at least one
- * valid field (updateB4Valid), so a dead coolant sensor at engine off does not
- * make the head unit withdraw fuel and volts that are still being sent.
- *
- * The test is b1 rather than the whole frame. The spec says "02C all-FF", and
- * in the logs the frame does go all-FF together -- but the coolant byte itself
- * is the only one this function reads, so testing it directly is both simpler
- * and strictly safer: it also catches a partial sentinel, which a whole-frame
- * test would pass straight through.
- * ==========================================================================*/
-void customCoolant(const volatile std::uint8_t* d) noexcept
-{
-    ram::CustomSignals& c = ram::app().customSignals;
-    const std::uint8_t  b1 = d[1];
-
-    c.coolantBias40 = b1;             /* already degC+40 -- no arithmetic, and
-                                       * 0xFF passes through as the reserved
-                                       * "not available" code */
-    updateB4Valid();
-}
-
-/* ============================================================================
- * 0x0D0 b0 bit 7 -- parking brake engaged.
- * Evidence: id 0x0D0, Confirmed by the 2026-10-13 stationary test
- * (04 00 released -> 84 00 lever pulled).
- *
- * MASK BIT 7 ONLY. b0 bit 2 (the 0x04) was set throughout that session with
- * the brake RELEASED and is the released-state baseline on this truck; every
- * 2015 capture reads a flat 00 00. Testing b0 != 0 would report the brake
- * permanently engaged on a 2026 car and never engaged on a 2015 one.
- *
- * No validity bit of its own: this bit shares 0xB2 with ACC, and 0x0D0 has no
- * "unavailable" encoding. A car that never sends 0x0D0 reports the brake as
- * released, which is the one honest default available in a single bit.
- * ==========================================================================*/
-void customParkBrake(const volatile std::uint8_t* d) noexcept
-{
-    setIgnBit(ram::kIgnParkBrake, (d[0] & kParkBrakeBit) != 0U);
-}
-
-/* ============================================================================
- * 0x159 -- b4 validity gate, b5 fuel level at 0.5 L/count.
- * Evidence: id 0x159, byte layout Confirmed across every log in the repo;
- * the litre scale is probable (the largest valid raw ever recorded is 154 =
- * 77.0 L against this truck's 77.6 L tank -- a percentage scale has no reason
- * to stop at 154/255, a litre scale stops exactly where the tank does).
- *
- * b4 IS A HARD GATE, not a hint: b4 == 1 <-> b5 == 0xFF, with zero exceptions
- * across every log, confirmed by two live transitions (ignition-off settles to
- * 00 FF FF FF 01 FF; key-on flips 05 FF FF FF 01 FF -> 05 FF FF FF 00 4D the
- * instant the key reaches ON). Without the gate, key-off would publish a full
- * tank at raw 255.
- *
- * TWO DESTINATIONS, ONE SOURCE. b5 feeds the litres in 0xB8 and the percentage
- * in 0xB4 byte 2. They share this gate but NOT a validity bit: a gated sample
- * clears 0xB8's bit, and 0xB4's bit stays set while any 0xB4 field is valid
- * (the held fuel % counts, and so does volts).
- *
- * ON THE GATE THE PREVIOUS FIGURE IS HELD, not blanked -- the one field in this
- * block that holds rather than publishing a sentinel. That is deliberate and it
- * is physical: the gate is asserted when the ignition goes off, and a parked
- * car's tank does not change. The last reading is the true one, and 0xB0 bit 5
- * is what tells a consumer it is no longer being refreshed. Before the FIRST
- * reading the primed sentinels stand, so a cold boot still says "unknown"
- * rather than "empty".
- *
- * Slosh needs no filtering here: every b5 change in the 2026 drive is exactly
- * +-1 count, already heavily damped at the sender.
- * ==========================================================================*/
-void customFuel(const volatile std::uint8_t* d) noexcept
-{
-    ram::CustomSignals& c = ram::app().customSignals;
-
-    if (d[4] == kFuelGateInvalid) {
-        setValid(ram::kValidB8, false);
-        updateB4Valid();
-        return;                       /* hold both destinations */
-    }
-
-    const std::uint32_t raw = d[5];
-
-    std::uint32_t pct = (raw * kFuelPctNum + kFuelPctRound) / kFuelPctDen;
+    std::uint32_t pct = (static_cast<std::uint32_t>(b5) * kFuelPctNum
+                         + (kFuelPctDen / 2U)) / kFuelPctDen;
     if (pct > kPercentMax) {
         pct = kPercentMax;
     }
-    c.fuelPct = static_cast<std::uint8_t>(pct);
-
+    c.fuelPct        = static_cast<std::uint8_t>(pct);
     c.fuelDecilitres = static_cast<std::uint16_t>(
-        static_cast<std::uint16_t>(raw) * kFuelDeciPerCount);
-    setValid(ram::kValidB8, true);
-    updateB4Valid();
+        static_cast<std::uint16_t>(b5) * kFuelDeciPerCount);
 }
 
 /* ============================================================================
- * 0x02C b2 -- accelerator pedal position, 0.4 %/count (250 = 100 %).
- * Evidence: byte map, confirmed (r = 0.9995 against the TCM pedal reading).
- * 0x02C is all-FF when unavailable, so b2 == 0xFF publishes the reserved
- * 0xFF rather than 102 %. Values above 250 clamp to 100.
+ * 0x1A7 b0:b1 -- fuel flow Q, L/h = Q / 128; FFFF n/a, 0 = overrun cut.
+ * DLC 6, 100 ms running, ~400 ms key-off. Evidence: id 0x1A7, Confirmed
+ * against the PCM fuel rate (divisor 128, r 0.999).
  *
- * Replaces the earlier 0x2C0 b2 voltage-span guess; 0x2C0 is no longer read.
- * Not engine load -- see customEngineLoad().
+ * SAMPLE AND HOLD. Each frame first integrates the PREVIOUS Q up to now, then
+ * becomes the held value. The 100 ms tick (customFlowClose) integrates the
+ * held value up to the tick and turns the window into a time-weighted mean.
+ * NEVER multiply by rpm, NEVER sum frames: the frame rate changes with engine
+ * state.
  * ==========================================================================*/
-void customThrottle(const volatile std::uint8_t* d) noexcept
+void customFuelFlow(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
 {
-    ram::CustomSignals& c = ram::app().customSignals;
-    const std::uint8_t  b2 = d[2];
-
-    if (b2 == ram::kCustomUnknown8) {
-        c.throttlePct = ram::kCustomUnknown8;
+    if (dlc < kDlc1A7) {
         return;
     }
+    ram::CustomSignals& c = ram::app().customSignals;
+    const std::uint32_t now = nowMs();
 
-    std::uint32_t pct = (static_cast<std::uint32_t>(b2) * kPedalNum + kPedalRound)
-                        / kPedalDen;
-    if (pct > kPercentMax) {
-        pct = kPercentMax;
-    }
-    c.throttlePct = static_cast<std::uint8_t>(pct);
+    flowIntegrate(now);
+    c.flowQ = be16(d, 0U);                        /* FFFF = holds nothing */
+    stamp(ram::kSrc1A7);
 }
 
-/* ============================================================================
- * 0x014 b0:b1:b2 -- odometer, 24-bit, 0.1 km/count.
- * Evidence: id 0x014, odometer Confirmed. FFFFFF means unavailable.
- *
- * VERBATIM, like coolant, and for the same happy reason: the car sends
- * 0.1 km/count big-endian and all-ones for unavailable, and all-ones is
- * already this block's unsigned sentinel. Source encoding and wire encoding
- * coincide, so there is no arithmetic and no special case -- only the validity
- * bit needs the test.
- *
- * DO NOT CONVERT TO WHOLE KILOMETRES. benzTrip() divides by 10 because the
- * Benz plugin's field is km; this block has no such constraint, and throwing
- * away the last digit costs a consumer the ability to measure a 100 m leg.
- *
- * DO NOT HOLD ON UNAVAILABLE either, which is the other thing benzTrip() does.
- * That behaviour exists only because the Benz plugin cannot render a blanked
- * field. This block can: write the sentinel through and clear the bit, which
- * is the plain section 4 "had it, lost it" rule.
- *
- * Full scale is 0xFFFFFE = 1 677 721.4 km, so there is no rollover concern on
- * any vehicle. No deadband either -- one count is 100 m, so the payload
- * changes every ~2.8 s at 130 km/h and less often below that. It is the
- * cheapest slot in the table.
- * ==========================================================================*/
-void customOdometer(const volatile std::uint8_t* d) noexcept
+/* The window close, every 100 ms tick:
+ *   flow (0.01 L/h) = round(Qavg * 100 / 128) = round(25 S / (32 T))
+ *   Qavg            = round(S / T)                    (for the load)
+ * with S = sum(Q dt), T = sum(dt). No counted time: both FFFF. 25 S stays in
+ * u32 while S <= 1e8, which a 100 ms window cannot exceed (65534 x 1200 ms
+ * per interval); a stalled loop is handled by halving both sums. */
+std::uint16_t customFlowClose(std::uint32_t now, std::uint16_t* qAvg) noexcept
 {
     ram::CustomSignals& c = ram::app().customSignals;
 
-    const std::uint32_t raw = (static_cast<std::uint32_t>(d[0]) << 16)
-                            | (static_cast<std::uint32_t>(d[1]) << 8)
-                            |  static_cast<std::uint32_t>(d[2]);
+    flowIntegrate(now);
 
-    c.odometerDeciKm = raw;           /* FFFFFF passes through as the sentinel */
-    setValid(ram::kValidBB, raw != ram::kCustomUnknown24);
-}
-
-/* ============================================================================
- * 0x1B4 -- b0 compass sector, b1 magnetic heading at 2 deg/count.
- * Evidence: id 0x1B4, direction and heading Confirmed; b0 computed as
- * round(b1*2/45) mod 8 agrees in 99.46 % of 2 953 frames.
- *
- * BOTH BYTES ARE SENT even though b0 is derivable from b1. The 0.54 % that
- * disagree are all boundary-quantisation artefacts, and forwarding the car's
- * own sector byte means the consumer's compass rose agrees with the CLUSTER at
- * a boundary instead of flickering against a formula re-derived downstream.
- * One byte, zero extra slots.
- *
- * AND THE TWO ARE NOT CROSS-CHECKED. This looks like the 0x2C0 b2/b6 mirror
- * and is the opposite of it: there, b6 is a true redundant copy and a mismatch
- * means a bad sample; here a mismatch is EXPECTED at sector boundaries, so
- * discarding on mismatch would throw away one sample in two hundred for
- * nothing. The documented case is b0 = 7 with b1 = 146 (292 deg, half a degree
- * shy of the 292.5 deg NW boundary): the formula says 6/W, the car says 7/NW,
- * and the car wins.
- *
- * Heading is converted and the sector is not, because b1's 2 deg/count is not
- * a physical unit and b0 is already an enum. Resolution stays 2 deg -- do not
- * send tenths and invent precision the sender does not have.
- *
- * No deadband, and that is measured rather than assumed: across all 196
- * consecutive stationary (<= 2 km/h) sample pairs the 500 ms heading delta was
- * exactly 0.0 deg -- mean, median, max and stdev all zero. There is no jitter
- * to filter. Moving, the mean |delta| is 1.9 deg per 500 ms, so the slot is
- * claimed at most twice a second and only while actually turning.
- *
- * NOTE 0 IS A REAL HEADING -- due north -- not a blank. The sentinel is 0xFFFF
- * in the heading field and 0xFF in the sector byte.
- *
- * A CONSUMER TRAP THAT CANNOT BE FIXED HERE: 0x1B4 has no unavailable sentinel
- * and DOES NOT STOP AT KEY-OFF. In playback.log the frame keeps transmitting
- * at its normal 500 ms cadence with an unchanged valid heading straight
- * through the 0x000 ignition-off transition and for ~1000 further lines. So
- * this command's validity bit stays 1 across key-off, CORRECTLY -- the compass
- * really is still reporting. Key-off is 0xB2 bit 0, never the compass.
- * ==========================================================================*/
-void customCompass(const volatile std::uint8_t* d) noexcept
-{
-    ram::CustomSignals& c = ram::app().customSignals;
-    const std::uint8_t  b0 = d[0];
-    const std::uint8_t  b1 = d[1];
-
-    /* Both bytes gated together, and the sample rejected WHOLE. Mask nothing:
-     * an out-of-range b0 means the byte no longer means what this decoder
-     * thinks, and truncating it would publish a confident wrong sector. */
-    if ((b0 > kCompassSectorMax) || (b1 > kHeadingCountMax)) {
-        setValid(ram::kValidBD, false);
-        return;                       /* hold both previous values */
-    }
-
-    c.compassSector = b0;             /* already an enum -- verbatim */
-    c.headingDeg    = static_cast<std::uint16_t>(
-        static_cast<std::uint16_t>(b1) * kDegPerCount);
-    setValid(ram::kValidBD, true);
-}
-
-/* ============================================================================
- * 0x1A7 b0:b1 -- fuel-flow RATE, for 0xBC FLOW. docs/CUSTOM-TX-SPEC.md s10.
- * Evidence: id 0x1A7, rate identity probable; the divisor 128 was fitted
- * against the PCM's own fuel-rate reading (OBD 212B) on two drives. It is not
- * verified at the pump -- which is why this stays a rate and the litres stay
- * the radio's job.
- *
- * Q = (b0 << 8) | b1, unsigned big-endian, and it is ALREADY a rate:
- * L/h = Q / 128, so deci-L/h = Q * 10 / 128. Three ways to get this wrong, all of
- * which the byte map warns about:
- *   - NEVER MULTIPLY BY RPM. Q is not per-revolution; that turns a rate into
- *     a number that tracks the tachometer, not the injectors.
- *   - NEVER PLAIN-SUM FRAMES. The frame cadence is ~100 ms running but ~400 ms
- *     at key-off, so a frame count is a clock that changes with engine state.
- *   - Q == 0 IS A REAL READING. Fuel cut on overrun injects nothing; it must
- *     be integrated as zero, not read as "no data". Only 0xFFFF is absent.
- *
- * THE AVERAGE. On each accepted frame, dt = now - lastFlowMs on the box's own
- * free-running millisecond counter. With no previous frame, or dt > 300 ms
- * (three missed frames: the stream stopped and restarted, and a Q held across
- * that hole would be invented), the interval is NOT integrated -- only the
- * stamp is refreshed. Otherwise sumQdt += Q*dt and sumDt += dt. Q is the NEW
- * frame's value applied backwards over the interval that ended at it, which is
- * what makes "600 ms at Q=1600, then 400 ms at Q=0" come out at exactly 6.0 L/h.
- *
- * A 0xFFFF frame is rejected AND clears haveLast, so the interval after it is
- * not counted either: its dt would otherwise be paired with a Q taken from
- * the far side of a hole. customFuelFlowTick() turns the sums into a value.
- *
- * Overflow: Q <= 0xFFFE and each counted dt <= 300 ms; a window collects at
- * most ~1.3 s of dt, so sumQdt <= ~8.6e7 and u32 is 50x clear of 4.29e9 (5x clear after the x10).
- *
- * No DLC check: the dispatcher hands over the data pointer only, like every
- * other custom decoder here. The id is unique to this signal on the WK body
- * bus.
- * ==========================================================================*/
-void customFuelFlow(const volatile std::uint8_t* d) noexcept
-{
-    ram::CustomSignals& c = ram::app().customSignals;
-
-    const std::uint32_t q = (static_cast<std::uint32_t>(d[0]) << 8)
-                          |  static_cast<std::uint32_t>(d[1]);
-    const std::uint32_t now = ram::app().sched.counter;
-
-    if (q == ram::kCustomUnknown16) {
-        c.flowHaveLast = 0U;          /* reject, and void the next interval */
-        c.flowLastQ    = ram::kCustomUnknown16;
-        return;
-    }
-    c.flowLastQ = static_cast<std::uint16_t>(q);
-
-    if (c.flowHaveLast != 0U) {
-        const std::uint32_t dt = now - c.flowLastMs;   /* wraps correctly */
-        if (dt <= kFlowMaxGapMs) {
-            c.flowSumQdt += q * dt;
-            c.flowSumDt  += dt;
-        }
-    }
-    c.flowLastMs   = now;
-    c.flowHaveLast = 1U;
-}
-
-/* Engine load 0..100 %, derived from the injection quantity (see kLoadNum).
- * Unavailable (0xFF, which the decoder rejects as > 100) when rpm is absent or
- * below kLoadMinRpm, or Q is absent or stale. Called from customPublish(). */
-void customEngineLoad() noexcept
-{
-    ram::CustomSignals& c = ram::app().customSignals;
-    const std::uint32_t now = ram::app().sched.counter;
-    const std::uint16_t rpm = c.rpm;
-    const std::uint16_t q   = c.flowLastQ;
-
-    if ((rpm == ram::kCustomUnknown16) || (rpm < kLoadMinRpm)
-        || (q == ram::kCustomUnknown16) || (c.flowHaveLast == 0U)
-        || ((now - c.flowLastMs) > kLoadMaxAgeMs)) {
-        c.loadPct = ram::kCustomLoadUnknown;
-        return;
-    }
-
-    const std::uint32_t den = kLoadDen * static_cast<std::uint32_t>(rpm);
-    std::uint32_t pct = (kLoadNum * static_cast<std::uint32_t>(q) + (den / 2U)) / den;
-    if (pct > kPercentMax) {
-        pct = kPercentMax;
-    }
-    c.loadPct = static_cast<std::uint8_t>(pct);
-}
-
-/* The window close. Every 1000 ms: if any interval was integrated, publish
- * round-half-up(sumQdt * 10 / sumDt / 128) deci-L/h clamped to 0xFFFE (0xFFFF is the
- * sentinel and must not be reachable as a reading); otherwise 0xFFFF. Both sums
- * reset either way. Runs from the 8 ms task so a silent bus -- no 0x1A7 at all
- * -- still turns into 0xFFFF after a second instead of holding the last value
- * for ever. Integer half-up: floor((10*S + 64*T) / (128*T)). The 0.1 L/h
- * resolution is the deadband, as 0.1 V is for volts. */
-void customFuelFlowTick() noexcept
-{
-    ram::CustomSignals& c = ram::app().customSignals;
-    const std::uint32_t now = ram::app().sched.counter;
-
-    if ((now - c.flowWindowMs) < kFlowWindowMs) {
-        return;
-    }
-    c.flowWindowMs = now;
-
-    if (c.flowSumDt > 0U) {
-        /* 10 * sumQdt <= ~8.6e8, inside 2^32 */
-        std::uint32_t v = (10U * c.flowSumQdt + 64U * c.flowSumDt)
-                        / (128U * c.flowSumDt);
-        if (v > kFlowMaxDeci) {
-            v = kFlowMaxDeci;
-        }
-        c.flowDeciLph = static_cast<std::uint16_t>(v);
-    } else {
-        c.flowDeciLph = ram::kCustomUnknown16;
-    }
+    std::uint32_t s = c.flowSumQdt;
+    std::uint32_t t = c.flowSumDt;
     c.flowSumQdt = 0U;
     c.flowSumDt  = 0U;
+
+    while (s > 100000000U) {
+        s >>= 1U;
+        t >>= 1U;
+    }
+    if (t == 0U) {
+        *qAvg = ram::kCustomUnknown16;
+        return ram::kCustomUnknown16;
+    }
+    *qAvg = static_cast<std::uint16_t>((s + (t / 2U)) / t);
+    std::uint32_t v = ((25U * s) + (16U * t)) / (32U * t);
+    if (v > 0xFFFEU) {
+        v = 0xFFFEU;     /* cannot bind (Q <= FFFE gives 51200); kept so the
+                          * sentinel is never reachable as a reading */
+    }
+    return static_cast<std::uint16_t>(v);
+}
+
+/* Engine load % (byte map "Derived values"):
+ *   inj = 1e6 Q / (128 x 180 x rpm) mm3/stroke, load = 100 inj / 90
+ *       = 15625 Q / (324 rpm), rounded half up, clamped to 100.
+ * (43.4 in the byte map is 1e6 / 23040 rounded.) 15625 x 65534 = 1.02e9,
+ * inside u32. 0xFF when rpm is n/a or below 300 (cranking, stalled) or Q is
+ * n/a. */
+std::uint8_t customLoad(std::uint16_t rpm, std::uint16_t qAvg) noexcept
+{
+    if ((rpm == ram::kCustomUnknown16) || (rpm < kRunClearRpm)
+        || (qAvg == ram::kCustomUnknown16)) {
+        return ram::kCustomUnknown8;
+    }
+    const std::uint32_t den = 324U * static_cast<std::uint32_t>(rpm);
+    std::uint32_t pct = ((15625U * static_cast<std::uint32_t>(qAvg)) + (den / 2U)) / den;
+    if (pct > kPercentMax) {
+        pct = kPercentMax;
+    }
+    return static_cast<std::uint8_t>(pct);
+}
+
+/* ============================================================================
+ * 0x1B2 b1 -- transfer-case range: 02 4H, 01 4L, 00 shifting, 07 n/a.
+ * DLC 6, ~1.45 s. Evidence: id 0x1B2, Confirmed (owner 4LO run).
+ * ==========================================================================*/
+void customTransfer(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
+{
+    if (dlc < kDlc1B2) {
+        return;
+    }
+    ram::app().customSignals.transfer = d[1];
+    stamp(ram::kSrc1B2);
+}
+
+std::uint8_t customTransferEnum(std::uint8_t b1) noexcept
+{
+    switch (b1) {
+    case 0x02U: return 1U;   /* 4H */
+    case 0x01U: return 2U;   /* 4L */
+    case 0x00U: return 3U;   /* shifting */
+    default:    return ram::kTransferUnknown;
+    }
+}
+
+/* ============================================================================
+ * 0x1B4 -- b0 8-way sector (0 N .. 7 NW), b1 heading at 2 deg/count.
+ * DLC 6, 500 ms. Confirmed. Both bytes gated TOGETHER: an out-of-range
+ * sample is dropped whole and NOT stamped, so the previous values are held
+ * until the source goes stale (1.5 s). Sector and heading are not
+ * cross-checked: they legitimately disagree at sector boundaries and the
+ * car's sector wins. 0x1B4 does not stop at key-off; it is not liveness.
+ * ==========================================================================*/
+void customCompass(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
+{
+    if (dlc < kDlc1B4) {
+        return;
+    }
+    const std::uint8_t b0 = d[0];
+    const std::uint8_t b1 = d[1];
+    if ((b0 > kCompassSectorMax) || (b1 > kHeadingCountMax)) {
+        return;
+    }
+    ram::CustomSignals& c = ram::app().customSignals;
+    c.compassSector = b0;
+    c.headingDeg    = static_cast<std::uint16_t>(
+        static_cast<std::uint16_t>(b1) * kDegPerCount);
+    stamp(ram::kSrc1B4);
+}
+
+/* ============================================================================
+ * 0x2C0 b4 -- boost / manifold absolute pressure, 8 hPa/count; FE saturated
+ * (~2030 hPa), FF n/a. DLC 8, 100 ms. Confirmed (r 0.999 vs PCM 2103, which
+ * fits 8.00 x b4 + 4 hPa; the +4 is left out, spec open question 6).
+ * ==========================================================================*/
+void customBoost(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept
+{
+    if (dlc < kDlc2C0) {
+        return;
+    }
+    ram::app().customSignals.boost = d[4];
+    stamp(ram::kSrc2C0);
 }
 
 /* ============================================================================
@@ -1086,7 +1048,6 @@ void customTpmsReply(const volatile std::uint8_t* d) noexcept
         }
         c.tpmsPending  = 0U;
         c.tpmsFailures = 0U;
-        setValid(ram::kValidB7, true);
         return;
     }
 

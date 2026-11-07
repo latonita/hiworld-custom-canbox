@@ -1,69 +1,24 @@
 /* ============================================================================
- * custom_tx.hpp -- the custom 0xB0-0xBD telemetry block: decoded WK signals
+ * custom_tx.hpp -- the custom telemetry block, layout v2: decoded WK signals
  * in, Hiworld payloads out. Namespace `logic`.
  *
- * The contract is docs/CUSTOM-TX-SPEC.md. This header is the summary a reader
- * needs to use the module; the spec is the summary they need to CHANGE it.
+ * The contract is docs/TELEMETRY-V2-SPEC.md (section 14 is the wire summary).
+ * This header is the summary a reader needs to use the module.
  *
- * ---------------------------------------------------------------------------
- * WHAT THIS IS FOR
+ *   0xB0 HEARTBEAT  4 B  request lane, 1 Hz     version 02, capability 01BD, counter
+ *   0xB2 STATE      7 B  priority, on change at the next 100 ms tick + every 1 s
+ *   0xB3 FAST      11 B  priority, every 100 ms, always (it is the liveness frame)
+ *   0xB4 ENGINE     5 B  slow lane              coolant, volts, fuel %, fuel litres
+ *   0xB5 AMBIENT    3 B  slow lane              outside air, minutes since RUN
+ *   0xB7 TYRE       5 B  slow lane              one corner (docs/TPMS-POLL-SPEC.md)
+ *   0xB8 TRIP       6 B  slow lane              odometer, compass sector + heading
  *
- * The stock Hiworld protocol carries doors, gear, rpm, reverse, ACC,
- * illumination and steering, and nothing else. The Jeep WK body bus carries
- * coolant, intake air, outside air, battery volts, throttle, fuel level, road
- * speed and the parking brake as well. None of those has a stock field, so a
- * jeep build adds eight commands of its own in the free 0xB0-0xBF range,
- * and the WK compass and odometer go out the same way.
+ * 0xB1, 0xB6 and 0xB9-0xBF are never emitted. Never emit 0xE0 (the head
+ * unit's reboot trigger), 0xFF/0xFE (ACK/NAK) or 0xD2 (cluster text) --
+ * hu_hiworld.cpp static_asserts that.
  *
- * This is a DIVERGENCE from stock, like the Benz emulation and unlike the rest
- * of app/logic/. The six stock TX slots are untouched and still byte-for-byte
- * what 0x08009F2C describes; these eight are additional.
- *
- * ---------------------------------------------------------------------------
- * WHAT IS BUILT, AND WHAT IS DELIBERATELY NOT
- *
- *   0xB0 HEARTBEAT   2 B   protocol revision + validity mask
- *   0xB1 VERSION     --    NOT built: stock 0xF0 already carries it
- *   0xB2 IGNITION    1 B   ACC, engine running, reverse, parking brake
- *   0xB3 DRIVETRAIN  6 B   speed, rpm, engine load, throttle
- *   0xB4 ENGINE      5 B   coolant, intake air, fuel %, volts
- *   0xB5 CLIMATE     2 B   outside air, signed decidegrees
- *   0xB6 BODY        --    NOT built: stock 0x12 already carries the doors
- *   0xB7 TYRE        5 B   ONE tyre: position, kPa, temp, flags (polled)
- *   0xB8 FUEL        4 B   litres, range
- *   0xB9 KEY         --    NOT built: no verified source for SWC on this car
- *   0xBB ODOMETER    3 B   24-bit distance at 0.1 km/count
- *   0xBD COMPASS     3 B   8-way sector + magnetic heading
- *   0xBC FLOW        2 B   fuel flow, u16 0.1 L/h, 1 s average, 0xFFFF = n/a
- *
- * The four that are not built stay RESERVED, and so do the GAPS at 0xBA and
- * 0xBE (0xBC, once reserved for GEAR and struck out, is now FLOW): ../canbus-to-canbox-signal-map.md section 9 has already allocated
- * them to LIGHTING, BODY2 and a spare. 0xBB and 0xBD are that allocation, not
- * free choices -- do not compact the numbering. Those three groups have
- * confirmed sources but no consumer yet, so they are not sent.
- *
- * Never emit 0xE0 (the head unit's own reboot trigger), 0xFF/0xFE (ACK/NAK) or
- * 0xD2 (cluster text) from this range -- hu_hiworld.cpp static_asserts that.
- *
- * ---------------------------------------------------------------------------
- * UNITS AND SENTINELS
- *
- * Multi-byte values are BIG-ENDIAN. Temperatures are one byte biased +40.
- * Every field has an explicit "no value" encoding and holds it until the car
- * has actually reported that signal -- the sentinel block in ram_map.hpp says
- * which, and why outside air is the one field that cannot use all-ones.
- *
- * A consumer therefore has two independent ways to know a number is not real:
- * the field's own sentinel, and the 0xB0 validity mask. Both are published
- * honestly; neither is a substitute for the other.
- *
- * ---------------------------------------------------------------------------
- * KNOWN OPEN ISSUE, NOT THIS MODULE'S TO FIX
- *
- * A consumer that ignores 0xB0 and has no receive timeout will hold the last
- * good value for ever. Every sentinel here is outside the range such a
- * consumer accepts, so it will reject rather than display -- but it will keep
- * showing the stale number. That half is consumer-side work.
+ * Multi-byte values are BIG-ENDIAN. Every field has its own sentinel; a STATE
+ * bit is meaningful only while its source-alive bit in S6 is set.
  * ==========================================================================*/
 
 #ifndef CUSTOM_TX_HPP
@@ -73,28 +28,37 @@
 
 namespace logic {
 
-/* The command bytes, so the heartbeat can name its own slot without the
- * logic layer reaching into the services layer's descriptor table. */
-inline constexpr std::uint8_t kCmdHeartbeat  = 0xB0U;
-inline constexpr std::uint8_t kCmdIgnition   = 0xB2U;
-inline constexpr std::uint8_t kCmdDrivetrain = 0xB3U;
-inline constexpr std::uint8_t kCmdEngine     = 0xB4U;
-inline constexpr std::uint8_t kCmdClimate    = 0xB5U;
-inline constexpr std::uint8_t kCmdTyre       = 0xB7U;
-inline constexpr std::uint8_t kCmdFuel       = 0xB8U;
-inline constexpr std::uint8_t kCmdOdometer   = 0xBBU;
-inline constexpr std::uint8_t kCmdCompass    = 0xBDU;
-inline constexpr std::uint8_t kCmdFlow       = 0xBCU;
+inline constexpr std::uint8_t kCmdHeartbeat = 0xB0U;
+inline constexpr std::uint8_t kCmdState     = 0xB2U;
+inline constexpr std::uint8_t kCmdFast      = 0xB3U;
+inline constexpr std::uint8_t kCmdEngine    = 0xB4U;
+inline constexpr std::uint8_t kCmdAmbient   = 0xB5U;
+inline constexpr std::uint8_t kCmdTyre      = 0xB7U;
+inline constexpr std::uint8_t kCmdTrip      = 0xB8U;
+
+/* 0xB0 bytes 1:2: bit n set = this build sends command 0xB0 + n. */
+inline constexpr std::uint16_t kCustomCapability =
+    static_cast<std::uint16_t>((1U << 0) | (1U << 2) | (1U << 3) | (1U << 4)
+                               | (1U << 5) | (1U << 7) | (1U << 8));
+static_assert(kCustomCapability == 0x01BDU, "capability bitmap");
 
 /* Put the signals and the payloads into their "no value" state. Called once
- * from the boot sequence, BEFORE the first transmit -- a zeroed payload is a
- * set of plausible-looking readings, not a blank. */
+ * from the boot sequence, BEFORE the first transmit. Queues nothing. */
 void customPrimeFrames() noexcept;
 
-/* Repack ram::CustomSignals into the eight payloads and, once a second, ask the
- * head-unit scheduler to send the heartbeat. Called from the 8 ms task,
- * alongside the Benz publisher it is modelled on. */
+/* The 8 ms entry point: runs customTick100() on a drift-free 100 ms divider
+ * of the 1 kHz counter (next += 100), and customTick1000() on every tenth
+ * tick. Called from the 8 ms task right before svc::hu::service(). */
 void customPublish() noexcept;
+
+/* The 100 ms producer: age the sources, expire the indicator timers, close
+ * the fuel-flow window, pack 0xB3 and 0xB2, queue 0xB3 always and 0xB2 when it
+ * changed or 1 s has passed. Public for the host tests. */
+void customTick100() noexcept;
+
+/* The 1 s producer: pack the slow payloads (0xB4 0xB5 0xB7 0xB8) and the
+ * heartbeat, and request the heartbeat. Public for the host tests. */
+void customTick1000() noexcept;
 
 }  // namespace logic
 

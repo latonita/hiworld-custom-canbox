@@ -1,44 +1,26 @@
 /* ============================================================================
- * custom_decode.hpp -- the CAN receive decoders for the custom 0xB0-0xBD
- * telemetry block. Namespace `logic`.
+ * custom_decode.hpp -- the CAN receive decoders for the custom telemetry
+ * block, layout v2 (0xB0 0xB2 0xB3 0xB4 0xB5 0xB7 0xB8). Namespace `logic`.
  *
- * NOT stock decodes, and the mirror image of raise_benz_decode.hpp: these
- * exist because the Jeep WK puts coolant, intake air, outside air, battery
- * volts, throttle, fuel, road speed, the parking brake, the odometer and a
- * compass on CAN-B and the STOCK Hiworld protocol has nowhere to put any of
- * them. A jeep build adds eight head-unit commands of its own instead --
- * docs/CUSTOM-TX-SPEC.md.
+ * NOT stock decodes, and the mirror image of raise_benz_decode.hpp: the Jeep
+ * WK puts far more on CAN-B than the stock Hiworld protocol has room for, so a
+ * jeep build adds head-unit commands of its own -- docs/TELEMETRY-V2-SPEC.md.
  *
  * ---------------------------------------------------------------------------
  * WHERE THIS SITS
  *
- * Jeep WK CAN frames in, ram::CustomSignals out. Its sibling custom_tx.hpp
- * packs those signals into the 0xB0-0xBD payloads; nothing here touches a wire
- * format or an endianness. can_decode.cpp owns the RX ring and the dispatch
- * switch and calls into here, every call site behind
+ * Jeep WK CAN frames in, ram::CustomSignals out: raw bytes plus one timestamp
+ * per CAN source. custom_tx.cpp ages the sources every 100 ms and packs the
+ * payloads, writing a sentinel for every field whose source is dead. Nothing
+ * here touches a wire format. can_decode.cpp owns the RX ring and the
+ * dispatch switch and calls into here, every call site behind
  * `if constexpr (!cfg::kIsBenz)`.
  *
- * ---------------------------------------------------------------------------
- * WHY THESE WRITE ram::CustomSignals AND NOT ram::VehicleState
+ * These are SECOND READERS of frames the stock decoder also handles (0x000,
+ * 0x002, 0x003, 0x006, 0x013, 0x015): neither side may assume the other ran.
  *
- * VehicleState's byte offsets ARE the stock Hiworld wire format: four
- * overlapping message windows over one run of bytes, documented as protocol in
- * ram_map.hpp. Nothing that is not a stock field can go in it. Several of the
- * frames below are already decoded for a stock field too -- 0x002 for rpm,
- * 0x003 for the reverse flag and PRNDL, 0x015 for the steering angle -- so
- * these are SECOND READERS of the same frame, not replacements. Neither side
- * may assume the other ran. The same is true WITHIN this header: customAmbient()
- * and customOdometer() both read 0x014 and are deliberately two functions.
- *
- * ---------------------------------------------------------------------------
- * THE SENTINEL RULE
- *
- * The WK marks "unavailable" with all-ones on several of these ids, and a
- * couple carry an explicit validity byte. Every decoder below therefore does
- * two things on a bad sample: write the field's "no value" encoding (see the
- * sentinel block in ram_map.hpp) and clear that command's bit in the 0xB0
- * validity mask. It never writes a value derived FROM a sentinel -- that is
- * how `0xFF - 40 = 215 degC` reaches a gauge.
+ * Every decoder takes the DLC and rejects (and does not stamp) a frame too
+ * short for the bytes it reads.
  *
  * Evidence for every identifier, byte and scale is in
  * docs/JEEP-WK-CAN-ID-byte-map.md, quoted per function in the .cpp.
@@ -51,60 +33,47 @@
 
 namespace logic {
 
-/* Put every signal in its "no value" state. Called once from the boot
- * sequence, BEFORE the first transmit: a zeroed CustomSignals would otherwise
- * publish 0 degC-40 coolant and 0.0 V as though they were readings. */
+/* Put every signal in its "no value" state and every source to dead. Called
+ * once from the boot sequence, BEFORE the first transmit. */
 void customPrimeSignals() noexcept;
 
-/* 0x000 b0 -- ignition state: ACC bit and the crank latch the engine-running
- * state machine needs. */
-void customIgnition(std::uint8_t b0) noexcept;
+/* ---- the decoders, one per CAN id ---------------------------------------- */
+void customIgnition(std::uint8_t b0) noexcept;                               /* 0x000 */
+void customEngine(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept; /* 0x002 */
+void customCluster(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept;/* 0x003 */
+void customLights(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept; /* 0x006 */
+void customKey(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept;    /* 0x012 */
+void customBody(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept;   /* 0x013 */
+void customTrip(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept;   /* 0x014 */
+void customVolts(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept;  /* 0x015 */
+void customEngineBay(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept; /* 0x02C */
+void customParkBrake(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept; /* 0x0D0 */
+void customFuel(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept;   /* 0x159 */
+void customFuelFlow(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept; /* 0x1A7 */
+void customTransfer(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept; /* 0x1B2 */
+void customCompass(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept; /* 0x1B4 */
+void customBoost(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept;  /* 0x2C0 */
 
-/* 0x002 b0:b1 rpm, b2:b3 road speed, and the engine-running state machine.
- * All-FF in b0:b1 means both are unavailable. */
-void customEngine(const volatile std::uint8_t* d) noexcept;
+/* ---- helpers for the 100 ms producer (custom_tx.cpp) --------------------- */
 
-/* 0x003 b4 -- the ASCII PRNDL character; 'R' is the reverse bit. */
-void customGear(const volatile std::uint8_t* d) noexcept;
+/* One source alive at `now` (seen since boot and within 3x its period). */
+bool customSourceAlive(std::uint8_t src, std::uint32_t now) noexcept;
+/* Refresh ram::CustomSignals::srcAlive for every source and return it. */
+std::uint16_t customAgeSources(std::uint32_t now) noexcept;
+/* Expire the 700 ms indicator hold timers. */
+void customIndicatorTick(std::uint32_t now) noexcept;
+/* Close the 0x1A7 window: flow in 0.01 L/h (0xFFFF n/a), Qavg out. */
+std::uint16_t customFlowClose(std::uint32_t now, std::uint16_t* qAvg) noexcept;
+/* Engine load % from rpm and the window's Qavg; 0xFF n/a. */
+std::uint8_t customLoad(std::uint16_t rpm, std::uint16_t qAvg) noexcept;
 
-/* 0x014 b4:b5 -- outside air, u16 BE, 0.01 degC/count - 40; whole degrees out.
- * 0xFFFF or dlc < 6: skipped, previous value kept. */
-void customAmbient(const volatile std::uint8_t* d, std::uint8_t dlc) noexcept;
-
-/* 0x014 b0:b1:b2 -- odometer, 24-bit, 0.1 km/count.
- *
- * SECOND READER OF THE SAME FRAME as customAmbient(), and deliberately a
- * separate function rather than two fields of one. The two have DIFFERENT
- * GATES and DIFFERENT VALIDITY BITS -- b4 can be suspect while the odometer is
- * live, and the odometer can read unavailable while ambient is fine. One
- * function, one validity bit is the rule that keeps this block's ownership
- * clean; merging them would put two owners on one gate. */
-void customOdometer(const volatile std::uint8_t* d) noexcept;
-
-/* 0x1B4 b0 compass sector, b1 magnetic heading at 2 deg/count. */
-void customCompass(const volatile std::uint8_t* d) noexcept;
-
-/* 0x1A7 b0:b1 -- fuel-flow RATE (L/h = Q/128). Accumulates a time-weighted
- * sum for the 1 s window; publishes nothing itself. One function, one signal:
- * deliberately NOT folded into customFuel() (0x159, the tank LEVEL). */
-void customFuelFlow(const volatile std::uint8_t* d) noexcept;
-
-/* Close the 1000 ms fuel-flow window if it is due. Called every pass of the
- * 8 ms publish task (from customPublish) rather than from the decoder, so a
- * silent bus still turns into 0xFFFF one second later. */
-void customFuelFlowTick() noexcept;
-
-/* Engine load % for 0xB3[4], from the last 0x1A7 Q and the current rpm; 0xFF
- * when either is unavailable. Called from customPublish(). */
-void customEngineLoad() noexcept;
+/* Enum mappings (spec section 3.2). */
+std::uint8_t customIgnitionEnum(std::uint8_t b0) noexcept;   /* 0..4, 7 */
+std::uint8_t customGearEnum(std::uint8_t lever, std::uint8_t ascii) noexcept; /* 0..7, FF */
+std::uint8_t customTransferEnum(std::uint8_t b1) noexcept;   /* 0..3 */
 
 /* ---------------------------------------------------------------------------
  * TPMS -- the one exchange this box INITIATES. docs/TPMS-POLL-SPEC.md.
- *
- * Everything else in this header is a passive reader of a frame the car was
- * going to send anyway. These two are a request/response pair: customTpmsPoll()
- * transmits a KWP readDataByLocalIdentifier to the WCM every 30 s and
- * customTpmsReply() consumes the answer.
  * ------------------------------------------------------------------------- */
 
 /* Run the poll state machine. Called from the 8 ms periodic-TX task, INSIDE
@@ -113,23 +82,6 @@ void customTpmsPoll() noexcept;
 
 /* 0x500 -- the WCM's answer. Also runs the staleness bookkeeping. */
 void customTpmsReply(const volatile std::uint8_t* d) noexcept;
-
-/* 0x015 b1 battery volts (0.1 V/count), b2 intake air temperature. */
-void customVoltsIntake(const volatile std::uint8_t* d) noexcept;
-
-/* 0x02C b1 -- coolant temperature, already degC+40 on the wire. All-FF means
- * unavailable, which is the one sentinel in this block that would otherwise
- * decode as a plausible number. */
-void customCoolant(const volatile std::uint8_t* d) noexcept;
-
-/* 0x0D0 b0 bit7 -- parking brake engaged. */
-void customParkBrake(const volatile std::uint8_t* d) noexcept;
-
-/* 0x159 b4 validity gate, b5 fuel level at 0.5 L/count. */
-void customFuel(const volatile std::uint8_t* d) noexcept;
-
-/* 0x2C0 b2 -- accelerator pedal, with b6 as a redundancy check. */
-void customThrottle(const volatile std::uint8_t* d) noexcept;
 
 }  // namespace logic
 

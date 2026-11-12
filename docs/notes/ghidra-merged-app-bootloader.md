@@ -50,7 +50,7 @@ status builders, the rest of the state struct.
 
 Decoded all 243 app functions via 6 cluster agents (decomp on disk + slot2ram/known_globals maps),
 merged centrally, applied through Ghidra. Result: ~132 functions named + 4 reclassified, ~70 RAM
-globals named with p_<name> propagated to every pointer slot (111 slots), 74 locals renamed. The
+globals named with `p_<name>` propagated to every pointer slot (111 slots), 74 locals renamed. The
 big decoders (83k + 125k), main_loop, scheduler, gate, UART AA55 path, and the CAN/DMA/EXTI/FLASH/
 RCC/TIM/USART/WWDG/NVIC HAL are all DAT_-clean.
 

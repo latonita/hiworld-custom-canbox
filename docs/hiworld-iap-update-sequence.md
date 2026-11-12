@@ -86,16 +86,16 @@ sequenceDiagram
     Note over RadioApp: update_temp = 2, udata_erro = 1, the 1 Hz reset thread exits
     RadioApp->>TTY: 19 78 02 17
     TTY->>BootLdr: 19 78 02 17
-    Note over BootLdr: begin magic. The loader also accepts 20 08 10 20 (begin + switch to 600000 baud); the radio only sends 19 78 02 17
+    Note over BootLdr: begin magic. The loader also accepts 20 08 10 20 (begin + switch to 600000 baud), the radio only sends 19 78 02 17
     BootLdr-->>TTY: B 0x42
     BootLdr-->>TTY: S 0x53
     TTY-->>RadioApp: B 0x42 then S 0x53
-    Note over BootLdr: B = begin accepted; S = send record 0
+    Note over BootLdr: B = begin accepted, S = send record 0
 
     Note over RadioApp: update_temp = 3, updata_temp_data = 1
     RadioApp->>TTY: 137-byte array, 0x88 length prefix stripped, 136 raw bytes on the wire
     TTY->>BootLdr: record 0 header - 16-byte magic 01 09 07 08 00 02 01 07 91 32 47 a4 4e 33 14 f2, 116 opaque bytes (unread), key 68 cc e3 3e at offset 132
-    Note over BootLdr: validates all 16 target magic bytes (12 universal + 4 per-box tag); mismatch -> R then E. The key ships in the clear; the loader de-obfuscates
+    Note over BootLdr: validates all 16 target magic bytes (12 universal + 4 per-box tag), mismatch -> R then E. The key ships in the clear, the loader de-obfuscates
     BootLdr->>Flash: unlock flash (enable HSI), then bulk-erase page 0x08001800 + app region 0x08002000..0x0801F800 in 2 KB steps - once, after record 0
     BootLdr-->>TTY: S 0x53
     TTY-->>RadioApp: S 0x53
@@ -141,7 +141,7 @@ sequenceDiagram
     RadioApp->>User: success dialog, plus broadcast com.xygala.canbus.update.xy with canbusdata 0
     BootLdr->>BootLdr: ResetViaWatchdog (WWDG_CR=0xBF) -> MCU reset
     BootLdr->>BootLdr: reboot: SystemInit -> bootloader main -> fresh U/E window
-    BootLdr-->>TTY: U 0x55 (fresh boot); no answer -> E 0x45
+    BootLdr-->>TTY: U 0x55 (fresh boot), no answer -> E 0x45
     Note over BootLdr: valid-app marker at 0x08001800 == 0x19780217 is present, so the loader launches the app: bl 0x08002202 (reset veneer -> __main -> startup_crt0 -> main). App inherits VTOR=0x08000000, MSP=0x20000600
     BootLdr->>BoxApp: bl 0x08002202
     BoxApp->>TTY: AA 55 11 F0 H1N4JPF20A-220524 DA
@@ -164,8 +164,8 @@ sequenceDiagram
     BootLdr->>TTY: U 0x55 emitted unconditionally
     Note over TTY: no taker - nobody sends 19 78 02 17
     BootLdr->>TTY: E 0x45 - IAP window closed
-    Note over BootLdr: launch is gated on the valid-app marker 0x08001800 == 0x19780217 (written after the last successful flash); if absent the loader stays in the IAP window
-    BootLdr->>BoxApp: bl 0x08002202 (reset veneer -> __main -> startup_crt0 -> main_loop); app inherits VTOR=0x08000000, MSP=0x20000600
+    Note over BootLdr: launch is gated on the valid-app marker 0x08001800 == 0x19780217 (written after the last successful flash), if absent the loader stays in the IAP window
+    BootLdr->>BoxApp: bl 0x08002202 (reset veneer -> __main -> startup_crt0 -> main_loop), app inherits VTOR=0x08000000, MSP=0x20000600
     Note over BoxApp: app init - USART2 at 38400 8N1, CAN1 at the baud stored in 0x0801F800, WWDG armed at about 65.5 ms
     Note over BoxApp: phase 1 - silent on UART and CAN until 3 CAN frames arrive. UART bytes are buffered by the ISR but nothing parses them, so even the 0xE0 reset command is inert here
 ```

@@ -6,7 +6,8 @@ part `H1N4JPF20A`, firmware date code 220524, protocol_id `3009001`/`3009002`.
 This is the half that could not be seen from the Android plugin. It answers:
 which CAN IDs the box reads off the car, what it extracts from them, and how those bytes
 become the `AA 55` UART frames documented in
-[`hiworld-protocol.md`](./hiworld-protocol.md) and [`hiworld-jpf2-jeep.md`](./hiworld-jpf2-jeep.md).
+`hiworld-protocol.md` and `hiworld-jpf2-jeep.md` (head-unit-side analysis notes, kept outside
+this repository).
 
 **Evidence tags**
 

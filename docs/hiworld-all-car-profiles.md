@@ -264,7 +264,7 @@ firmware — the box just picks whichever baud has traffic.
 | 0x08009680 | `can_dispatch_profile1_125k` (FUN_08009680) |
 | 0x08007d44 | dispatch gate: `if *0x2000118F==1 → profile1 else profile0` |
 | 0x08007b6c | init model byte / `profile_sel = config[1]`, default 1, clamp {0,1} |
-| 0x08007b2c / 0x08007b4c | model→baud: `FUN_08007482/44e(0x7D=125 | 0x53=83)` |
+| 0x08007b2c / 0x08007b4c | model→baud: `FUN_08007482/44e(0x7D=125 \| 0x53=83)` |
 | 0x08007482 → 0x08002b76 | CAN bit-timing setup from baud number |
 | 0x080088d8 | `main_loop` boot auto-detect toggle loop |
 | 0x08007a30 | free-running tick → periodic flags (sets toggle flag @0x20001115) |

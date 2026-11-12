@@ -32,13 +32,13 @@ Times are relative to the first instruction of `main_loop` and assume the 1 ms t
 | 4 | — | `call_main` @`0x0800220a` | `push {r4,lr}; bl main_loop; movs r0,#1; pop {r4,pc}` — i.e. `main()` returning 1. |
 | 5 | 0 | `main_loop` @`0x080088d8` | `CPSID i` — interrupts masked for the whole init block. |
 | 6 | 0 | `param_page_load_0801F800` @`0x08002dbc` | Reads 32 config bytes out of flash page **0x0801F800** (one byte per 32-bit word) into RAM `0x200011d0`, and mirrors them into the dirty-shadow at `0x20001220`. |
-| 7 | 0 | `FUN_080032d2` @`0x080032d2` | **Clock + TIM2 + PWR.** `RCC_CFGR.PPRE1 = /4`, `RCC_CFGR.PPRE2 = /4`; `FUN_080027f8` = TIM2 time-base + NVIC; `APB1ENR |= PWREN`. |
+| 7 | 0 | `FUN_080032d2` @`0x080032d2` | **Clock + TIM2 + PWR.** `RCC_CFGR.PPRE1 = /4`, `RCC_CFGR.PPRE2 = /4`; `FUN_080027f8` = TIM2 time-base + NVIC; `APB1ENR \|= PWREN`. |
 | 8 | 0 | `FUN_08008458` @`0x08008458` | **Status GPIOs.** Drives PB5, PC15, PB6, PB4 low, then configures all four as push-pull outputs; PB2 configured as input; `0x200011b5 = 0xFF`. |
 | 9 | 0 | `FUN_080078da` @`0x080078da` | Zeroes the soft real-time clock block `0x200010fc..0x200010ff` (h/m/s/tenths) and calls `FUN_08007898` (month / 12-hour helper). |
 | 10 | 0 | `uart_init_38400_and_version` @`0x08008a54` | `FUN_08008a18` resets the UART frame/ring state (TX slot cursor `0x200011b1 = 6`); `usart2_init(0x9600)` brings up **USART2 @ 38400 8N1 on PA2/PA3** with RXNE IRQ on, TXE IRQ off; copies the 17-byte version string `"H1N4JPF20A-220524"` from flash `0x08008e18` to RAM `0x20001b86`. |
 | 11 | 0 | `FUN_08007b6c` @`0x08007b6c` | Validates/defaults the param block (magic `0xAA` at `0x200011d0`), clamps the profile byte to ≤ 1, builds the CAN **0x416** payload `FE 16 3F FF FF FF FF FF` at `0x20001148`, primes the UART TX data blocks. |
 | 12 | 0 | `FUN_08007b2c` @`0x08007b2c` | **First CAN bring-up.** profile 1 → `FUN_08007482(0x7D)` = 125 kbit/s; profile 0 → `FUN_08007482(0x53)` = 83.333 kbit/s. Inside: `can_init` (clock, PB8/PB9 AF5, BTR, accept-all filter 0, `CAN_IER.FMPIE0`), PB12 configured output and driven **low** (transceiver out of standby), bus state `0x20001139 = 1`, bus timer `0x2000113a = 200` (= 20 s). |
-| 13 | 0 | `wwdg_init` — `reinit_can_filters_and_state` @`0x08002dec` | Clears `RCC_CSR.WWDGRSTF` if set, `APB1ENR |= WWDGEN`, `WWDG_CFR.WDGTB = /4`, `W = 0x7F`, **`WWDG_CR = 0xFF` → watchdog armed, ≈65.5 ms timeout.** |
+| 13 | 0 | `wwdg_init` — `reinit_can_filters_and_state` @`0x08002dec` | Clears `RCC_CSR.WWDGRSTF` if set, `APB1ENR \|= WWDGEN`, `WWDG_CFR.WDGTB = /4`, `W = 0x7F`, **`WWDG_CR = 0xFF` → watchdog armed, ≈65.5 ms timeout.** |
 | 14 | 0 | `main_loop` | `*0x20001190 = 0` (param-rewrite attempt counter), `CPSIE i`. **The clock starts here.** |
 | 15 | 0 … | **Phase 1** | `while (wwdg_kick(), *(u32*)0x20001118 < 3) { … }` — spin until **3 CAN frames** have landed in the RX ring. §5. |
 | 16 | +2.048 s, +4.096 s, … | phase 1 body | Every 2048 ms: set bit6 of the state byte, **toggle the CAN profile**, erase + reprogram flash page `0x0801F800`, re-init CAN at the other baud. At most 8 times. |
